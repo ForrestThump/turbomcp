@@ -322,29 +322,29 @@ Additional crates rounding out the v3 ecosystem:
 ### Complete Framework (Recommended)
 ```toml
 [dependencies]
-turbomcp = "3.1.1"
+turbomcp = "3.1.2"
 ```
 
 ### Specific Layers Only
 ```toml
 [dependencies]
 # For building custom servers
-turbomcp-server = "3.1.1"
-turbomcp-transport = "3.1.1"
+turbomcp-server = "3.1.2"
+turbomcp-transport = "3.1.2"
 
 # For building custom clients
-turbomcp-client = "3.1.1"
-turbomcp-protocol = "3.1.1"
+turbomcp-client = "3.1.2"
+turbomcp-protocol = "3.1.2"
 
 # For low-level protocol work
-turbomcp-protocol = "3.1.1"
+turbomcp-protocol = "3.1.2"
 
 # For a single transport (minimal deps)
-turbomcp-stdio = "3.1.1"
-turbomcp-transport-traits = "3.1.1"
+turbomcp-stdio = "3.1.2"
+turbomcp-transport-traits = "3.1.2"
 
 # For no_std / WASM targets
-turbomcp-core = "3.1.1"
+turbomcp-core = "3.1.2"
 ```
 
 ### Development Tools
