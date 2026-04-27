@@ -3,6 +3,10 @@
 //! This module defines the shared state structure used by Axum applications
 //! to manage MCP services, sessions, and configuration.
 
+// See `mod.rs` — internal subtree references silenced; deprecation fires for
+// external consumers via the source-level `#[deprecated]` attributes.
+#![allow(deprecated)]
+
 use std::sync::Arc;
 
 use tokio::sync::broadcast;
@@ -13,9 +17,17 @@ use crate::tower::SessionManager;
 
 /// Shared state for Axum application using trait objects for flexibility
 ///
+/// **Deprecated since 3.2.0.** This subtree predates the MCP 2025-11-25 Streamable
+/// HTTP rework. Use `turbomcp_server::transport::http` for spec-compliant serving.
+///
 /// This state is cloned for each request handler and provides access
 /// to the MCP service, session management, and configuration.
 #[derive(Clone)]
+#[deprecated(
+    since = "3.2.0",
+    note = "Use `turbomcp_server::transport::http` for spec-compliant Streamable HTTP \
+            (MCP 2025-11-25). This subtree will be removed in a future major release."
+)]
 pub struct McpAppState {
     /// MCP service instance (trait object for flexibility)
     pub service: Arc<dyn McpService>,

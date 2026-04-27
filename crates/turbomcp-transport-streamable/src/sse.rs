@@ -335,24 +335,40 @@ impl Default for SseParser {
     }
 }
 
-/// Generate a unique event ID.
+/// Generate a unique, unguessable event ID.
 ///
-/// Format: `{sequence}-{random}` where sequence is a monotonic counter
-/// and random is entropy for uniqueness across instances.
+/// Format: `{sequence}-{16 hex chars of CSPRNG output}`. The sequence number
+/// preserves monotonic ordering for `Last-Event-ID` resumption while the
+/// random suffix prevents an attacker who learns or guesses an event ID from
+/// forging a `Last-Event-ID` for another stream's session.
+///
+/// Falls back to a fixed-zero suffix only if `getrandom` itself fails — which
+/// the streamable spec already treats as a fail-closed condition for session
+/// IDs (`SessionId::new` panics in that case). Event IDs cannot panic from
+/// non-`std` callers, so they degrade gracefully and emit a `tracing::warn!`.
 #[cfg(feature = "std")]
 pub fn generate_event_id(sequence: u64) -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-
-    // Simple ID: sequence + timestamp low bits for uniqueness
-    format!("{sequence}-{:x}", timestamp & 0xFFFF_FFFF)
+    let mut bytes = [0u8; 8];
+    if getrandom::fill(&mut bytes).is_err() {
+        // CSPRNG unavailable — fall back to a zeroed suffix and emit a warning
+        // through whatever logging the host has configured. We cannot use the
+        // `tracing` crate here directly because this crate intentionally does
+        // not declare it as a dependency (no_std-compatible).
+        eprintln!(
+            "warn: turbomcp-transport-streamable: CSPRNG unavailable for event-id, \
+             falling back to zeroed suffix (event-id resumption may be guessable)"
+        );
+        return format!("{sequence}-0000000000000000");
+    }
+    let suffix = u64::from_be_bytes(bytes);
+    format!("{sequence}-{suffix:016x}")
 }
 
-/// Generate an event ID with explicit timestamp (for no_std).
+/// Generate an event ID with explicit timestamp (for no_std callers).
+///
+/// `no_std` callers cannot reach the host CSPRNG without bringing in a
+/// platform-specific shim, so the timestamp form remains available and is
+/// documented as best-effort uniqueness only — not unguessable.
 pub fn generate_event_id_with_timestamp(sequence: u64, timestamp_ns: u64) -> String {
     format!("{sequence}-{:x}", timestamp_ns & 0xFFFF_FFFF)
 }

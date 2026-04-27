@@ -29,14 +29,36 @@ pub struct WebSocketBidirectionalConfig {
     /// Maximum concurrent elicitations
     pub max_concurrent_elicitations: usize,
 
-    /// Enable compression
+    /// Enable compression.
+    ///
+    /// **Deprecated since 3.2.0.** This is a no-op: tungstenite 0.29 does not
+    /// implement RFC 7692 permessage-deflate, and `connect_async_with_config`
+    /// has no compression knob. The advertised transport capability is hard-set
+    /// to `supports_compression: false` regardless of this field's value.
+    #[deprecated(
+        since = "3.2.0",
+        note = "no-op: tungstenite does not support permessage-deflate. \
+                The transport advertises supports_compression=false unconditionally."
+    )]
     pub enable_compression: bool,
 
-    /// TLS configuration
+    /// TLS configuration.
+    ///
+    /// **Deprecated since 3.2.0.** This is a phantom config: `connect_async_with_config`
+    /// is invoked with the default tungstenite `Connector`, so `cert_path`/`key_path`/
+    /// `skip_verify` are not consulted. Use a `wss://` URL — TLS is negotiated via
+    /// the platform certificate store via tokio-tungstenite's default rustls builder.
+    /// A future release may wire this to `connect_async_tls_with_config(...)`.
+    #[deprecated(
+        since = "3.2.0",
+        note = "phantom config: TLS comes from the wss:// URL using platform certs. \
+                cert_path/key_path/skip_verify are not consulted by this transport."
+    )]
     pub tls_config: Option<TlsConfig>,
 }
 
 impl Default for WebSocketBidirectionalConfig {
+    #[allow(deprecated)] // populating deprecated fields with their no-op defaults
     fn default() -> Self {
         Self {
             url: None,
@@ -104,15 +126,37 @@ impl WebSocketBidirectionalConfig {
         self
     }
 
-    /// Enable compression
+    /// Enable compression.
+    ///
+    /// **Deprecated since 3.2.0** — see [`WebSocketBidirectionalConfig::enable_compression`].
+    /// This builder method is preserved for source compatibility but stores into a
+    /// no-op field; the transport advertises `supports_compression: false` regardless.
+    #[deprecated(
+        since = "3.2.0",
+        note = "no-op: tungstenite does not support permessage-deflate"
+    )]
     pub fn with_compression(mut self, enable: bool) -> Self {
-        self.enable_compression = enable;
+        #[allow(deprecated)]
+        {
+            self.enable_compression = enable;
+        }
         self
     }
 
-    /// Set TLS configuration
+    /// Set TLS configuration.
+    ///
+    /// **Deprecated since 3.2.0** — see [`WebSocketBidirectionalConfig::tls_config`].
+    /// This builder method is preserved for source compatibility; the transport
+    /// uses the default tungstenite/rustls connector and never reads these fields.
+    #[deprecated(
+        since = "3.2.0",
+        note = "phantom config: TLS comes from the wss:// URL using platform certs"
+    )]
     pub fn with_tls_config(mut self, tls_config: TlsConfig) -> Self {
-        self.tls_config = Some(tls_config);
+        #[allow(deprecated)]
+        {
+            self.tls_config = Some(tls_config);
+        }
         self
     }
 }
@@ -258,6 +302,7 @@ impl TlsConfig {
 }
 
 #[cfg(test)]
+#[allow(deprecated)] // tests exercise the deprecated `enable_compression` / `tls_config` fields
 mod tests {
     use super::*;
 

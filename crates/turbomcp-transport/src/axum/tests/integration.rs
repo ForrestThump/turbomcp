@@ -3,6 +3,9 @@
 //! End-to-end integration tests that verify the complete MCP integration
 //! system works correctly, including middleware application and configuration.
 
+// See `axum/mod.rs` — internal subtree references silenced.
+#![allow(deprecated)]
+
 #[cfg(test)]
 mod tests {
     use super::super::common::TestMcpService;

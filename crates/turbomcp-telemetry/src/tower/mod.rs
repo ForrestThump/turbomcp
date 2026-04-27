@@ -25,6 +25,20 @@ pub use service::{TelemetryService, TelemetryServiceFuture};
 use std::time::Duration;
 
 /// Configuration for the telemetry middleware layer
+///
+/// # Cardinality and PII
+///
+/// Several recorded fields can be expensive in OTel backends or expose user data:
+/// - `mcp.request.id` is unique per request (highest possible cardinality).
+/// - `mcp.session.id` / `mcp.user.id` / `mcp.tenant.id` track real principals.
+/// - `mcp.resource.uri` is client-controlled; a hostile client can inflate
+///   cardinality with synthetic URIs.
+///
+/// `mcp.error.message` echoes JSON-RPC error strings verbatim, which routinely
+/// contain user input, file paths, SQL fragments, and backend stack traces. The
+/// layer truncates error messages to [`Self::error_message_max_len`] before
+/// recording; set to `0` to drop entirely. Toggle [`Self::redact_request_id`]
+/// or [`Self::redact_resource_uri`] to omit those high-cardinality fields.
 #[derive(Debug, Clone)]
 pub struct TelemetryLayerConfig {
     /// Service name for span attribution
@@ -39,6 +53,15 @@ pub struct TelemetryLayerConfig {
     pub excluded_methods: Vec<String>,
     /// Whether to propagate trace context from incoming requests
     pub propagate_context: bool,
+    /// Maximum length (in bytes) at which `mcp.error.message` is truncated
+    /// before being recorded on a span. Default `512`. Set to `0` to drop
+    /// error messages entirely.
+    pub error_message_max_len: usize,
+    /// Skip recording `mcp.request.id` to avoid the per-request cardinality
+    /// explosion in cardinality-sensitive backends.
+    pub redact_request_id: bool,
+    /// Skip recording `mcp.resource.uri` (client-controlled, unbounded).
+    pub redact_resource_uri: bool,
 }
 
 impl Default for TelemetryLayerConfig {
@@ -50,6 +73,9 @@ impl Default for TelemetryLayerConfig {
             record_timing: true,
             excluded_methods: Vec::new(),
             propagate_context: true,
+            error_message_max_len: 512,
+            redact_request_id: false,
+            redact_resource_uri: false,
         }
     }
 }
@@ -100,6 +126,28 @@ impl TelemetryLayerConfig {
     #[must_use]
     pub fn propagate_context(mut self, enabled: bool) -> Self {
         self.propagate_context = enabled;
+        self
+    }
+
+    /// Set the maximum length (in bytes) for `mcp.error.message`. Set to `0`
+    /// to drop the field entirely.
+    #[must_use]
+    pub fn error_message_max_len(mut self, max_len: usize) -> Self {
+        self.error_message_max_len = max_len;
+        self
+    }
+
+    /// Skip recording `mcp.request.id` (high cardinality).
+    #[must_use]
+    pub fn redact_request_id(mut self, enabled: bool) -> Self {
+        self.redact_request_id = enabled;
+        self
+    }
+
+    /// Skip recording `mcp.resource.uri` (client-controlled, unbounded).
+    #[must_use]
+    pub fn redact_resource_uri(mut self, enabled: bool) -> Self {
+        self.redact_resource_uri = enabled;
         self
     }
 

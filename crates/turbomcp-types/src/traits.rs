@@ -275,7 +275,7 @@ impl<T: IntoResourceResult, E: Display> IntoResourceResult for Result<T, E> {
     fn into_resource_result(self, uri: &str) -> ResourceResult {
         match self {
             Ok(v) => v.into_resource_result(uri),
-            Err(e) => ResourceResult::text(uri, format!("Error: {}", e)),
+            Err(e) => ResourceResult::text(uri, format!("Error: {e}")),
         }
     }
 }
@@ -345,7 +345,7 @@ impl<T: IntoPromptResult, E: Display> IntoPromptResult for Result<T, E> {
             Ok(v) => v.into_prompt_result(),
             // Note: Errors are converted to user messages for compatibility.
             // For proper error propagation, return McpResult from handlers.
-            Err(e) => PromptResult::user(format!("Error: {}", e)),
+            Err(e) => PromptResult::user(format!("Error: {e}")),
         }
     }
 }

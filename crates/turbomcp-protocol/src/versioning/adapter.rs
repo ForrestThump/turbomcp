@@ -120,11 +120,9 @@ impl VersionAdapter for V2025_06_18Adapter {
     fn filter_capabilities(&self, caps: ServerCapabilities) -> ServerCapabilities {
         let mut caps = caps;
         caps.extensions = None;
-        // Tasks didn't exist in 2025-06-18
-        #[cfg(feature = "experimental-tasks")]
-        {
-            caps.tasks = None;
-        }
+        // Tasks didn't exist in 2025-06-18 - always strip regardless of feature flag,
+        // since the field is always present on `ServerCapabilities`.
+        caps.tasks = None;
         caps
     }
 

@@ -17,14 +17,17 @@
 //!
 //! ```ignore
 //! use turbomcp_grpc::server::McpGrpcServer;
+//! use turbomcp_types::Tool;
 //!
 //! let server = McpGrpcServer::builder()
-//!     .add_tool("hello", |name: String| async move {
-//!         Ok(format!("Hello, {}!", name))
-//!     })
-//!     .build()?;
+//!     .add_tool(Tool { name: "hello".into(), ..Default::default() })
+//!     // .tool_handler(MyHandler) // implements ToolHandler
+//!     .build();
 //!
-//! server.serve("[::1]:50051").await?;
+//! tonic::transport::Server::builder()
+//!     .add_service(server.into_service())
+//!     .serve("[::1]:50051".parse()?)
+//!     .await?;
 //! ```
 //!
 //! ## Client
@@ -32,8 +35,11 @@
 //! ```ignore
 //! use turbomcp_grpc::client::McpGrpcClient;
 //!
-//! let client = McpGrpcClient::connect("http://[::1]:50051").await?;
-//! let result = client.call_tool("hello", json!({"name": "World"})).await?;
+//! let mut client = McpGrpcClient::connect("http://[::1]:50051").await?;
+//! client.initialize().await?;
+//! let result = client
+//!     .call_tool("hello", Some(serde_json::json!({"name": "World"})))
+//!     .await?;
 //! ```
 
 #![cfg_attr(docsrs, feature(doc_cfg))]

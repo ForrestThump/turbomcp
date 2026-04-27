@@ -51,7 +51,6 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 use serde_json::Value;
-use turbomcp_core::PROTOCOL_VERSION;
 use turbomcp_core::{MaybeSend, MaybeSync};
 use turbomcp_protocol::types::{ClientCapabilities, InitializeResult};
 use turbomcp_types::{Implementation, Prompt, Resource, Tool};
@@ -597,12 +596,30 @@ impl MiddlewareStack {
             client_info: Option<Implementation>,
         }
 
+        let params: Option<InitializeParams> = req
+            .params
+            .as_ref()
+            .and_then(|p| serde_json::from_value(p.clone()).ok());
+
+        let negotiated = match super::version_negotiation::negotiate_str(
+            params.as_ref().map(|p| p.protocol_version.as_str()),
+        ) {
+            Ok(v) => v,
+            Err(supported) => {
+                return JsonRpcResponse::error(
+                    req.id.clone(),
+                    error_codes::INVALID_PARAMS,
+                    format!("Unsupported protocolVersion. Supported versions: {supported}"),
+                );
+            }
+        };
+
         let result = InitializeResult {
-            protocol_version: PROTOCOL_VERSION.into(),
+            protocol_version: negotiated,
             capabilities: self.server.capabilities.clone(),
             server_info: self.server.server_info.clone(),
             instructions: self.server.instructions.clone(),
-            _meta: None,
+            meta: None,
         };
 
         match serde_json::to_value(&result) {
@@ -811,7 +828,7 @@ impl MiddlewareStack {
         let _ = headers.set("Access-Control-Allow-Methods", "POST, OPTIONS");
         let _ = headers.set(
             "Access-Control-Allow-Headers",
-            "Content-Type, Authorization, X-Request-ID",
+            "Content-Type, Authorization, X-Request-ID, Mcp-Session-Id, Last-Event-ID",
         );
         let _ = headers.set("Access-Control-Max-Age", "86400");
         headers

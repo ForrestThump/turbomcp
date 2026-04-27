@@ -190,13 +190,20 @@ async fn call_tool(
     // Call the backend
     match state.backend.call_tool(tool_name, arguments).await {
         Ok(result) => (StatusCode::OK, Json(json!({ "result": result }))),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "error": format!("Tool call failed: {e}"),
-                "code": -32603
-            })),
-        ),
+        Err(e) => {
+            // Mirror the upstream JSON-RPC code when known instead of always
+            // collapsing to -32603. A `Method not found` from upstream now
+            // surfaces as `-32601` here (not `-32603`), letting frontend
+            // retry/decision logic key off codes correctly.
+            let code = e.upstream_jsonrpc_code().unwrap_or(-32603);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": format!("Tool call failed: {e}"),
+                    "code": code,
+                })),
+            )
+        }
     }
 }
 
@@ -218,14 +225,17 @@ async fn call_tool_by_name(
     // Call the backend
     match state.backend.call_tool(&name, arguments).await {
         Ok(result) => (StatusCode::OK, Json(json!({ "result": result }))),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "error": format!("Tool call failed: {e}"),
-                "tool": name,
-                "code": -32603
-            })),
-        ),
+        Err(e) => {
+            let code = e.upstream_jsonrpc_code().unwrap_or(-32603);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": format!("Tool call failed: {e}"),
+                    "tool": name,
+                    "code": code,
+                })),
+            )
+        }
     }
 }
 
@@ -265,14 +275,17 @@ async fn read_resource(
     // Call the backend
     match state.backend.read_resource(&uri).await {
         Ok(result) => (StatusCode::OK, Json(json!({ "contents": result.contents }))),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "error": format!("Resource read failed: {e}"),
-                "uri": uri,
-                "code": -32603
-            })),
-        ),
+        Err(e) => {
+            let code = e.upstream_jsonrpc_code().unwrap_or(-32603);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": format!("Resource read failed: {e}"),
+                    "uri": uri,
+                    "code": code,
+                })),
+            )
+        }
     }
 }
 
@@ -327,14 +340,17 @@ async fn get_prompt(
                 "messages": result.messages
             })),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "error": format!("Prompt get failed: {e}"),
-                "prompt": name,
-                "code": -32603
-            })),
-        ),
+        Err(e) => {
+            let code = e.upstream_jsonrpc_code().unwrap_or(-32603);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": format!("Prompt get failed: {e}"),
+                    "prompt": name,
+                    "code": code,
+                })),
+            )
+        }
     }
 }
 

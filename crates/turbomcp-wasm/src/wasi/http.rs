@@ -268,8 +268,8 @@ impl Transport for HttpTransport {
         // Parse response
         let response: JsonRpcResponse<R> = serde_json::from_str(&response_json)?;
 
-        // Check response ID matches
-        if response.id != Some(id) {
+        // Check response ID matches (structural compare; tolerates any spec-valid id type)
+        if !response.id_matches(id) {
             return Err(TransportError::Protocol(format!(
                 "Response ID mismatch: expected {id}, got {:?}",
                 response.id

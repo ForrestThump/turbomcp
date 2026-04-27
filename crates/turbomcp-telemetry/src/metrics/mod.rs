@@ -90,6 +90,7 @@ pub fn record_request(method: &str, status: &str, duration_seconds: f64) {
 }
 
 /// Record request size
+#[allow(clippy::cast_precision_loss)]
 pub fn record_request_size(method: &str, size_bytes: usize) {
     histogram!(
         "mcp_request_size_bytes",
@@ -99,6 +100,7 @@ pub fn record_request_size(method: &str, size_bytes: usize) {
 }
 
 /// Record response size
+#[allow(clippy::cast_precision_loss)]
 pub fn record_response_size(method: &str, size_bytes: usize) {
     histogram!(
         "mcp_response_size_bytes",
@@ -175,6 +177,7 @@ impl McpMetrics {
     }
 
     /// Update active connection count
+    #[allow(clippy::cast_precision_loss)]
     pub fn set_active_connections(transport: &str, count: i64) {
         gauge!(
             "mcp_active_connections",

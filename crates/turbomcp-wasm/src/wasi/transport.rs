@@ -123,15 +123,39 @@ impl<P> JsonRpcNotification<P> {
     }
 }
 
-/// JSON-RPC 2.0 response structure
+/// JSON-RPC 2.0 response structure.
+///
+/// `id` is `serde_json::Value` because per JSON-RPC 2.0 (§5) and MCP, the id
+/// can be `string | number | null` — using `Option<u64>` would silently truncate
+/// negative ids and reject string ids issued by valid servers.
 #[derive(Debug, serde::Deserialize)]
 pub(crate) struct JsonRpcResponse<R> {
+    /// JSON-RPC protocol version. Read by [`Self::is_valid_version`] to enforce `"2.0"`.
     #[allow(dead_code)]
     pub jsonrpc: String,
-    #[allow(dead_code)]
-    pub id: Option<u64>,
+    #[serde(default)]
+    pub id: Option<serde_json::Value>,
     pub result: Option<R>,
     pub error: Option<JsonRpcError>,
+}
+
+impl<R> JsonRpcResponse<R> {
+    /// Structurally compare this response's id against an outgoing numeric id.
+    pub(crate) fn id_matches(&self, expected: u64) -> bool {
+        match self.id.as_ref() {
+            Some(serde_json::Value::Number(n)) => n.as_u64() == Some(expected),
+            _ => false,
+        }
+    }
+
+    /// Check that the JSON-RPC version field is exactly `"2.0"` per §4.
+    /// Pre-3.2.0 the field was `#[allow(dead_code)]` and never validated, so
+    /// a server returning `"jsonrpc": "1.0"` (or omitting it) would round-trip
+    /// successfully. Callers should reject responses where this returns `false`.
+    #[allow(dead_code)]
+    pub(crate) fn is_valid_version(&self) -> bool {
+        self.jsonrpc == "2.0"
+    }
 }
 
 /// JSON-RPC 2.0 error structure

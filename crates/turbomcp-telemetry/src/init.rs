@@ -4,6 +4,8 @@
 
 use crate::{TelemetryConfig, TelemetryError};
 use tracing::info;
+#[cfg(any(feature = "opentelemetry", feature = "prometheus"))]
+use tracing::warn;
 use tracing_subscriber::{
     Registry, filter::EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt,
 };
@@ -77,7 +79,7 @@ pub struct TelemetryGuard {
     #[cfg(feature = "opentelemetry")]
     tracer_provider: Option<opentelemetry_sdk::trace::SdkTracerProvider>,
     #[cfg(feature = "prometheus")]
-    _metrics_handle: Option<MetricsHandle>,
+    metrics_handle: Option<MetricsHandle>,
 }
 
 impl std::fmt::Debug for TelemetryGuard {
@@ -88,6 +90,11 @@ impl std::fmt::Debug for TelemetryGuard {
         debug.field(
             "tracer_provider",
             &self.tracer_provider.as_ref().map(|_| "SdkTracerProvider"),
+        );
+        #[cfg(feature = "prometheus")]
+        debug.field(
+            "metrics_handle",
+            &self.metrics_handle.as_ref().map(|_| "PrometheusHandle"),
         );
         debug.finish()
     }
@@ -145,7 +152,7 @@ impl TelemetryGuard {
             #[cfg(feature = "opentelemetry")]
             tracer_provider,
             #[cfg(feature = "prometheus")]
-            _metrics_handle: metrics_handle,
+            metrics_handle,
         })
     }
 
@@ -175,12 +182,16 @@ impl Drop for TelemetryGuard {
             "Shutting down TurboMCP telemetry"
         );
 
-        // Shutdown OpenTelemetry provider if it was initialized
+        // Shutdown OpenTelemetry provider if it was initialized.
+        // We log via `tracing::error!` for structured-log consumers, but also
+        // mirror to stderr — `Drop` may run after the tracing subscriber has
+        // been deinitialized, in which case the structured log vanishes.
         #[cfg(feature = "opentelemetry")]
         if let Some(ref provider) = self.tracer_provider
             && let Err(e) = provider.shutdown()
         {
             tracing::error!("Error shutting down tracer provider: {e}");
+            eprintln!("turbomcp-telemetry: error shutting down tracer provider: {e}");
         }
     }
 }
@@ -384,7 +395,18 @@ fn init_tracer_provider(
         Sampler::TraceIdRatioBased(config.sampling_ratio)
     };
 
-    // Build the OTLP exporter
+    // Build the OTLP exporter. Only HTTP/protobuf is built into this crate;
+    // surface a clear warning if the user explicitly selected gRPC so they can
+    // either switch endpoints or wire in a `grpc-tonic` exporter themselves.
+    if matches!(config.otlp_protocol, crate::config::OtlpProtocol::Grpc) {
+        warn!(
+            otlp_endpoint = %endpoint,
+            "TelemetryConfig.otlp_protocol = Grpc but this build only ships HTTP/protobuf; \
+             exporting via HTTP. Most :4317 collectors will reject this — point at a :4318 \
+             endpoint or rebuild with a grpc-tonic exporter."
+        );
+    }
+
     let exporter = opentelemetry_otlp::SpanExporter::builder()
         .with_http()
         .with_endpoint(endpoint)
@@ -407,11 +429,22 @@ fn init_tracer_provider(
 #[cfg(feature = "prometheus")]
 fn init_prometheus(config: &TelemetryConfig, port: u16) -> Result<MetricsHandle, TelemetryError> {
     use metrics_exporter_prometheus::PrometheusBuilder;
-    use std::net::SocketAddr;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-    let addr: SocketAddr = format!("0.0.0.0:{port}")
-        .parse()
-        .map_err(|e| TelemetryError::InvalidConfiguration(format!("Invalid port: {e}")))?;
+    let bind_ip = config
+        .prometheus_bind_addr
+        .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    let addr = SocketAddr::new(bind_ip, port);
+
+    if !bind_ip.is_loopback() {
+        warn!(
+            bind_addr = %addr,
+            "Prometheus exporter bound to a non-loopback address with no auth; \
+             every reachable host can scrape raw runtime metrics. Set \
+             `prometheus_bind_addr` to a loopback address or place an \
+             authenticated reverse proxy in front."
+        );
+    }
 
     let handle = PrometheusBuilder::new()
         .with_http_listener(addr)
@@ -419,7 +452,7 @@ fn init_prometheus(config: &TelemetryConfig, port: u16) -> Result<MetricsHandle,
         .map_err(|e| TelemetryError::MetricsError(e.to_string()))?;
 
     info!(
-        port = port,
+        bind_addr = %addr,
         path = %config.prometheus_path,
         "Prometheus metrics endpoint started"
     );

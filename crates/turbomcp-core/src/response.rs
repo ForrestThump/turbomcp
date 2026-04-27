@@ -202,43 +202,36 @@ where
 #[derive(Debug, Clone)]
 pub struct Json<T>(pub T);
 
+/// Pretty-print `value` to JSON and enforce `MAX_MESSAGE_SIZE`.
+///
+/// Returns the encoded JSON on success, or a user-facing error string suitable
+/// for placing into a tool-result error variant.
+fn encode_json_for_tool<T: Serialize>(value: &T) -> Result<String, String> {
+    match serde_json::to_string_pretty(value) {
+        Ok(json) if json.len() > crate::MAX_MESSAGE_SIZE => Err(format!(
+            "JSON output too large: {} bytes exceeds {} byte limit",
+            json.len(),
+            crate::MAX_MESSAGE_SIZE
+        )),
+        Ok(json) => Ok(json),
+        Err(e) => Err(format!("JSON serialization failed: {e}")),
+    }
+}
+
 impl<T: Serialize> IntoToolResponse for Json<T> {
     fn into_tool_response(self) -> CallToolResult {
-        match serde_json::to_string_pretty(&self.0) {
-            Ok(json) => {
-                // Enforce size limit to prevent DoS from oversized responses
-                if json.len() > crate::MAX_MESSAGE_SIZE {
-                    return ToolError::new(format!(
-                        "JSON output too large: {} bytes exceeds {} byte limit",
-                        json.len(),
-                        crate::MAX_MESSAGE_SIZE
-                    ))
-                    .into_tool_response();
-                }
-                CallToolResult::text(json)
-            }
-            Err(e) => {
-                ToolError::new(format!("JSON serialization failed: {e}")).into_tool_response()
-            }
+        match encode_json_for_tool(&self.0) {
+            Ok(json) => CallToolResult::text(json),
+            Err(msg) => ToolError::new(msg).into_tool_response(),
         }
     }
 }
 
 impl<T: Serialize> turbomcp_types::IntoToolResult for Json<T> {
     fn into_tool_result(self) -> turbomcp_types::ToolResult {
-        match serde_json::to_string_pretty(&self.0) {
-            Ok(json) => {
-                // Enforce size limit to prevent DoS from oversized responses
-                if json.len() > crate::MAX_MESSAGE_SIZE {
-                    return turbomcp_types::ToolResult::error(format!(
-                        "JSON output too large: {} bytes exceeds {} byte limit",
-                        json.len(),
-                        crate::MAX_MESSAGE_SIZE
-                    ));
-                }
-                turbomcp_types::ToolResult::text(json)
-            }
-            Err(e) => turbomcp_types::ToolResult::error(format!("JSON serialization failed: {e}")),
+        match encode_json_for_tool(&self.0) {
+            Ok(json) => turbomcp_types::ToolResult::text(json),
+            Err(msg) => turbomcp_types::ToolResult::error(msg),
         }
     }
 }

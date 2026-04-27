@@ -17,7 +17,8 @@ use tracing::debug;
 use uuid::Uuid;
 
 use super::{
-    DEFAULT_PROOF_LIFETIME_SECONDS, DPOP_JWT_TYPE, MAX_CLOCK_SKEW_SECONDS, Result,
+    DEFAULT_CLOCK_SKEW_SECONDS, DEFAULT_PROOF_LIFETIME_SECONDS, DPOP_JWT_TYPE,
+    MAX_CLOCK_SKEW_SECONDS, Result,
     errors::DpopError,
     keys::DpopKeyManager,
     types::{
@@ -71,10 +72,15 @@ impl DpopProofGenerator {
         key_manager: Arc<DpopKeyManager>,
         nonce_tracker: Arc<dyn NonceTracker>,
     ) -> Self {
+        // Default to the *recommended* skew tolerance (60s), not the upper-bound
+        // `MAX_CLOCK_SKEW_SECONDS` (300s). Operators that need a wider window can
+        // override via the `clock_skew_tolerance` field; the hard cap remains
+        // available via `MAX_CLOCK_SKEW_SECONDS` for callers that need it.
+        let _ = MAX_CLOCK_SKEW_SECONDS; // referenced for the doc-link.
         Self {
             key_manager,
             nonce_tracker,
-            clock_skew_tolerance: Duration::from_secs(MAX_CLOCK_SKEW_SECONDS as u64),
+            clock_skew_tolerance: Duration::from_secs(DEFAULT_CLOCK_SKEW_SECONDS as u64),
             proof_lifetime: Duration::from_secs(DEFAULT_PROOF_LIFETIME_SECONDS),
         }
     }

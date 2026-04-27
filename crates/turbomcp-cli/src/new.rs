@@ -90,7 +90,7 @@ description = "{description}"
 turbomcp = "3.0"
 tokio = {{ version = "1", features = ["full"] }}
 serde = {{ version = "1", features = ["derive"] }}
-schemars = "0.8"
+schemars = "1.2"
 "#,
         name = args.name,
         description = description,
@@ -129,7 +129,7 @@ impl {struct_name} {{
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {{
     let server = {struct_name};
-    server.serve_stdio().await?;
+    server.run_stdio().await?;
     Ok(())
 }}
 "#,
@@ -170,7 +170,7 @@ turbomcp = {{ version = "3.0", features = ["http", "auth"] }}
 tokio = {{ version = "1", features = ["full"] }}
 serde = {{ version = "1", features = ["derive"] }}
 serde_json = "1"
-schemars = "0.8"
+schemars = "1.2"
 tracing = "0.1"
 tracing-subscriber = {{ version = "0.3", features = ["env-filter"] }}
 "#,
@@ -301,10 +301,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {{
     // Choose transport based on environment
     if std::env::var("MCP_HTTP").is_ok() {{
         tracing::info!("Starting HTTP server on port 8080...");
-        server.serve_http(8080).await?;
+        server.run_http("0.0.0.0:8080").await?;
     }} else {{
         tracing::info!("Starting STDIO server...");
-        server.serve_stdio().await?;
+        server.run_stdio().await?;
     }}
 
     Ok(())
@@ -350,7 +350,7 @@ turbomcp-wasm = {{ version = "3.0", features = ["macros", "streamable"] }}
 worker = "0.5"
 serde = {{ version = "1", features = ["derive"] }}
 serde_json = "1"
-schemars = "0.8"
+schemars = "1.2"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 
@@ -472,7 +472,7 @@ turbomcp-wasm = {{ version = "3.0", features = ["macros", "streamable", "auth"] 
 worker = "0.5"
 serde = {{ version = "1", features = ["derive"] }}
 serde_json = "1"
-schemars = "0.8"
+schemars = "1.2"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 
@@ -603,7 +603,7 @@ turbomcp-wasm = {{ version = "3.0", features = ["macros", "streamable"] }}
 worker = "0.5"
 serde = {{ version = "1", features = ["derive"] }}
 serde_json = "1"
-schemars = "0.8"
+schemars = "1.2"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 

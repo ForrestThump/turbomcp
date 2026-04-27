@@ -36,7 +36,7 @@
 //!
 //! - `std` - Standard library support (default)
 //! - `json` - JSON codec (default)
-//! - `simd` - SIMD-accelerated JSON (sonic-rs, simd-json)
+//! - `simd` - SIMD-accelerated JSON (sonic-rs)
 //! - `msgpack` - MessagePack binary format
 
 #![cfg_attr(not(feature = "std"), no_std)]
@@ -203,10 +203,12 @@ impl Codec for JsonCodec {
     }
 }
 
-/// SIMD-accelerated JSON codec using sonic-rs
+/// SIMD-accelerated JSON codec using `sonic-rs`
 ///
-/// This codec uses SIMD instructions for faster JSON parsing.
-/// Falls back to standard serde_json on unsupported platforms.
+/// This codec uses SIMD instructions for faster JSON parsing on supported
+/// targets. `sonic-rs` provides its own runtime feature detection and scalar
+/// fallback paths internally; this codec is a thin wrapper and does not add
+/// an additional fallback to `serde_json`.
 #[cfg(feature = "simd")]
 #[cfg_attr(docsrs, doc(cfg(feature = "simd")))]
 #[derive(Debug, Clone, Default)]
@@ -334,6 +336,11 @@ const MAX_STREAMING_BUFFER_SIZE: usize = 1024 * 1024;
 pub struct StreamingJsonDecoder {
     buffer: Vec<u8>,
     max_buffer_size: usize,
+    /// Set to `true` when [`feed`] discarded data due to overflow. The next
+    /// call to [`try_decode`] returns `CodecError::buffer_overflow` and clears
+    /// the flag. Surfaces an explicit error to callers instead of the previous
+    /// silent buffer-clear behaviour.
+    overflowed: bool,
 }
 
 impl Default for StreamingJsonDecoder {
@@ -348,14 +355,19 @@ impl StreamingJsonDecoder {
         Self {
             buffer: Vec::new(),
             max_buffer_size: MAX_STREAMING_BUFFER_SIZE,
+            overflowed: false,
         }
     }
 
-    /// Create with pre-allocated buffer capacity and default limit
+    /// Create with pre-allocated buffer capacity and default limit.
+    ///
+    /// Capacity is clamped to `MAX_STREAMING_BUFFER_SIZE` so that an explicit
+    /// pre-allocation can never trigger the overflow path on its first `feed`.
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            buffer: Vec::with_capacity(capacity),
+            buffer: Vec::with_capacity(capacity.min(MAX_STREAMING_BUFFER_SIZE)),
             max_buffer_size: MAX_STREAMING_BUFFER_SIZE,
+            overflowed: false,
         }
     }
 
@@ -373,35 +385,62 @@ impl StreamingJsonDecoder {
         Self {
             buffer: Vec::new(),
             max_buffer_size: max_size.min(10 * 1024 * 1024), // Cap at 10MB
+            overflowed: false,
         }
     }
 
-    /// Feed data into the decoder
+    /// Feed data into the decoder.
     ///
     /// # Security
     ///
-    /// If the buffer exceeds the maximum size, it will be cleared and
-    /// an error will be returned on the next `try_decode` call.
+    /// If the buffered bytes exceed `max_buffer_size`, the in-flight unfinished
+    /// message (everything before the next newline) is discarded and the
+    /// decoder is marked as `overflowed`. The very next call to [`try_decode`]
+    /// returns [`CodecError::buffer_overflow`] and clears the flag, so the
+    /// caller sees an explicit signal that data was lost (rather than silent
+    /// desync). We attempt to resync at the next newline boundary instead of
+    /// dropping the entire buffer, so a long oversize message followed by a
+    /// well-formed one can still be decoded.
     pub fn feed(&mut self, data: &[u8]) {
         self.buffer.extend_from_slice(data);
 
-        // Enforce buffer size limit to prevent DoS
         if self.buffer.len() > self.max_buffer_size {
             #[cfg(feature = "std")]
             tracing::warn!(
                 buffer_size = self.buffer.len(),
                 max_size = self.max_buffer_size,
-                "Streaming buffer exceeded maximum size, clearing buffer"
+                "streaming buffer exceeded maximum size, dropping in-flight message"
             );
-            self.buffer.clear();
+            // Attempt resync: drop everything up to and including the next
+            // newline so subsequent complete messages remain decodable.
+            if let Some(pos) = self.buffer.iter().position(|&b| b == b'\n') {
+                self.buffer.drain(..=pos);
+            } else {
+                // No delimiter at all — drop everything.
+                self.buffer.clear();
+            }
+            self.overflowed = true;
         }
     }
 
     /// Try to decode the next complete message
     ///
-    /// Returns `Some(T)` if a complete message is available,
-    /// `None` if more data is needed.
+    /// Returns `Some(T)` if a complete message was decoded, or `None` if either
+    /// (a) no full line is buffered yet (more data needed), or (b) an empty/
+    /// whitespace-only line was consumed and skipped. Because case (b) may
+    /// leave subsequent complete messages still buffered, callers that drain
+    /// all available messages should loop on `try_decode` until it returns
+    /// `Ok(None)` *and* `is_empty()` is true (or the buffer length stops
+    /// changing between calls).
     pub fn try_decode<T: DeserializeOwned>(&mut self) -> CodecResult<Option<T>> {
+        // Surface (and clear) a sticky overflow before attempting any decode.
+        // The caller learns explicitly that data was lost and can resync.
+        if self.overflowed {
+            self.overflowed = false;
+            return Err(CodecError::decode(
+                "streaming buffer overflowed; in-flight message discarded",
+            ));
+        }
         // Look for newline delimiter
         if let Some(pos) = self.buffer.iter().position(|&b| b == b'\n') {
             let line = &self.buffer[..pos];

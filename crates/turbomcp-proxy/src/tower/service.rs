@@ -1,5 +1,9 @@
 //! Tower Service implementation for the proxy
 
+// In-tree consumer of the deprecated `turbomcp_transport::axum` subtree.
+// See `cli/commands/serve.rs` for the migration plan.
+#![allow(deprecated)]
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::task::{Context, Poll};

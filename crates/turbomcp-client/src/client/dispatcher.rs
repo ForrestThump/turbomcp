@@ -206,6 +206,25 @@ impl MessageDispatcher {
         rx
     }
 
+    /// Register a response waiter and return a guard whose `Drop` removes the
+    /// entry from the waiter map unless [`WaiterGuard::disarm`] is called.
+    ///
+    /// This is the cancellation-safe variant of [`wait_for_response`]. When
+    /// the awaiting future is dropped mid-flight (common in `tokio::select!`
+    /// or `tokio::time::timeout`), the guard cleans up so the dispatcher
+    /// doesn't leak `oneshot::Sender`s for never-arriving responses.
+    pub fn wait_for_response_guarded(
+        self: &Arc<Self>,
+        id: MessageId,
+    ) -> (oneshot::Receiver<JsonRpcResponse>, WaiterGuard) {
+        let rx = self.wait_for_response(id.clone());
+        let guard = WaiterGuard {
+            dispatcher: Arc::downgrade(self),
+            id: Some(id),
+        };
+        (rx, guard)
+    }
+
     /// Remove a previously-registered response waiter.
     pub fn remove_response_waiter(&self, id: &MessageId) {
         self.response_waiters.lock().remove(id);
@@ -456,6 +475,45 @@ impl std::fmt::Debug for MessageDispatcher {
     }
 }
 
+/// RAII guard that removes a registered response waiter on drop unless
+/// [`Self::disarm`] has been called.
+///
+/// Returned by [`MessageDispatcher::wait_for_response_guarded`]. Designed for
+/// the cancellation-safety case where the awaiter's future is dropped
+/// mid-flight (e.g. `tokio::select!`, `tokio::time::timeout`, structured
+/// concurrency abort) — the dispatcher would otherwise leak the
+/// `oneshot::Sender` until the late response arrives or shutdown clears
+/// the map.
+///
+/// The guard holds a `Weak` reference to the dispatcher so it never extends
+/// the dispatcher's lifetime; if the dispatcher has already shut down, the
+/// drop is a silent no-op.
+pub(super) struct WaiterGuard {
+    dispatcher: std::sync::Weak<MessageDispatcher>,
+    id: Option<MessageId>,
+}
+
+impl WaiterGuard {
+    /// Suppress the auto-cleanup performed by `Drop`.
+    ///
+    /// Call this once the request has run to completion (success, error, or
+    /// timeout — any path where the caller has already taken ownership of
+    /// the response and removed the waiter explicitly).
+    pub(super) fn disarm(mut self) {
+        self.id = None;
+    }
+}
+
+impl Drop for WaiterGuard {
+    fn drop(&mut self) {
+        if let Some(id) = self.id.take()
+            && let Some(dispatcher) = self.dispatcher.upgrade()
+        {
+            dispatcher.remove_response_waiter(&id);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -535,6 +593,44 @@ mod tests {
 
         dispatcher.remove_response_waiter(&id);
         assert!(!dispatcher.response_waiters.lock().contains_key(&id));
+
+        dispatcher.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_waiter_guard_cleans_up_on_drop() {
+        // Simulates a future-drop mid-await (tokio::select! / structured
+        // concurrency abort). Pre-3.2 the waiter would linger in the map.
+        let dispatcher = MessageDispatcher::new(Arc::new(NoopTransport::default()));
+        let id = MessageId::from("req-cancellable");
+
+        {
+            let (_rx, _guard) = dispatcher.wait_for_response_guarded(id.clone());
+            assert!(dispatcher.response_waiters.lock().contains_key(&id));
+            // _guard drops here
+        }
+        assert!(
+            !dispatcher.response_waiters.lock().contains_key(&id),
+            "WaiterGuard::drop should remove the entry"
+        );
+
+        dispatcher.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_waiter_guard_disarm_keeps_entry() {
+        // Verifies the success path (response arrived → caller `disarm`s the
+        // guard) does not re-attempt removal of an already-handled entry.
+        let dispatcher = MessageDispatcher::new(Arc::new(NoopTransport::default()));
+        let id = MessageId::from("req-completed");
+
+        let (_rx, guard) = dispatcher.wait_for_response_guarded(id.clone());
+        assert!(dispatcher.response_waiters.lock().contains_key(&id));
+        guard.disarm();
+        // The waiter map still contains the entry (disarm just suppresses
+        // the auto-cleanup); explicit removal is the caller's job once they
+        // own the response.
+        assert!(dispatcher.response_waiters.lock().contains_key(&id));
 
         dispatcher.shutdown();
     }

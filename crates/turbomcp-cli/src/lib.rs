@@ -91,6 +91,11 @@ pub use formatter::Formatter;
 /// ```
 pub async fn run() -> CliResult<()> {
     let cli = Cli::parse();
+    if cli.connection.is_some() {
+        eprintln!(
+            "Warning: --connection / -c is reserved for future config-file support and currently has no effect."
+        );
+    }
     let executor = CommandExecutor::new(cli.format.clone(), !cli.no_color, cli.verbose);
     executor.execute(cli.command).await
 }

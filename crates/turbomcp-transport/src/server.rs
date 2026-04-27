@@ -172,37 +172,38 @@ impl ServerTransportManager {
         connections.len()
     }
 
-    /// Send a message to all connected clients
+    /// Send a message to all connected clients.
+    ///
+    /// Uses the underlying [`BidirectionalTransport`]'s `send` (which takes
+    /// `&self`), so each fan-out runs concurrently and Arc-shared transports
+    /// are fine. Returns `Ok(())` even when some clients fail; per-client
+    /// failures are logged at `warn` level.
     pub async fn broadcast_to_all(&self, message: TransportMessage) -> TransportResult<()> {
-        let connections = self.connections.read().await;
-        let mut send_futures = Vec::new();
+        // Snapshot the connection list under the read lock, then release it
+        // before awaiting any send — holding `RwLock` across await blocks
+        // `add_client`/`remove_client` for the entire fan-out duration.
+        let snapshot: Vec<(String, Arc<dyn BidirectionalTransport + Send + Sync>)> = {
+            let connections = self.connections.read().await;
+            connections
+                .iter()
+                .map(|(id, t)| (id.clone(), Arc::clone(t)))
+                .collect()
+        };
 
-        for (client_id, transport) in connections.iter() {
-            let client_id = client_id.clone();
-            let _message_clone = message.clone();
-            let _transport_arc = Arc::clone(transport);
+        let send_futures = snapshot.into_iter().map(|(client_id, transport)| {
+            let message = message.clone();
+            async move {
+                let result = transport.send(message).await;
+                (client_id, result)
+            }
+        });
 
-            send_futures.push(async move {
-                // Note: Transport trait requires mutable access for send operations
-                // Current Arc-based design doesn't support concurrent mutable access
-                // This requires architectural enhancement for true bidirectional transport
-                tracing::warn!("Broadcast to client {} skipped - requires mutable transport access", client_id);
-                (client_id, Err::<(), TransportError>(TransportError::NotAvailable(
-                    "Broadcast requires mutable transport access not available in current design".to_string()
-                )))
-            });
-        }
-
-        // Execute all sends concurrently
         let results = futures::future::join_all(send_futures).await;
-
-        // Check for any failures
         for (client_id, result) in results {
             if let Err(e) = result {
-                tracing::warn!("Failed to send broadcast to client {}: {:?}", client_id, e);
+                tracing::warn!("Failed to broadcast to client {}: {:?}", client_id, e);
             }
         }
-
         Ok(())
     }
 }
@@ -213,91 +214,55 @@ impl ServerTransportDispatcher for ServerTransportManager {
         request: ServerJsonRpcRequest,
         ctx: RequestContext,
     ) -> TransportResult<ServerJsonRpcResponse> {
-        // Send to the client specified in the request context, or first available client
-        let connections = self.connections.read().await;
-
-        // Try to find the specific client from context, otherwise use first available
-        let target_transport = if let Some(ref client_id) = ctx.client_id {
-            connections.get(client_id).cloned()
-        } else {
-            connections
-                .iter()
-                .next()
-                .map(|(_, transport)| transport.clone())
+        // Resolve the target client and clone out an `Arc` before awaiting the
+        // send so we don't hold the read lock for the round-trip.
+        let target_transport = {
+            let connections = self.connections.read().await;
+            if let Some(ref client_id) = ctx.client_id {
+                connections.get(client_id).cloned()
+            } else {
+                connections
+                    .iter()
+                    .next()
+                    .map(|(_, transport)| transport.clone())
+            }
         };
 
-        if let Some(_transport_arc) = target_transport {
-            let client_id = ctx.client_id.as_deref().unwrap_or("first_available");
-            tracing::debug!(
-                "Sending server request to client {}: {} {}",
-                client_id,
-                request.method,
-                request.id
-            );
-
-            let _request_message = TransportMessage {
-                id: MessageId::from(Uuid::new_v4()),
-                payload: serde_json::to_vec(&request)
-                    .map_err(|e| {
-                        TransportError::SerializationFailed(format!(
-                            "Failed to serialize server request: {}",
-                            e
-                        ))
-                    })?
-                    .into(),
-                metadata: Default::default(),
-            };
-
-            let _timeout = std::time::Duration::from_millis(self.config.server_request_timeout_ms);
-
-            // Current implementation: Server-initiated requests not supported due to Arc<T> constraint
-            // Transport trait requires mutable access but Arc<T> provides shared immutable access
-            // Architecture supports this via enhanced trait design with interior mutability
-            Err(TransportError::NotAvailable(
-                "Server-initiated requests require enhanced bidirectional transport implementation"
-                    .to_string(),
-            ))
-            /*
-            match transport_arc.send_request(request_message, Some(timeout)).await {
-                Ok(response_message) => {
-                    // Parse the response payload as ServerJsonRpcResponse
-                    match serde_json::from_slice::<ServerJsonRpcResponse>(&response_message.payload) {
-                        Ok(response) => {
-                            tracing::debug!(
-                                "Received response from client {}: {:?}",
-                                client_id,
-                                response
-                            );
-                            Ok(response)
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                "Failed to parse response from client {}: {}",
-                                client_id,
-                                e
-                            );
-                            Err(TransportError::SerializationFailed(format!(
-                                "Failed to parse client response: {}",
-                                e
-                            )))
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::error!(
-                        "Failed to get response from client {}: {}",
-                        client_id,
-                        e
-                    );
-                    Err(e)
-                }
-            }
-            */
-        } else {
-            Err(TransportError::ConnectionFailed(
+        let Some(transport_arc) = target_transport else {
+            return Err(TransportError::ConnectionFailed(
                 "No connected clients available for server request".to_string(),
-            ))
-        }
+            ));
+        };
+
+        let client_id = ctx.client_id.as_deref().unwrap_or("first_available");
+        tracing::debug!(
+            "Sending server request to client {}: {} {}",
+            client_id,
+            request.method,
+            request.id
+        );
+
+        let request_message = TransportMessage {
+            id: MessageId::from(Uuid::new_v4()),
+            payload: serde_json::to_vec(&request)
+                .map_err(|e| {
+                    TransportError::SerializationFailed(format!(
+                        "Failed to serialize server request: {}",
+                        e
+                    ))
+                })?
+                .into(),
+            metadata: Default::default(),
+        };
+
+        let timeout = std::time::Duration::from_millis(self.config.server_request_timeout_ms);
+        let response_message = transport_arc
+            .send_request(request_message, Some(timeout))
+            .await?;
+
+        serde_json::from_slice::<ServerJsonRpcResponse>(&response_message.payload).map_err(|e| {
+            TransportError::SerializationFailed(format!("Failed to parse client response: {}", e))
+        })
     }
 
     fn supports_server_requests(&self) -> bool {
@@ -315,16 +280,19 @@ impl ServerTransportDispatcher for ServerTransportManager {
     async fn send_to_client(
         &self,
         client_id: &str,
-        _message: TransportMessage,
+        message: TransportMessage,
     ) -> TransportResult<()> {
-        if self.is_client_connected(client_id).await {
-            // Implementation would send message to specific client
-            Ok(())
-        } else {
-            Err(TransportError::ConnectionFailed(format!(
+        let transport = {
+            let connections = self.connections.read().await;
+            connections.get(client_id).cloned()
+        };
+
+        match transport {
+            Some(transport) => transport.send(message).await,
+            None => Err(TransportError::ConnectionFailed(format!(
                 "Client {} not connected",
                 client_id
-            )))
+            ))),
         }
     }
 

@@ -35,7 +35,14 @@ pub enum HealthStatus {
     Healthy,
     /// Transport is unhealthy
     Unhealthy,
-    /// Health status is unknown
+    /// Recent successes are accumulating but the success threshold has not
+    /// yet been reached. Surfaced so dashboards can distinguish "starting up"
+    /// from "starting to fail".
+    Recovering,
+    /// Recent failures are accumulating but the failure threshold has not
+    /// yet been reached. Companion to [`Self::Recovering`].
+    Degrading,
+    /// Health status is unknown (no checks have run yet)
     #[default]
     Unknown,
     /// Health check is in progress
@@ -136,6 +143,11 @@ impl HealthChecker {
         &self.health_info
     }
 
+    /// Get the health check configuration
+    pub const fn config(&self) -> &HealthCheckConfig {
+        &self.config
+    }
+
     /// Get the last check result
     pub const fn last_check_result(&self) -> Option<bool> {
         self.last_check_result
@@ -176,7 +188,13 @@ impl HealthChecker {
         Ok(transport.is_connected().await)
     }
 
-    /// Update health status based on check result
+    /// Update health status based on check result.
+    ///
+    /// Below-threshold runs report `Recovering` (success direction) or
+    /// `Degrading` (failure direction) instead of the previous undirected
+    /// `Unknown`, so consumers can tell "still warming up" from "starting to
+    /// fail" without having to peek at the consecutive counters. `Unknown`
+    /// is reserved for the pre-first-check state.
     fn update_health_status(&mut self, success: bool) {
         if success {
             self.health_info.consecutive_successes += 1;
@@ -185,7 +203,7 @@ impl HealthChecker {
             if self.health_info.consecutive_successes >= self.config.success_threshold {
                 self.health_info.status = HealthStatus::Healthy;
             } else {
-                self.health_info.status = HealthStatus::Unknown;
+                self.health_info.status = HealthStatus::Recovering;
             }
         } else {
             self.health_info.consecutive_failures += 1;
@@ -194,7 +212,7 @@ impl HealthChecker {
             if self.health_info.consecutive_failures >= self.config.failure_threshold {
                 self.health_info.status = HealthStatus::Unhealthy;
             } else {
-                self.health_info.status = HealthStatus::Unknown;
+                self.health_info.status = HealthStatus::Degrading;
             }
         }
 
@@ -310,7 +328,10 @@ mod tests {
 
         let result = checker.check_health(&transport).await;
         assert!(result);
-        assert_eq!(checker.health_info().status, HealthStatus::Unknown); // Needs multiple successes
+        // Below the success threshold, status reports Recovering rather than
+        // the undirected Unknown so dashboards can tell "starting to recover"
+        // from "no checks have run".
+        assert_eq!(checker.health_info().status, HealthStatus::Recovering);
         assert_eq!(checker.health_info().consecutive_successes, 1);
     }
 
@@ -338,9 +359,9 @@ mod tests {
             connected: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
         };
 
-        // First success
+        // First success - below threshold, reported as Recovering
         checker.check_health(&transport).await;
-        assert_eq!(checker.health_info().status, HealthStatus::Unknown);
+        assert_eq!(checker.health_info().status, HealthStatus::Recovering);
 
         // Second success - should become healthy
         checker.check_health(&transport).await;

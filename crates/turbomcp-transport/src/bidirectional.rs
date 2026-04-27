@@ -12,7 +12,6 @@ use dashmap::DashMap;
 use tokio::sync::{RwLock, mpsc, oneshot};
 use tokio::time::timeout;
 use turbomcp_protocol::ServerInitiatedType;
-use uuid::Uuid;
 
 // v3.0: Import bidirectional types from core (which re-exports from traits crate)
 use crate::core::{
@@ -23,6 +22,17 @@ use crate::core::{
 // Re-export bidirectional types from the core transport surface.
 pub use crate::core::{ConnectionState, CorrelationContext, MessageDirection};
 
+/// Default cap on the in-flight correlation map.
+///
+/// Past this many pending requests, `send_request` / `start_correlation` reject
+/// with [`TransportError::RateLimitExceeded`] rather than letting the map grow
+/// without bound. Override with
+/// [`BidirectionalTransportWrapper::with_max_correlations`].
+pub const DEFAULT_MAX_CORRELATIONS: usize = 1024;
+
+/// Default interval at which the reaper sweeps expired correlations.
+const DEFAULT_REAPER_INTERVAL: Duration = Duration::from_secs(5);
+
 /// Enhanced bidirectional transport wrapper
 #[derive(Debug)]
 pub struct BidirectionalTransportWrapper<T: Transport> {
@@ -30,8 +40,11 @@ pub struct BidirectionalTransportWrapper<T: Transport> {
     inner: T,
     /// Message direction for this transport
     direction: MessageDirection,
-    /// Active correlations for request-response
+    /// Active correlations for request-response. Keyed by JSON-RPC `id`
+    /// (rendered as a string so `string` and `number` ids share a namespace).
     correlations: Arc<DashMap<String, CorrelationContext>>,
+    /// Maximum simultaneous in-flight correlations.
+    max_correlations: usize,
     /// Server-initiated request handlers (using String keys instead of ServerInitiatedType)
     server_handlers: Arc<DashMap<String, mpsc::Sender<TransportMessage>>>,
     /// Protocol direction validator
@@ -180,6 +193,21 @@ impl MessageRouter {
         self.routes.insert(message_type, Arc::new(handler));
     }
 
+    /// Install a default handler invoked for any message whose type does not
+    /// match a registered route. Without one, unrouted messages get
+    /// [`RouteAction::Forward`].
+    pub fn set_default_handler<F>(&mut self, handler: F)
+    where
+        F: Fn(TransportMessage) -> RouteAction + Send + Sync + 'static,
+    {
+        self.default_handler = Some(Arc::new(handler));
+    }
+
+    /// Remove any installed default handler.
+    pub fn clear_default_handler(&mut self) {
+        self.default_handler = None;
+    }
+
     /// Route a message
     pub fn route(&self, message: &TransportMessage) -> RouteAction {
         // Extract message type from the message
@@ -210,17 +238,63 @@ fn extract_message_type(message: &TransportMessage) -> String {
 }
 
 impl<T: Transport> BidirectionalTransportWrapper<T> {
-    /// Create a new bidirectional transport wrapper
+    /// Create a new bidirectional transport wrapper.
+    ///
+    /// Spawns a background task that sweeps expired correlation entries every
+    /// 5 seconds. The task exits when the wrapper is dropped (the weak
+    /// reference to `correlations` upgrades to `None`).
     pub fn new(inner: T, direction: MessageDirection) -> Self {
+        let correlations = Arc::new(DashMap::new());
+        spawn_correlation_reaper(Arc::downgrade(&correlations), DEFAULT_REAPER_INTERVAL);
         Self {
             inner,
             direction,
-            correlations: Arc::new(DashMap::new()),
+            correlations,
+            max_correlations: DEFAULT_MAX_CORRELATIONS,
             server_handlers: Arc::new(DashMap::new()),
             validator: Arc::new(ProtocolDirectionValidator::new()),
             router: Arc::new(MessageRouter::new()),
             state: Arc::new(RwLock::new(ConnectionState::default())),
         }
+    }
+
+    /// Override the in-flight correlation cap.
+    ///
+    /// Insert paths return [`TransportError::RateLimitExceeded`] once the map
+    /// reaches this size.
+    #[must_use]
+    pub const fn with_max_correlations(mut self, max: usize) -> Self {
+        self.max_correlations = max;
+        self
+    }
+
+    /// Insert a correlation, refusing to grow past the configured cap.
+    ///
+    /// `DashMap::len()` is not synchronized with `insert()`, so a naive
+    /// `if len >= max` check followed by `insert` lets concurrent inserters
+    /// each see room and collectively push the map past the cap. We instead
+    /// insert first and re-check: if we put the map over the cap we remove
+    /// our own entry and reject. This is eventually consistent — under
+    /// contention multiple racers may each back out, but the cap is never
+    /// grossly exceeded and the system self-corrects.
+    fn try_insert_correlation(
+        &self,
+        key: String,
+        context: CorrelationContext,
+    ) -> TransportResult<()> {
+        // Fast-path rejection: if the map is already over cap before we
+        // attempt to insert, skip the insert/remove churn.
+        if self.correlations.len() >= self.max_correlations {
+            return Err(TransportError::RateLimitExceeded);
+        }
+        self.correlations.insert(key.clone(), context);
+        // Post-insert recheck: if we (or a concurrent inserter) just pushed
+        // the map past the cap, remove our own entry and signal the caller.
+        if self.correlations.len() > self.max_correlations {
+            self.correlations.remove(&key);
+            return Err(TransportError::RateLimitExceeded);
+        }
+        Ok(())
     }
 
     /// Register a handler for server-initiated requests
@@ -303,7 +377,11 @@ impl<T: Transport> BidirectionalTransportWrapper<T> {
         Ok(())
     }
 
-    /// Send a server-initiated request
+    /// Send a server-initiated request.
+    ///
+    /// The correlation key is the JSON-RPC `id` of `message` (extracted from
+    /// the payload, falling back to `TransportMessage::id`). Responses are
+    /// matched by inspecting the JSON-RPC `id` field of the inbound payload.
     pub async fn send_server_request(
         &self,
         _request_type: ServerInitiatedType,
@@ -317,31 +395,35 @@ impl<T: Transport> BidirectionalTransportWrapper<T> {
             ));
         }
 
-        // Create correlation context
-        let correlation_id = Uuid::new_v4().to_string();
+        let correlation_key = correlation_key_for(&message);
         let (tx, rx) = oneshot::channel();
-
         let context = CorrelationContext {
-            correlation_id: correlation_id.clone(),
-            request_id: Uuid::new_v4().to_string(),
+            correlation_id: correlation_key.clone(),
+            request_id: correlation_key.clone(),
             response_tx: Some(tx),
             timeout: timeout_duration,
             created_at: std::time::Instant::now(),
         };
 
-        self.correlations.insert(correlation_id.clone(), context);
+        self.try_insert_correlation(correlation_key.clone(), context)?;
 
         // Send the message
-        self.inner.send(message).await?;
+        if let Err(e) = self.inner.send(message).await {
+            self.correlations.remove(&correlation_key);
+            return Err(e);
+        }
 
         // Wait for response with timeout
         match timeout(timeout_duration, rx).await {
             Ok(Ok(response)) => Ok(response),
-            Ok(Err(_)) => Err(TransportError::Internal(
-                "Response channel closed".to_string(),
-            )),
+            Ok(Err(_)) => {
+                self.correlations.remove(&correlation_key);
+                Err(TransportError::Internal(
+                    "Response channel closed".to_string(),
+                ))
+            }
             Err(_) => {
-                self.correlations.remove(&correlation_id);
+                self.correlations.remove(&correlation_key);
                 Err(TransportError::Timeout)
             }
         }
@@ -362,15 +444,57 @@ impl<T: Transport> BidirectionalTransportWrapper<T> {
 
 // Helper functions
 
-/// Extract correlation ID from message
+/// Extract the JSON-RPC `id` from a message and render it as a string.
+///
+/// MCP rides on JSON-RPC 2.0, where responses match requests by `id`
+/// (`string | number`, not just `string`). Both shapes share a namespace here:
+/// numeric ids are rendered via `Display` so `42` and `"42"` collide — which
+/// matches JSON-RPC's actual interop reality (some peers wrap ints as strings).
 fn extract_correlation_id(message: &TransportMessage) -> Option<String> {
-    if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&message.payload) {
-        json.get("correlation_id")
-            .and_then(|id| id.as_str())
-            .map(|s| s.to_string())
-    } else {
-        None
+    extract_jsonrpc_id(&message.payload)
+}
+
+fn extract_jsonrpc_id(payload: &[u8]) -> Option<String> {
+    let json = serde_json::from_slice::<serde_json::Value>(payload).ok()?;
+    let id = json.get("id")?;
+    match id {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        _ => None,
     }
+}
+
+/// Pick a correlation key for an outgoing request.
+///
+/// Prefers the JSON-RPC `id` baked into the payload (so the responder echoes
+/// the same key). Falls back to `TransportMessage::id` rendered as a string —
+/// this only matters for non-JSON-RPC payloads, which shouldn't be flowing
+/// through this wrapper but is preferable to panicking.
+fn correlation_key_for(message: &TransportMessage) -> String {
+    extract_jsonrpc_id(&message.payload).unwrap_or_else(|| message.id.to_string())
+}
+
+/// Background sweeper that drops correlations whose timeout has elapsed.
+///
+/// Holds a `Weak<DashMap<…>>` so the wrapper drop'ing the strong reference
+/// signals the reaper to exit on the next tick.
+fn spawn_correlation_reaper(
+    correlations: std::sync::Weak<DashMap<String, CorrelationContext>>,
+    interval: Duration,
+) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Skip the immediate-fire first tick.
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            let Some(map) = correlations.upgrade() else {
+                break;
+            };
+            map.retain(|_, ctx| !ctx.is_expired());
+        }
+    });
 }
 
 // Implement Transport trait for the wrapper
@@ -443,32 +567,36 @@ impl<T: Transport> BidirectionalTransport for BidirectionalTransportWrapper<T> {
     ) -> Pin<Box<dyn Future<Output = TransportResult<TransportMessage>> + Send + '_>> {
         Box::pin(async move {
             let timeout_duration = timeout_duration.unwrap_or(Duration::from_secs(30));
-
-            // Create correlation
-            let correlation_id = Uuid::new_v4().to_string();
+            let correlation_key = correlation_key_for(&message);
             let (tx, rx) = oneshot::channel();
 
             let context = CorrelationContext {
-                correlation_id: correlation_id.clone(),
-                request_id: Uuid::new_v4().to_string(),
+                correlation_id: correlation_key.clone(),
+                request_id: correlation_key.clone(),
                 response_tx: Some(tx),
                 timeout: timeout_duration,
                 created_at: std::time::Instant::now(),
             };
 
-            self.correlations.insert(correlation_id.clone(), context);
+            self.try_insert_correlation(correlation_key.clone(), context)?;
 
             // Send message
-            self.send(message).await?;
+            if let Err(e) = self.send(message).await {
+                self.correlations.remove(&correlation_key);
+                return Err(e);
+            }
 
             // Wait for response
             match timeout(timeout_duration, rx).await {
                 Ok(Ok(response)) => Ok(response),
-                Ok(Err(_)) => Err(TransportError::Internal(
-                    "Response channel closed".to_string(),
-                )),
+                Ok(Err(_)) => {
+                    self.correlations.remove(&correlation_key);
+                    Err(TransportError::Internal(
+                        "Response channel closed".to_string(),
+                    ))
+                }
                 Err(_) => {
-                    self.correlations.remove(&correlation_id);
+                    self.correlations.remove(&correlation_key);
                     Err(TransportError::Timeout)
                 }
             }
@@ -482,14 +610,12 @@ impl<T: Transport> BidirectionalTransport for BidirectionalTransportWrapper<T> {
         Box::pin(async move {
             let context = CorrelationContext {
                 correlation_id: correlation_id.clone(),
-                request_id: Uuid::new_v4().to_string(),
+                request_id: correlation_id.clone(),
                 response_tx: None,
                 timeout: Duration::from_secs(30),
                 created_at: std::time::Instant::now(),
             };
-
-            self.correlations.insert(correlation_id, context);
-            Ok(())
+            self.try_insert_correlation(correlation_id, context)
         })
     }
 
@@ -552,5 +678,53 @@ mod tests {
         assert!(!state.server_initiated_enabled);
         assert!(state.active_server_requests.is_empty());
         assert!(state.pending_elicitations.is_empty());
+    }
+
+    #[test]
+    fn test_extract_correlation_id_reads_jsonrpc_id() {
+        // Numeric id — must be rendered as a string for the map key.
+        let msg = TransportMessage {
+            id: turbomcp_protocol::MessageId::from("any-transport-id"),
+            payload: br#"{"jsonrpc":"2.0","id":42,"result":{}}"#.to_vec().into(),
+            metadata: Default::default(),
+        };
+        assert_eq!(extract_correlation_id(&msg), Some("42".to_string()));
+
+        // String id — same.
+        let msg = TransportMessage {
+            id: turbomcp_protocol::MessageId::from("any-transport-id"),
+            payload: br#"{"jsonrpc":"2.0","id":"req-7","result":{}}"#.to_vec().into(),
+            metadata: Default::default(),
+        };
+        assert_eq!(extract_correlation_id(&msg), Some("req-7".to_string()));
+
+        // Missing id — None.
+        let msg = TransportMessage {
+            id: turbomcp_protocol::MessageId::from("x"),
+            payload: br#"{"jsonrpc":"2.0","method":"foo"}"#.to_vec().into(),
+            metadata: Default::default(),
+        };
+        assert_eq!(extract_correlation_id(&msg), None);
+
+        // The legacy bespoke `correlation_id` field must NOT be honoured —
+        // that's what made the response path silently miss every match.
+        let msg = TransportMessage {
+            id: turbomcp_protocol::MessageId::from("x"),
+            payload: br#"{"correlation_id":"legacy","method":"foo"}"#.to_vec().into(),
+            metadata: Default::default(),
+        };
+        assert_eq!(extract_correlation_id(&msg), None);
+    }
+
+    #[test]
+    fn test_correlation_key_for_prefers_payload_id() {
+        let msg = TransportMessage {
+            id: turbomcp_protocol::MessageId::from("transport-id"),
+            payload: br#"{"jsonrpc":"2.0","id":"jsonrpc-id","method":"x"}"#
+                .to_vec()
+                .into(),
+            metadata: Default::default(),
+        };
+        assert_eq!(correlation_key_for(&msg), "jsonrpc-id".to_string());
     }
 }

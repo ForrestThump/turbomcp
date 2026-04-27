@@ -209,12 +209,19 @@ impl SessionManager {
         }
     }
 
-    /// Start the session manager (begin cleanup task)
+    /// Start the session manager (begin cleanup task).
+    ///
+    /// Idempotent: subsequent calls after the first are no-ops. The
+    /// `cleanup_timer` write-guard guards both the field assignment and
+    /// the `tokio::spawn`, so a second `start()` cannot leak a parallel
+    /// cleanup loop on the same `DashMap`.
     pub fn start(&self) {
         let mut timer_guard = self.cleanup_timer.write();
-        if timer_guard.is_none() {
-            *timer_guard = Some(interval(self.config.cleanup_interval));
+        if timer_guard.is_some() {
+            // Another caller already started the loop.
+            return;
         }
+        *timer_guard = Some(interval(self.config.cleanup_interval));
         drop(timer_guard);
 
         // Start cleanup task

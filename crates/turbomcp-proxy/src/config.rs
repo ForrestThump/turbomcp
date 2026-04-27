@@ -2,44 +2,6 @@
 
 use ipnetwork::IpNetwork;
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
-
-/// Proxy configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProxyConfig {
-    /// Session timeout
-    pub session_timeout: Duration,
-
-    /// Maximum concurrent sessions
-    pub max_sessions: usize,
-
-    /// Request timeout
-    pub request_timeout: Duration,
-}
-
-impl Default for ProxyConfig {
-    fn default() -> Self {
-        Self {
-            session_timeout: Duration::from_secs(300),
-            max_sessions: 1000,
-            request_timeout: Duration::from_secs(30),
-        }
-    }
-}
-
-/// ID mapping strategy
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
-pub enum IdMappingStrategy {
-    /// Prefix message IDs with session ID
-    #[default]
-    Prefix,
-
-    /// Use UUID mapping table
-    MappingTable,
-
-    /// Pass through (no mapping)
-    PassThrough,
-}
 
 /// Backend configuration for runtime proxy
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,7 +21,21 @@ pub enum BackendConfig {
     Http {
         /// Base URL of the HTTP server
         url: String,
-        /// Optional authentication token
+        /// Optional MCP endpoint path on the upstream server (defaults to `/mcp`).
+        /// Servers that mount MCP at a custom location should set this.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        endpoint_path: Option<String>,
+        /// Optional authentication token sent verbatim as `Authorization: Bearer …`
+        /// to the upstream MCP server. This is a *single shared service
+        /// credential* (not derived from any client token); see also the
+        /// `JwtSigner` pathway in `proxy::auth` for per-client downstream auth.
+        ///
+        /// Stays `Option<String>` (not `SecretString`) because this enum is
+        /// `Serialize` for config-file round-tripping, and `secrecy` requires
+        /// `SerializableSecret` opt-in to expose secrets in serialized form.
+        /// Internally, [`crate::proxy::backend::BackendTransport::Http`]
+        /// re-wraps the value in `SecretString` before it crosses any logging
+        /// boundary.
         #[serde(skip_serializing_if = "Option::is_none")]
         auth_token: Option<String>,
     },

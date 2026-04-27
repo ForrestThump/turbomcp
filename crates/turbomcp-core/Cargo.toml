@@ -23,12 +23,6 @@ serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
 # no_std compatible HashMap
 hashbrown = { version = "0.17", features = ["serde"] }
 
-# Compact strings (no_std compatible)
-compact_str = { version = "0.9", default-features = false, features = ["serde"] }
-
-# Small vectors (no_std compatible)
-smallvec = { version = "1.15", default-features = false, features = ["serde"] }
-
 # Zero-copy serialization (optional)
 rkyv = { version = ">=0.8.13", default-features = false, optional = true, features = [
     "alloc",

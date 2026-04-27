@@ -135,7 +135,11 @@ pub struct RegistrationRequest {
 ///
 /// Contains the registered client credentials and metadata returned
 /// by the authorization server.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+///
+/// **Security note**: `client_secret` and `registration_access_token` are
+/// sensitive credentials. The `Debug` implementation redacts them to prevent
+/// accidental exposure in logs.
+#[derive(Clone, Deserialize, Serialize)]
 pub struct RegistrationResponse {
     /// Client identifier (REQUIRED)
     pub client_id: String,
@@ -167,6 +171,31 @@ pub struct RegistrationResponse {
     pub metadata: HashMap<String, serde_json::Value>,
 }
 
+// Manual Debug impl: `client_secret` and `registration_access_token` are bearer
+// credentials — verbatim logging would expose them to any tracing/log sink.
+impl std::fmt::Debug for RegistrationResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegistrationResponse")
+            .field("client_id", &self.client_id)
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("client_secret_expires_at", &self.client_secret_expires_at)
+            .field(
+                "registration_access_token",
+                &self
+                    .registration_access_token
+                    .as_ref()
+                    .map(|_| "[REDACTED]"),
+            )
+            .field("registration_client_uri", &self.registration_client_uri)
+            .field("client_id_issued_at", &self.client_id_issued_at)
+            .field("metadata", &self.metadata)
+            .finish()
+    }
+}
+
 /// Dynamic Client Registration client
 ///
 /// # Example
@@ -189,7 +218,7 @@ pub struct RegistrationResponse {
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DcrClient {
     /// Registration endpoint URL
     endpoint: String,
@@ -197,11 +226,29 @@ pub struct DcrClient {
     /// Initial access token (if required by server)
     ///
     /// Some authorization servers require an initial access token
-    /// to prevent unauthorized client registration.
+    /// to prevent unauthorized client registration. Redacted in `Debug`
+    /// because it is a bearer credential.
     initial_access_token: Option<String>,
 
     /// HTTP client
     http_client: reqwest::Client,
+}
+
+impl core::fmt::Debug for DcrClient {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("DcrClient")
+            .field("endpoint", &self.endpoint)
+            .field(
+                "initial_access_token",
+                &self
+                    .initial_access_token
+                    .as_ref()
+                    .map(|_| "[REDACTED]")
+                    .unwrap_or("<none>"),
+            )
+            .field("http_client", &self.http_client)
+            .finish()
+    }
 }
 
 impl DcrClient {

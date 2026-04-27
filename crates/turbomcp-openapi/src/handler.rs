@@ -8,7 +8,8 @@ use turbomcp_core::context::RequestContext;
 use turbomcp_core::error::{McpError, McpResult};
 use turbomcp_core::handler::McpHandler;
 use turbomcp_types::{
-    Prompt, PromptResult, Resource, ResourceResult, ServerInfo, Tool, ToolInputSchema, ToolResult,
+    Prompt, PromptResult, Resource, ResourceResult, ServerInfo, Tool, ToolInputSchema,
+    ToolOutputSchema, ToolResult,
 };
 
 use crate::provider::{ExtractedOperation, OpenApiProvider};
@@ -106,6 +107,41 @@ impl OpenApiHandler {
         self.provider.tools().find(|op| Self::tool_name(op) == name)
     }
 
+    /// Build the `meta` map shared by both tool and resource exposure paths.
+    /// Surfaces the operation's effective `security` requirements so MCP
+    /// clients can detect that auth is needed even when no `auth_provider` is
+    /// installed yet.
+    fn build_operation_meta(&self, op: &ExtractedOperation) -> HashMap<String, Value> {
+        let mut meta = HashMap::new();
+        meta.insert("method".to_string(), json!(op.method));
+        meta.insert("path".to_string(), json!(op.path));
+        if let Some(ref id) = op.operation_id {
+            meta.insert("operationId".to_string(), json!(id));
+        }
+        if !op.security.is_empty() {
+            meta.insert("security".to_string(), json!(&op.security));
+            // Surface the matching scheme definitions so a downstream client
+            // can render auth requirements without re-fetching the spec.
+            let referenced: HashMap<&String, &openapiv3::SecurityScheme> = op
+                .security
+                .iter()
+                .flat_map(|req| req.keys())
+                .filter_map(|name| {
+                    self.provider
+                        .security_schemes()
+                        .get(name)
+                        .map(|scheme| (name, scheme))
+                })
+                .collect();
+            if !referenced.is_empty()
+                && let Ok(value) = serde_json::to_value(&referenced)
+            {
+                meta.insert("securitySchemes".to_string(), value);
+            }
+        }
+        meta
+    }
+
     /// Find operation by resource URI.
     fn find_resource_operation(&self, uri: &str) -> Option<&ExtractedOperation> {
         self.provider
@@ -167,6 +203,15 @@ impl OpenApiHandler {
             }
         }
 
+        // Inject auth credentials before sending. If the operation has security
+        // requirements but no provider is installed, the request still goes
+        // out — the upstream will return 401 and surface the misconfiguration.
+        if !op.security.is_empty()
+            && let Some(auth) = self.provider.auth_provider()
+        {
+            request = auth.apply(request, &op.security, self.provider.security_schemes());
+        }
+
         let response = request
             .send()
             .await
@@ -210,16 +255,14 @@ impl McpHandler for OpenApiHandler {
                 icons: None,
                 annotations: None,
                 execution: None,
-                output_schema: None,
-                meta: Some({
-                    let mut meta = HashMap::new();
-                    meta.insert("method".to_string(), json!(op.method));
-                    meta.insert("path".to_string(), json!(op.path));
-                    if let Some(ref id) = op.operation_id {
-                        meta.insert("operationId".to_string(), json!(id));
-                    }
-                    meta
-                }),
+                // MCP 2025-11-25 outputSchema: pulled from the operation's
+                // first 2xx `application/json` response with `$ref`s
+                // inlined. `None` for operations with no JSON response.
+                output_schema: op
+                    .response_schema
+                    .as_ref()
+                    .map(|v| ToolOutputSchema::from_value(v.clone())),
+                meta: Some(self.build_operation_meta(op)),
             })
             .collect()
     }
@@ -236,12 +279,7 @@ impl McpHandler for OpenApiHandler {
                 mime_type: Some("application/json".to_string()),
                 annotations: None,
                 size: None,
-                meta: Some({
-                    let mut meta = HashMap::new();
-                    meta.insert("method".to_string(), json!(op.method));
-                    meta.insert("path".to_string(), json!(op.path));
-                    meta
-                }),
+                meta: Some(self.build_operation_meta(op)),
             })
             .collect()
     }
@@ -361,6 +399,8 @@ mod tests {
             parameters: vec![],
             request_body_schema: None,
             mcp_type: McpType::Tool,
+            security: Vec::new(),
+            response_schema: None,
         };
 
         let op_without_id = ExtractedOperation {
@@ -372,6 +412,8 @@ mod tests {
             parameters: vec![],
             request_body_schema: None,
             mcp_type: McpType::Tool,
+            security: Vec::new(),
+            response_schema: None,
         };
 
         assert_eq!(OpenApiHandler::tool_name(&op_with_id), "createUser");

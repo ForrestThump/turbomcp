@@ -114,7 +114,7 @@
 //!         version: "1.0.0".to_string(),
 //!         ..Default::default()
 //!     },
-//!     _meta: None,
+//!     meta: None,
 //! };
 //!
 //! // Server responds with the same supported version
@@ -128,7 +128,7 @@
 //!         ..Default::default()
 //!     },
 //!     instructions: None,
-//!     _meta: None,
+//!     meta: None,
 //! };
 //! ```
 //!
@@ -224,8 +224,6 @@ pub mod context;
 pub mod enhanced_registry;
 /// Error types and handling for the protocol.
 pub mod error;
-/// Utilities for creating and working with protocol errors.
-pub mod error_utils;
 /// Traits and types for handling different MCP requests (tools, prompts, etc.).
 pub mod handlers;
 /// Lock-free data structures for high-performance concurrent scenarios.

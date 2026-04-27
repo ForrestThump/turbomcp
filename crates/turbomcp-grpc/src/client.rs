@@ -45,7 +45,14 @@ pub struct McpGrpcClientConfig {
     pub connect_timeout: Duration,
     /// Request timeout
     pub request_timeout: Duration,
-    /// Enable TLS
+    /// Reserved. TLS is selected automatically by URL scheme — pass an
+    /// `https://...` (or `grpcs://...`) endpoint to use TLS via tonic's
+    /// `tls-ring` feature. This flag is currently a no-op and is kept only
+    /// for API stability; prefer the URL scheme.
+    #[deprecated(
+        since = "3.1.1",
+        note = "no-op; use an `https://` endpoint to enable TLS"
+    )]
     pub tls: bool,
 }
 
@@ -58,6 +65,7 @@ impl Default for McpGrpcClientConfig {
             capabilities: ClientCapabilities::default(),
             connect_timeout: Duration::from_secs(10),
             request_timeout: Duration::from_secs(30),
+            #[allow(deprecated)]
             tls: false,
         }
     }
@@ -376,6 +384,7 @@ mod tests {
         let config = McpGrpcClientConfig::default();
         assert_eq!(config.protocol_version, "2025-11-25");
         assert_eq!(config.connect_timeout, Duration::from_secs(10));
-        assert!(!config.tls);
+        #[allow(deprecated)]
+        let _ = config.tls;
     }
 }

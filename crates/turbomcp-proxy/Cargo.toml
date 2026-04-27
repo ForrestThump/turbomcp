@@ -86,7 +86,7 @@ url = "2.5"
 ipnetwork = { version = "0.21", features = ["serde"] }
 
 # Security
-secrecy = "0.10"
+secrecy = { version = "0.10", features = ["serde"] }
 jsonwebtoken = { workspace = true, optional = true }
 
 [dev-dependencies]

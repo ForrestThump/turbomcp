@@ -141,7 +141,7 @@ impl HttpBackend {
                 version: client_version.to_string(),
                 ..Default::default()
             },
-            _meta: None,
+            meta: None,
         };
 
         let response = self

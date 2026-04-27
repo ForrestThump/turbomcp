@@ -109,10 +109,32 @@ impl OriginValidation {
     }
 
     /// Validate an origin against allowed origins.
+    ///
+    /// Default semantics: an empty `allowed` slice means **no allowlist
+    /// configured**, in which case the validator returns `Valid` for any
+    /// origin. The MCP spec calls Origin enforcement out as the primary
+    /// defence against DNS-rebinding for local servers, so callers who turn
+    /// `require_origin: true` on without populating `allowed_origins` are
+    /// explicitly opting into a permissive setup. Use `validate_strict` to
+    /// reject every browser-issued request when the allowlist is empty.
     pub fn validate(origin: Option<&str>, allowed: &[String]) -> Self {
         match origin {
             None => Self::Missing,
             Some(_) if allowed.is_empty() => Self::Valid, // No restrictions
+            Some(o) if allowed.iter().any(|a| a == o) => Self::Valid,
+            Some(o) => Self::Invalid(o.to_string()),
+        }
+    }
+
+    /// Strict variant of [`validate`].
+    ///
+    /// Rejects any origin (including a literal `null`) when `allowed` is
+    /// empty. Server-to-server clients without an `Origin` header still
+    /// pass through as `Missing`; callers must combine this with
+    /// `require_origin = true` (and `passed(true)`) to fail closed.
+    pub fn validate_strict(origin: Option<&str>, allowed: &[String]) -> Self {
+        match origin {
+            None => Self::Missing,
             Some(o) if allowed.iter().any(|a| a == o) => Self::Valid,
             Some(o) => Self::Invalid(o.to_string()),
         }

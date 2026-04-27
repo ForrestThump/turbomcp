@@ -49,7 +49,7 @@
 //!
 //! #[tokio::main]
 //! async fn main() {
-//!     Calculator.run().await.unwrap();
+//!     Calculator.run_stdio().await.unwrap();
 //! }
 //! ```
 //!
@@ -148,6 +148,33 @@ pub fn server(args: TokenStream, input: TokenStream) -> TokenStream {
 /// #[tool("Custom description for the tool")]
 /// async fn my_tool(&self, arg: String) -> String {
 ///     // ...
+/// }
+/// ```
+///
+/// # Cancellation
+///
+/// Per MCP §Cancellation, a client may send `notifications/cancelled` to
+/// abandon an in-flight request. The transport layer signals the matching
+/// handler via a [`tokio_util::sync::CancellationToken`] installed on the
+/// `RequestContext`, but cancellation is **cooperative**: the handler must
+/// poll `ctx.is_cancelled()` (or `await` on a cancellable future) to honour
+/// it. A handler doing pure synchronous CPU work, or holding an `await`
+/// inside a non-cancellable future, will run to completion regardless.
+///
+/// Long-running tools should accept `ctx: &RequestContext` and check
+/// cancellation at natural break points:
+///
+/// ```ignore
+/// #[tool]
+/// async fn long_task(&self, ctx: &RequestContext, n: u64) -> McpResult<u64> {
+///     let mut acc = 0u64;
+///     for i in 0..n {
+///         if ctx.is_cancelled() {
+///             return Err(McpError::cancelled("task cancelled by client"));
+///         }
+///         acc = acc.wrapping_add(i);
+///     }
+///     Ok(acc)
 /// }
 /// ```
 #[proc_macro_attribute]

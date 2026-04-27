@@ -3,16 +3,28 @@
 //! This module provides the AxumMcpExt trait which extends Axum routers
 //! with MCP capabilities while preserving existing application state.
 
+// See `mod.rs` — internal subtree references silenced; deprecation fires for
+// external consumers via the source-level `#[deprecated]` attributes.
+#![allow(deprecated)]
+
 use axum::Router;
 
 use crate::axum::{McpServerConfig, McpService};
 
 /// Extension trait for adding MCP capabilities to Axum routers
 ///
+/// **Deprecated since 3.2.0.** This subtree predates the MCP 2025-11-25 Streamable
+/// HTTP rework. Use `turbomcp_server::transport::http` for spec-compliant serving.
+///
 /// This trait provides several methods for integrating MCP services:
 /// - Direct integration with existing routers
 /// - State-preserving merge capabilities for complex applications
 /// - Opinionated defaults for rapid development
+#[deprecated(
+    since = "3.2.0",
+    note = "Use `turbomcp_server::transport::http` for spec-compliant Streamable HTTP \
+            (MCP 2025-11-25). This subtree will be removed in a future major release."
+)]
 pub trait AxumMcpExt {
     /// Add MCP routes to an existing router with custom configuration
     ///

@@ -84,7 +84,7 @@ required-features = ["stdio"]
 
 [[example]]
 name = "tcp_client"
-required-features = ["tcp"]
+required-features = ["tcp", "full-client"]
 
 [[example]]
 name = "tcp_server"
@@ -92,7 +92,7 @@ required-features = ["tcp"]
 
 [[example]]
 name = "unix_client"
-required-features = ["unix"]
+required-features = ["unix", "full-client"]
 
 [[example]]
 name = "transports_demo"

@@ -131,8 +131,11 @@ impl ServerAttrs {
                 description = Some(value.value());
             } else if meta.path.is_ident("transports") {
                 // v3: The `transports` attribute is deprecated.
-                meta.value()?;
-                let _: syn::ExprArray = meta.input.parse()?;
+                //
+                // Emit the deprecation diagnostic *before* trying to parse the
+                // value, so users who write `transports = "stdio"` (string instead
+                // of the v2 array form) get the migration guidance rather than a
+                // generic `expected '['` diagnostic.
                 return Err(syn::Error::new(
                     meta.path.span(),
                     "`transports` attribute is deprecated. Enable features in Cargo.toml instead:\n\
@@ -267,65 +270,80 @@ pub struct ResourceAttrInfo {
 /// - `#[resource("uri://template", mime_type = "text/plain")]` - URI with MIME type
 /// - `#[resource("uri://template", tags = ["admin"], version = "1.0")]` - Full syntax
 fn extract_resource_attrs(attr: &syn::Attribute) -> Result<ResourceAttrInfo, syn::Error> {
-    if let syn::Meta::List(meta_list) = &attr.meta {
-        let tokens = meta_list.tokens.clone();
+    let syn::Meta::List(meta_list) = &attr.meta else {
+        return Err(syn::Error::new_spanned(
+            attr,
+            "Expected #[resource(\"uri://template\")] or #[resource(\"uri://template\", mime_type = \"text/plain\")]",
+        ));
+    };
 
-        // Try to parse as just a string literal first (simple case)
-        if let Ok(lit) = syn::parse2::<syn::LitStr>(tokens.clone()) {
-            return Ok(ResourceAttrInfo {
-                uri_template: lit.value(),
-                mime_type: None,
-                tags: Vec::new(),
-                version: None,
-            });
-        }
+    let tokens = meta_list.tokens.clone();
 
-        // Parse comma-separated format
-        let token_str = tokens.to_string();
-        if token_str.contains(',') || token_str.contains('[') {
-            // First part is the URI (with quotes)
-            let uri_end = token_str.find(',').unwrap_or(token_str.len());
-            let uri_str = token_str[..uri_end].trim().trim_matches('"');
-
-            let mime_type = parse_quoted_value(&token_str, "mime_type");
-            let version = parse_quoted_value(&token_str, "version");
-            let tags = parse_tags_array(&token_str);
-
-            return Ok(ResourceAttrInfo {
-                uri_template: uri_str.to_string(),
-                mime_type,
-                tags,
-                version,
-            });
-        }
+    // Try to parse as just a string literal first (simple case).
+    if let Ok(lit) = syn::parse2::<syn::LitStr>(tokens.clone()) {
+        return Ok(ResourceAttrInfo {
+            uri_template: lit.value(),
+            mime_type: None,
+            tags: Vec::new(),
+            version: None,
+        });
     }
-    Err(syn::Error::new_spanned(
-        attr,
-        "Expected #[resource(\"uri://template\")] or #[resource(\"uri://template\", mime_type = \"text/plain\")]",
-    ))
+
+    // Walk tokens: first item must be a string literal (the URI), followed by
+    // an optional `, key = value` list. Walking the token stream is safer than
+    // substring search because the URI itself may legitimately contain commas
+    // or brackets.
+    let mut iter = tokens.clone().into_iter();
+    let Some(proc_macro2::TokenTree::Literal(uri_lit)) = iter.next() else {
+        return Err(syn::Error::new_spanned(
+            attr,
+            "Expected #[resource(\"uri://template\", ...)] - the first argument must be the URI string",
+        ));
+    };
+    let uri_template = syn::parse_str::<syn::LitStr>(&uri_lit.to_string())
+        .map_err(|_| {
+            syn::Error::new_spanned(
+                attr,
+                "Resource URI must be a string literal, e.g. #[resource(\"file://{path}\")]",
+            )
+        })?
+        .value();
+
+    // The remaining tokens (after the leading URI and its trailing comma) carry
+    // the named arguments. Re-stringify them so we can reuse the shared
+    // token-aware key/value extractors.
+    let rest: proc_macro2::TokenStream = iter.collect();
+    let rest_str = rest.to_string();
+    let mime_type = parse_quoted_value(&rest_str, "mime_type");
+    let version = parse_quoted_value(&rest_str, "version");
+    let tags = parse_tags_array(&rest_str);
+
+    Ok(ResourceAttrInfo {
+        uri_template,
+        mime_type,
+        tags,
+        version,
+    })
 }
 
 /// Check if a type is a reference to RequestContext.
+///
+/// Matches `RequestContext`, `Context`, and any path ending in `::RequestContext`
+/// or `::Context` (including reference forms). Uses last-segment ident comparison
+/// to avoid false positives on user types whose names contain `RequestContext`
+/// as a substring (e.g. `MyRequestContextWrapper`).
 fn is_request_context_type(ty: &syn::Type) -> bool {
-    // Handle &RequestContext
+    // Handle &RequestContext / &Context
     if let syn::Type::Reference(type_ref) = ty {
         return is_request_context_type(&type_ref.elem);
     }
 
-    // Handle RequestContext path
     if let syn::Type::Path(type_path) = ty {
-        let path_str = type_path
+        return type_path
             .path
             .segments
-            .iter()
-            .map(|s| s.ident.to_string())
-            .collect::<Vec<_>>()
-            .join("::");
-
-        // Match various ways RequestContext might be referenced
-        return path_str == "RequestContext"
-            || path_str.ends_with("::RequestContext")
-            || path_str.contains("RequestContext");
+            .last()
+            .is_some_and(|seg| seg.ident == "RequestContext" || seg.ident == "Context");
     }
 
     false
@@ -538,16 +556,25 @@ pub fn generate_mcp_handler(info: &ServerInfo, impl_block: &ItemImpl) -> TokenSt
     // Uses #turbomcp::__macro_support:: paths so users don't need internal crates
     let tool_list_code = info.tools.iter().map(|tool| {
         let tool_name = &tool.name;
-        let tool_desc = &tool.description;
         let schema_code = generate_schema_code(&tool.parameters, &turbomcp);
 
         // Generate meta field if tags or version present
         let meta_code = generate_meta_code(&tool.tags, &tool.version, &turbomcp);
 
+        // Per MCP spec, omit `description` entirely (i.e. `None`) when no
+        // description is available rather than emitting an empty string,
+        // which clients otherwise display as "" in tool pickers.
+        let description_code = if tool.description.is_empty() {
+            quote! { None }
+        } else {
+            let desc = &tool.description;
+            quote! { Some(#desc.to_string()) }
+        };
+
         quote! {
             #turbomcp::__macro_support::turbomcp_types::Tool {
                 name: #tool_name.to_string(),
-                description: Some(#tool_desc.to_string()),
+                description: #description_code,
                 input_schema: #schema_code,
                 title: None,
                 icons: None,
@@ -563,18 +590,22 @@ pub fn generate_mcp_handler(info: &ServerInfo, impl_block: &ItemImpl) -> TokenSt
     let resource_list_code = info.resources.iter().map(|resource| {
         let uri = &resource.uri_template;
         let name = &resource.name;
-        let desc = resource.description.as_deref().unwrap_or("");
         let meta_code = generate_meta_code(&resource.tags, &resource.version, &turbomcp);
         let mime_type_code = if let Some(mime) = &resource.mime_type {
             quote! { Some(#mime.to_string()) }
         } else {
             quote! { None }
         };
+        // Per MCP spec, omit description rather than emit an empty string.
+        let description_code = match resource.description.as_deref() {
+            Some(desc) if !desc.is_empty() => quote! { Some(#desc.to_string()) },
+            _ => quote! { None },
+        };
         quote! {
             #turbomcp::__macro_support::turbomcp_types::Resource {
                 uri: #uri.to_string(),
                 name: #name.to_string(),
-                description: Some(#desc.to_string()),
+                description: #description_code,
                 title: None,
                 icons: None,
                 mime_type: #mime_type_code,
@@ -588,8 +619,13 @@ pub fn generate_mcp_handler(info: &ServerInfo, impl_block: &ItemImpl) -> TokenSt
     // Generate prompt listing code (HIGH-002: includes arguments)
     let prompt_list_code = info.prompts.iter().map(|prompt| {
         let name = &prompt.name;
-        let desc = prompt.description.as_deref().unwrap_or("");
         let meta_code = generate_meta_code(&prompt.tags, &prompt.version, &turbomcp);
+
+        // Per MCP spec, omit description rather than emit an empty string.
+        let description_code = match prompt.description.as_deref() {
+            Some(desc) if !desc.is_empty() => quote! { Some(#desc.to_string()) },
+            _ => quote! { None },
+        };
 
         // Generate arguments
         let args_code = if prompt.arguments.is_empty() {
@@ -597,13 +633,16 @@ pub fn generate_mcp_handler(info: &ServerInfo, impl_block: &ItemImpl) -> TokenSt
         } else {
             let arg_structs = prompt.arguments.iter().map(|arg| {
                 let arg_name = &arg.name;
-                let arg_desc = arg.description.as_deref().unwrap_or("");
                 let required = arg.required;
+                let arg_desc_code = match arg.description.as_deref() {
+                    Some(d) if !d.is_empty() => quote! { Some(#d.to_string()) },
+                    _ => quote! { None },
+                };
                 quote! {
                     #turbomcp::__macro_support::turbomcp_types::PromptArgument {
                         name: #arg_name.to_string(),
                         title: None,
-                        description: Some(#arg_desc.to_string()),
+                        description: #arg_desc_code,
                         required: Some(#required),
                     }
                 }
@@ -614,7 +653,7 @@ pub fn generate_mcp_handler(info: &ServerInfo, impl_block: &ItemImpl) -> TokenSt
         quote! {
             #turbomcp::__macro_support::turbomcp_types::Prompt {
                 name: #name.to_string(),
-                description: Some(#desc.to_string()),
+                description: #description_code,
                 title: None,
                 icons: None,
                 arguments: #args_code,

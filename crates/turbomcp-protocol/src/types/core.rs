@@ -71,6 +71,13 @@ pub use turbomcp_types::{
 /// JSON-RPC request identifier
 pub type RequestId = MessageId;
 
+/// MCP progress notification token.
+///
+/// Per MCP 2025-11-25 (`schema.ts:23`), `ProgressToken = string | number`. It
+/// commonly mirrors a `_meta.progressToken` value or the originating request's
+/// numeric ID, so it shares its wire shape with [`RequestId`] / [`MessageId`].
+pub type ProgressToken = MessageId;
+
 // Re-export error codes from canonical location (crate::error_codes has more codes)
 pub use crate::error_codes;
 

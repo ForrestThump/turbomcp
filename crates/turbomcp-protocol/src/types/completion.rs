@@ -119,10 +119,15 @@ pub struct CompletionOption {
     pub insert_text: Option<String>,
 }
 
+/// Maximum allowed entries in [`CompletionData::values`] per MCP 2025-11-25.
+pub const MAX_COMPLETION_VALUES: usize = 100;
+
 /// Completion data structure per MCP specification
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CompletionData {
-    /// An array of completion values. Must not exceed 100 items.
+    /// An array of completion values. Must not exceed [`MAX_COMPLETION_VALUES`]
+    /// (100) entries per MCP 2025-11-25 — use [`Self::validate`] to check before
+    /// emitting on the wire.
     pub values: Vec<String>,
     /// The total number of completion options available. This can exceed the number of values actually sent.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -130,6 +135,22 @@ pub struct CompletionData {
     /// Indicates whether there are additional completion options beyond those provided
     #[serde(rename = "hasMore", skip_serializing_if = "Option::is_none")]
     pub has_more: Option<bool>,
+}
+
+impl CompletionData {
+    /// Validate that `values.len() <= MAX_COMPLETION_VALUES` per MCP 2025-11-25.
+    /// Returns `Err` with a descriptive message when the cap is exceeded so
+    /// callers can `?`-propagate before serializing.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.values.len() > MAX_COMPLETION_VALUES {
+            return Err(format!(
+                "CompletionData.values has {} entries; MCP 2025-11-25 caps it at {}",
+                self.values.len(),
+                MAX_COMPLETION_VALUES
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Completion response

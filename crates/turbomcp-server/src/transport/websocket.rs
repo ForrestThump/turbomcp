@@ -17,15 +17,19 @@ use std::sync::Arc;
 use axum::Router;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::routing::get;
+use dashmap::DashMap;
 use futures::{SinkExt, StreamExt};
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use turbomcp_core::error::{McpError, McpResult};
 use turbomcp_core::handler::McpHandler;
 use turbomcp_types::ProtocolVersion;
 
 use super::SessionState;
 use crate::config::{ConnectionCounter, RateLimiter, ServerConfig};
-use crate::context::RequestContext;
+use crate::context::{Cancellable, RequestContext};
 use crate::router::{self, JsonRpcOutgoing};
+use crate::transport::line::jsonrpc_id_key;
 
 /// Maximum WebSocket message size (10MB).
 const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
@@ -197,75 +201,106 @@ async fn handle_websocket<H: McpHandler>(
     // Per-connection MCP session lifecycle state.
     let mut session_state = SessionState::Uninitialized;
 
-    while let Some(msg) = receiver.next().await {
-        let msg = match msg {
-            Ok(msg) => msg,
-            Err(e) => {
-                tracing::error!("WebSocket receive error: {}", e);
-                break;
+    // Channel for handler responses produced by spawned tasks.
+    let (response_tx, mut response_rx) = mpsc::channel::<JsonRpcOutgoing>(32);
+
+    // In-flight handler cancellation tokens, keyed by JSON-RPC id; signalled
+    // by `notifications/cancelled` per MCP 2025-11-25.
+    let pending_handlers: Arc<DashMap<String, CancellationToken>> = Arc::new(DashMap::new());
+
+    loop {
+        tokio::select! {
+            biased;
+
+            // Outgoing: completed handler responses.
+            Some(response) = response_rx.recv() => {
+                if response.should_send()
+                    && let Ok(response_str) = router::serialize_response(&response)
+                    && sender.send(Message::Text(response_str.into())).await.is_err()
+                {
+                    tracing::error!("Failed to send WebSocket response");
+                    break;
+                }
+                continue;
             }
-        };
 
-        // Extract text from message
-        let text = match extract_text(msg) {
-            Some(text) => text,
-            None => continue, // Skip non-text messages
-        };
+            // Incoming: client → server frames.
+            maybe_msg = receiver.next() => {
+                let Some(msg) = maybe_msg else { break };
+                let msg = match msg {
+                    Ok(msg) => msg,
+                    Err(e) => {
+                        tracing::error!("WebSocket receive error: {}", e);
+                        break;
+                    }
+                };
 
-        // Check message size
-        if text.len() > MAX_MESSAGE_SIZE {
-            tracing::warn!(
-                "WebSocket message exceeds size limit ({} > {})",
-                text.len(),
-                MAX_MESSAGE_SIZE
-            );
-            continue;
-        }
+                let text = match extract_text(msg) {
+                    Some(text) => text,
+                    None => continue,
+                };
 
-        // Check per-message rate limit
-        if let Some(ref limiter) = rate_limiter
-            && !limiter.check(Some(&client_id))
-        {
-            tracing::warn!(
-                "Rate limit exceeded for WebSocket message from {}",
-                client_id
-            );
-            let error = JsonRpcOutgoing::error(None, McpError::rate_limited("Rate limit exceeded"));
-            if let Ok(response_str) = router::serialize_response(&error) {
-                let _ = sender.send(Message::Text(response_str.into())).await;
-            }
-            continue;
-        }
+                if text.len() > MAX_MESSAGE_SIZE {
+                    tracing::warn!(
+                        "WebSocket message exceeds size limit ({} > {})",
+                        text.len(),
+                        MAX_MESSAGE_SIZE
+                    );
+                    continue;
+                }
 
-        // Parse and route with lifecycle-aware dispatch.
-        let ctx = RequestContext::websocket();
+                if let Some(ref limiter) = rate_limiter
+                    && !limiter.check(Some(&client_id))
+                {
+                    tracing::warn!(
+                        "Rate limit exceeded for WebSocket message from {}",
+                        client_id
+                    );
+                    let error = JsonRpcOutgoing::error(
+                        Some(serde_json::Value::Null),
+                        McpError::rate_limited("Rate limit exceeded"),
+                    );
+                    if let Ok(response_str) = router::serialize_response(&error) {
+                        let _ = sender.send(Message::Text(response_str.into())).await;
+                    }
+                    continue;
+                }
 
-        match router::parse_request(&text) {
-            Ok(request) => {
-                let response = if request.method == "initialize" {
-                    // Reject duplicate initialize per MCP spec.
-                    if matches!(session_state, SessionState::Initialized(_)) {
+                let parsed = match router::parse_request(&text) {
+                    Ok(req) => req,
+                    Err(e) => {
+                        let error = JsonRpcOutgoing::error(
+                            Some(serde_json::Value::Null),
+                            McpError::parse_error(e.to_string()),
+                        );
+                        if let Ok(error_str) = router::serialize_response(&error) {
+                            let _ = sender.send(Message::Text(error_str.into())).await;
+                        }
+                        continue;
+                    }
+                };
+
+                // `initialize` mutates `session_state`, so it must run inline
+                // on the loop task.
+                if parsed.method == "initialize" {
+                    let ctx = RequestContext::websocket();
+                    let response = if matches!(session_state, SessionState::Initialized(_)) {
                         JsonRpcOutgoing::error(
-                            request.id.clone(),
+                            parsed.id.clone(),
                             McpError::invalid_request("Session already initialized"),
                         )
                     } else {
-                        // Route initialize through config-aware handler so protocol
-                        // negotiation and capability validation are applied.
-                        let initialize_request_id = request.id.clone();
+                        let initialize_request_id = parsed.id.clone();
                         let resp = router::route_request_with_config(
                             &handler,
-                            request,
+                            parsed,
                             &ctx,
                             config.as_ref(),
                         )
                         .await;
-
-                        // Extract the negotiated version from a successful response.
-                        // On failure (error response) the session stays Uninitialized
-                        // and subsequent non-init requests will be rejected.
                         if let Some(ref result) = resp.result
-                            && let Some(v) = result.get("protocolVersion").and_then(|v| v.as_str())
+                            && let Some(v) =
+                                result.get("protocolVersion").and_then(|v| v.as_str())
                         {
                             let version = ProtocolVersion::from(v);
                             tracing::info!(
@@ -273,77 +308,135 @@ async fn handle_websocket<H: McpHandler>(
                                 client = %client_addr,
                                 "Protocol version negotiated"
                             );
-                            session_state =
-                                SessionState::Initialized(super::InitializedSessionState::new(
+                            session_state = SessionState::Initialized(
+                                super::InitializedSessionState::new(
                                     version,
                                     initialize_request_id.as_ref(),
-                                ));
+                                ),
+                            );
                         }
-
                         resp
+                    };
+                    if response.should_send()
+                        && let Ok(response_str) = router::serialize_response(&response)
+                        && sender
+                            .send(Message::Text(response_str.into()))
+                            .await
+                            .is_err()
+                    {
+                        tracing::error!("Failed to send WebSocket response");
+                        break;
                     }
-                } else if request.method == "notifications/initialized"
-                    || request.method == "notifications/cancelled"
-                {
-                    // Lifecycle notifications pass through unconditionally —
-                    // they carry no id and produce no sendable response.
-                    router::route_request(&handler, request, &ctx).await
-                } else {
-                    // All other requests require a completed initialize handshake.
-                    // Notifications (id=None) MUST NOT receive responses per
-                    // JSON-RPC 2.0, so synthesize a drop-able ack instead of
-                    // an error that would get serialized to the peer.
-                    let is_notification = request.id.is_none();
-                    match &mut session_state {
-                        SessionState::Initialized(session) => {
-                            if !session.register_request_id(request.id.as_ref()) {
-                                if is_notification {
-                                    JsonRpcOutgoing::notification_ack()
-                                } else {
-                                    JsonRpcOutgoing::error(
-                                        request.id.clone(),
-                                        McpError::invalid_request(
-                                            "Request ID already used in this session",
-                                        ),
-                                    )
-                                }
-                            } else {
-                                let version = session.protocol_version().clone();
-                                router::route_request_versioned(&handler, request, &ctx, &version)
-                                    .await
-                            }
+                    continue;
+                }
+
+                // `notifications/cancelled` is consumed inline: parse the
+                // referenced request id and signal the matching handler.
+                if parsed.method == "notifications/cancelled" {
+                    if let Some(req_id) = parsed
+                        .params
+                        .as_ref()
+                        .and_then(|p| p.get("requestId"))
+                    {
+                        let key = jsonrpc_id_key(req_id);
+                        if let Some((_, token)) = pending_handlers.remove(&key) {
+                            let reason = parsed
+                                .params
+                                .as_ref()
+                                .and_then(|p| p.get("reason"))
+                                .and_then(|r| r.as_str())
+                                .unwrap_or("client requested cancellation");
+                            tracing::debug!(
+                                request_id = %key,
+                                reason = %reason,
+                                "Cancelling in-flight handler",
+                            );
+                            token.cancel();
                         }
-                        SessionState::Uninitialized => {
-                            if is_notification {
-                                JsonRpcOutgoing::notification_ack()
-                            } else {
-                                JsonRpcOutgoing::error(
-                                    request.id.clone(),
+                    }
+                    continue;
+                }
+
+                // `notifications/initialized` is a lifecycle no-op (no id, no
+                // response). Route it inline since there's nothing to spawn.
+                if parsed.method == "notifications/initialized" {
+                    let ctx = RequestContext::websocket();
+                    let _ = router::route_request(&handler, parsed, &ctx).await;
+                    continue;
+                }
+
+                // All other methods: enforce post-init gating and id-uniqueness,
+                // then spawn the handler so the receive loop keeps draining
+                // (notably `notifications/cancelled` from the same client).
+                let is_notification = parsed.id.is_none();
+                let version = match &mut session_state {
+                    SessionState::Initialized(session) => {
+                        if !session.register_request_id(parsed.id.as_ref()) {
+                            if !is_notification {
+                                let error = JsonRpcOutgoing::error(
+                                    parsed.id.clone(),
                                     McpError::invalid_request(
-                                        "Server not initialized. Send 'initialize' first.",
+                                        "Request ID already used in this session",
                                     ),
-                                )
+                                );
+                                if let Ok(error_str) = router::serialize_response(&error)
+                                    && sender
+                                        .send(Message::Text(error_str.into()))
+                                        .await
+                                        .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            continue;
+                        }
+                        session.protocol_version().clone()
+                    }
+                    SessionState::Uninitialized => {
+                        if !is_notification {
+                            let error = JsonRpcOutgoing::error(
+                                parsed.id.clone(),
+                                McpError::invalid_request(
+                                    "Server not initialized. Send 'initialize' first.",
+                                ),
+                            );
+                            if let Ok(error_str) = router::serialize_response(&error)
+                                && sender
+                                    .send(Message::Text(error_str.into()))
+                                    .await
+                                    .is_err()
+                            {
+                                break;
                             }
                         }
+                        continue;
                     }
                 };
 
-                if response.should_send()
-                    && let Ok(response_str) = router::serialize_response(&response)
-                    && sender
-                        .send(Message::Text(response_str.into()))
-                        .await
-                        .is_err()
-                {
-                    tracing::error!("Failed to send WebSocket response");
-                    break;
+                let handler_clone = handler.clone();
+                let resp_tx = response_tx.clone();
+                let token = CancellationToken::new();
+                let cancel_key = parsed.id.as_ref().map(jsonrpc_id_key);
+                if let Some(ref key) = cancel_key {
+                    pending_handlers.insert(key.clone(), token.clone());
                 }
-            }
-            Err(e) => {
-                let error = JsonRpcOutgoing::error(None, McpError::parse_error(e.to_string()));
-                if let Ok(error_str) = router::serialize_response(&error) {
-                    let _ = sender.send(Message::Text(error_str.into())).await;
-                }
+                let ctx = RequestContext::websocket()
+                    .with_cancellation_token(Arc::new(token) as Arc<dyn Cancellable>);
+                let guard = super::PendingHandlerGuard::new(
+                    Arc::clone(&pending_handlers),
+                    cancel_key,
+                );
+
+                tokio::spawn(async move {
+                    // RAII cleanup runs on every exit path, including handler
+                    // panic.
+                    let _guard = guard;
+                    let response = router::route_request_versioned(
+                        &handler_clone, parsed, &ctx, &version,
+                    )
+                    .await;
+                    let _ = resp_tx.send(response).await;
+                });
             }
         }
     }

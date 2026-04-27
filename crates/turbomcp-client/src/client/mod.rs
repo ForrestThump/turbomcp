@@ -36,5 +36,5 @@ pub mod operations;
 // The current structure balances cohesion and simplicity.
 
 // Re-export main types for backwards compatibility
-pub use config::{ConnectionConfig, InitializeResult};
+pub use config::InitializeResult;
 pub use manager::{ConnectionInfo, ConnectionState, ManagerConfig, ServerGroup, SessionManager};

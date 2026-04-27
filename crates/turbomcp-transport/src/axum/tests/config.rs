@@ -3,6 +3,9 @@
 //! Tests for the comprehensive configuration system including server config,
 //! CORS, security headers, rate limiting, TLS, and authentication.
 
+// See `axum/mod.rs` — internal subtree references silenced.
+#![allow(deprecated)]
+
 #[cfg(test)]
 mod tests {
     use crate::axum::config::*;

@@ -87,10 +87,26 @@ impl ProtocolVersion {
         matches!(self, Self::V2025_06_18 | Self::V2025_11_25)
     }
 
-    /// Whether this is the draft specification.
+    /// Whether this is the named draft specification (`DRAFT-2026-v1`).
+    ///
+    /// Note: only the named `DRAFT-2026-v1` enum variant returns `true`. Future or other
+    /// draft strings (e.g. `DRAFT-2026-v2`) are routed to `Unknown(_)` by [`From<&str>`]
+    /// and will not match. Use [`Self::is_any_draft`] to detect any string starting with
+    /// `DRAFT-`.
     #[must_use]
     pub fn is_draft(&self) -> bool {
         matches!(self, Self::Draft)
+    }
+
+    /// Whether this version is any draft — the named `DRAFT-2026-v1` variant or
+    /// an `Unknown(s)` whose string starts with `DRAFT-`.
+    #[must_use]
+    pub fn is_any_draft(&self) -> bool {
+        match self {
+            Self::Draft => true,
+            Self::Unknown(s) => s.starts_with("DRAFT-"),
+            _ => false,
+        }
     }
 
     fn ordinal(&self) -> u32 {

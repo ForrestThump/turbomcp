@@ -55,8 +55,15 @@ pub struct JsonRpcRequest {
     pub id: RequestId,
 }
 
-/// JSON-RPC response payload - ensures mutual exclusion of result and error
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// JSON-RPC response payload - ensures mutual exclusion of result and error.
+///
+/// Per JSON-RPC 2.0 §5: a response object MUST contain `result` xor `error`,
+/// never both, never neither. The custom `Deserialize` impl enforces this:
+/// `{}` (neither) and `{ "result": ..., "error": ... }` (both) both fail with
+/// a clear, single-line error rather than serde's "missing field `result`"
+/// or silently dropping `error` (which the previous `#[serde(untagged)]`
+/// implementation would do — first variant wins).
+#[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum JsonRpcResponsePayload {
     /// Successful response with result
@@ -69,6 +76,33 @@ pub enum JsonRpcResponsePayload {
         /// Response error
         error: JsonRpcError,
     },
+}
+
+impl<'de> Deserialize<'de> for JsonRpcResponsePayload {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Helper {
+            #[serde(default)]
+            result: Option<Value>,
+            #[serde(default)]
+            error: Option<JsonRpcError>,
+        }
+
+        let h = Helper::deserialize(deserializer)?;
+        match (h.result, h.error) {
+            (Some(result), None) => Ok(Self::Success { result }),
+            (None, Some(error)) => Ok(Self::Error { error }),
+            (Some(_), Some(_)) => Err(serde::de::Error::custom(
+                "JSON-RPC response must contain exactly one of `result` or `error`, not both",
+            )),
+            (None, None) => Err(serde::de::Error::custom(
+                "JSON-RPC response must contain exactly one of `result` or `error`",
+            )),
+        }
+    }
 }
 
 /// JSON-RPC response message
@@ -162,7 +196,7 @@ impl JsonRpcError {
         }
         Self {
             code,
-            message: message.into(),
+            message: Self::cap_message(message.into()),
             data: None,
         }
     }
@@ -180,13 +214,56 @@ impl JsonRpcError {
         }
         Ok(Self {
             code,
-            message: message.into(),
+            message: Self::cap_message(message.into()),
             data: None,
         })
     }
 
     fn is_valid_code(code: i32) -> bool {
         Self::SERVER_ERROR_RANGE.contains(&code) || Self::STANDARD_CODES.contains(&code)
+    }
+
+    /// Soft cap on the on-wire `message` field, in bytes.
+    ///
+    /// JSON-RPC error messages routinely include user-supplied `details` (see
+    /// `invalid_params`, `parse_error_with_details`, `invalid_request_with_reason`).
+    /// A naive caller passing a multi-MiB payload would amplify the response
+    /// and risk leaking the offending input back to a third party. We truncate
+    /// at a UTF-8 char boundary and append a `…[truncated, N bytes elided]`
+    /// suffix; the `data` field carries the same cap.
+    const MESSAGE_BYTE_CAP: usize = 1024;
+
+    /// Truncate `s` at a UTF-8 char boundary, preserving the first
+    /// `MESSAGE_BYTE_CAP` bytes and appending an ellipsis with the elision
+    /// count. Cheap no-op for short messages.
+    fn cap_message(s: String) -> String {
+        if s.len() <= Self::MESSAGE_BYTE_CAP {
+            return s;
+        }
+        let mut end = Self::MESSAGE_BYTE_CAP;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        let elided = s.len() - end;
+        let mut out = String::with_capacity(end + 32);
+        out.push_str(&s[..end]);
+        out.push_str(&format!("…[truncated, {elided} bytes elided]"));
+        out
+    }
+
+    /// Same cap applied to a `data` payload's string fields.
+    fn cap_data_value(data: Value) -> Value {
+        match data {
+            Value::String(s) => Value::String(Self::cap_message(s)),
+            Value::Object(map) => {
+                let capped = map
+                    .into_iter()
+                    .map(|(k, v)| (k, Self::cap_data_value(v)))
+                    .collect();
+                Value::Object(capped)
+            }
+            other => other,
+        }
     }
 
     /// Create a new JSON-RPC error with additional data
@@ -199,8 +276,8 @@ impl JsonRpcError {
         }
         Self {
             code,
-            message: message.into(),
-            data: Some(data),
+            message: Self::cap_message(message.into()),
+            data: Some(Self::cap_data_value(data)),
         }
     }
 
@@ -257,9 +334,36 @@ impl JsonRpcError {
         self.code == -32600
     }
 
+    /// Check if this is a method-not-found error (-32601)
+    pub fn is_method_not_found(&self) -> bool {
+        self.code == -32601
+    }
+
+    /// Check if this is an invalid-params error (-32602)
+    pub fn is_invalid_params(&self) -> bool {
+        self.code == -32602
+    }
+
+    /// Check if this is an internal error (-32603)
+    pub fn is_internal_error(&self) -> bool {
+        self.code == -32603
+    }
+
+    /// Check if this code falls in JSON-RPC 2.0's implementation-defined
+    /// server-error range `-32099..=-32000` (§5.1).
+    pub fn is_server_error(&self) -> bool {
+        (-32099..=-32000).contains(&self.code)
+    }
+
     /// Get the error code
     pub fn code(&self) -> i32 {
         self.code
+    }
+
+    /// Classify this error against the JSON-RPC standard error enum.
+    /// Returns `None` for codes outside the JSON-RPC reserved range.
+    pub fn standard_kind(&self) -> Option<JsonRpcErrorCode> {
+        Some(JsonRpcErrorCode::from(self.code))
     }
 }
 
@@ -498,9 +602,68 @@ impl JsonRpcNotification {
 pub mod utils {
     use super::*;
 
-    /// Parse a JSON-RPC message from a string
+    /// Error returned by [`parse_message_typed`] for the cases the untagged
+    /// `JsonRpcMessage` enum can't distinguish on its own.
+    ///
+    /// `JsonRpcMessage` is `#[serde(untagged)]` over Request/Response/Notification.
+    /// A top-level JSON array (a JSON-RPC §7 batch) fails serde's variant
+    /// match with a generic "data did not match any variant" diagnostic;
+    /// MCP 2025-11-25 deprecates batches, so callers want to respond with a
+    /// clear `-32600 Invalid Request` rather than echoing serde's text.
+    #[derive(Debug)]
+    pub enum ParseMessageError {
+        /// Top-level JSON array (deprecated batch shape).
+        BatchUnsupported,
+        /// Anything else (parse error, unknown variant, etc.).
+        Json(serde_json::Error),
+    }
+
+    impl core::fmt::Display for ParseMessageError {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            match self {
+                Self::BatchUnsupported => {
+                    f.write_str("JSON-RPC batches are not supported in MCP 2025-11-25")
+                }
+                Self::Json(e) => write!(f, "{e}"),
+            }
+        }
+    }
+
+    impl std::error::Error for ParseMessageError {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            match self {
+                Self::BatchUnsupported => None,
+                Self::Json(e) => Some(e),
+            }
+        }
+    }
+
+    impl From<serde_json::Error> for ParseMessageError {
+        fn from(e: serde_json::Error) -> Self {
+            Self::Json(e)
+        }
+    }
+
+    /// Parse a JSON-RPC message from a string.
+    ///
+    /// Kept on the original signature for backwards compatibility — callers
+    /// who need to distinguish "batch not supported" from generic parse
+    /// errors should use [`parse_message_typed`].
     pub fn parse_message(json: &str) -> Result<JsonRpcMessage, serde_json::Error> {
         serde_json::from_str(json)
+    }
+
+    /// Parse a JSON-RPC message and surface batch arrays as a distinct error.
+    ///
+    /// Returns `ParseMessageError::BatchUnsupported` when the input's first
+    /// non-whitespace byte is `[` (a JSON array). Otherwise behaves like
+    /// [`parse_message`]. Callers can map the typed error to a JSON-RPC
+    /// `-32600 Invalid Request` response with the stable message.
+    pub fn parse_message_typed(json: &str) -> Result<JsonRpcMessage, ParseMessageError> {
+        if json.trim_start().as_bytes().first() == Some(&b'[') {
+            return Err(ParseMessageError::BatchUnsupported);
+        }
+        Ok(serde_json::from_str(json)?)
     }
 
     /// Serialize a JSON-RPC message to a string
@@ -718,6 +881,14 @@ pub mod http {
         }
     }
 }
+
+// Additional integration-style tests live in `jsonrpc/tests.rs`. The split
+// originated from a file refactor; both modules cover distinct cases (e.g.
+// `tests.rs` exercises wire-shape regressions like `id:null` for parse errors)
+// so neither should be dropped until they are merged.
+#[cfg(test)]
+#[path = "jsonrpc/tests.rs"]
+mod extended_tests;
 
 #[cfg(test)]
 mod tests {

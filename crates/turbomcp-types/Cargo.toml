@@ -20,19 +20,20 @@ crate-type = ["rlib"]
 default = ["std"]
 # Standard library support (enables HashMap, better error handling)
 std = ["serde/std", "serde_json/std"]
-# Allocator support without full std (for no_std + alloc environments)
+# Allocator support without full std (for no_std + alloc environments).
+# Currently a no-op (`extern crate alloc;` is unconditional in src/lib.rs);
+# kept so downstream `default-features = false, features = ["alloc"]`
+# declarations continue to compile.
 alloc = ["serde/alloc"]
-# JSON Schema generation for tool input schemas
-schema = ["dep:schemars"]
-# Tasks API (SEP-1686) - marked experimental in MCP 2025-11-25 spec
+# Tasks API (SEP-1686) - marked experimental in MCP 2025-11-25 spec.
+# Currently a marker flag: `tasks` types are exposed unconditionally because
+# they are part of the canonical 2025-11-25 type set. The flag exists so
+# downstream crates can signal intent to use them; gating may be added later.
 experimental-tasks = []
 
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
-
-# Optional: JSON Schema generation
-schemars = { workspace = true, optional = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

@@ -3,6 +3,10 @@
 //! This module defines the core MCP service trait that implementations
 //! must provide to handle MCP protocol requests.
 
+// See `mod.rs` — internal subtree references silenced; deprecation fires for
+// external consumers via the source-level `#[deprecated]` attributes.
+#![allow(deprecated)]
+
 use std::future::Future;
 use std::pin::Pin;
 
@@ -12,9 +16,17 @@ use turbomcp_protocol::Result as McpResult;
 
 /// Core MCP service trait
 ///
+/// **Deprecated since 3.2.0.** This subtree predates the MCP 2025-11-25 Streamable
+/// HTTP rework. Use `turbomcp_server::transport::http` for spec-compliant serving.
+///
 /// Implementations of this trait provide the business logic for handling
 /// MCP protocol requests. The trait is designed to be object-safe to
 /// allow for dynamic dispatch.
+#[deprecated(
+    since = "3.2.0",
+    note = "Use `turbomcp_server::transport::http` for spec-compliant Streamable HTTP \
+            (MCP 2025-11-25). This subtree will be removed in a future major release."
+)]
 pub trait McpService: Send + Sync + 'static {
     /// Process an MCP request and return a response
     ///

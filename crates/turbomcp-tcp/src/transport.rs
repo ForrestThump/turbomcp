@@ -525,22 +525,40 @@ impl Transport for TcpTransport {
                 .bytes_sent
                 .fetch_add(message.size() as u64, Ordering::Relaxed);
 
-            // Convert transport message back to JSON string for sending
-            let json_str = String::from_utf8_lossy(&message.payload).to_string();
+            // JSON-RPC requires valid UTF-8 — refuse non-UTF-8 payloads
+            // explicitly rather than `from_utf8_lossy` mangling unexpected
+            // bytes into U+FFFD and silently corrupting the wire frame.
+            let json_str = std::str::from_utf8(&message.payload).map_err(|e| {
+                TransportError::SerializationFailed(format!(
+                    "TCP send rejected non-UTF-8 payload: {e}"
+                ))
+            })?;
 
-            // Send to all active connections (broadcast for server mode)
-            // In client mode, there should be exactly one connection
+            // Send to all active connections (broadcast for server mode).
+            // In client mode there is exactly one connection. **Server mode is
+            // essentially testing-only**: the public `Transport::send` API has
+            // no per-client routing, so a server reply will fan out to *every*
+            // connected peer. Multi-tenant deployments should not use the TCP
+            // transport's server mode until per-connection send is added.
             let connections = self.connections.lock();
             if connections.is_empty() {
                 return Err(TransportError::ConnectionFailed(
                     "No active TCP connections".into(),
                 ));
             }
+            if connections.len() > 1 {
+                warn!(
+                    connection_count = connections.len(),
+                    "TCP transport: send() broadcasts to all {} connections; use only \
+                     in client mode or single-peer test fixtures (no per-client routing yet)",
+                    connections.len()
+                );
+            }
 
             let mut failed_connections = Vec::new();
             for (conn_id, sender) in connections.iter() {
                 // Use try_send with backpressure handling
-                match sender.try_send(json_str.clone()) {
+                match sender.try_send(json_str.to_string()) {
                     Ok(()) => {}
                     Err(mpsc::error::TrySendError::Full(_)) => {
                         warn!("Connection {} channel full, applying backpressure", conn_id);

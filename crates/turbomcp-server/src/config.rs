@@ -39,6 +39,12 @@ pub struct OriginValidationConfig {
     pub allow_localhost: bool,
     /// Whether to disable origin checks entirely.
     pub allow_any: bool,
+    /// Trusted reverse-proxy IPs / CIDRs whose `X-Forwarded-For`,
+    /// `X-Real-IP`, `CF-Connecting-IP`, and `X-Client-IP` headers we will
+    /// honour. **Empty means trust nothing** — direct clients can no longer
+    /// spoof their source IP via headers. Entries accept CIDR notation
+    /// (`10.0.0.0/8`) or bare addresses (`10.0.0.5`).
+    pub trusted_proxies: Vec<String>,
 }
 
 impl Default for OriginValidationConfig {
@@ -47,6 +53,7 @@ impl Default for OriginValidationConfig {
             allowed_origins: HashSet::new(),
             allow_localhost: true,
             allow_any: false,
+            trusted_proxies: Vec::new(),
         }
     }
 }
@@ -768,10 +775,13 @@ impl ConnectionCounter {
     ///
     /// Returns a guard that releases the slot when dropped, or None if at capacity.
     /// The guard is `Send + 'static` and can be moved into spawned async tasks.
+    ///
+    /// The CAS loop is unbounded — under genuine contention the standard pattern
+    /// is to keep retrying until either the slot is acquired or capacity is hit;
+    /// progress is guaranteed because each iteration either advances `current`
+    /// (acquire success) or witnesses another thread's advance (their CAS won).
     pub fn try_acquire_arc(self: &Arc<Self>) -> Option<ConnectionGuard> {
-        // CAS loop with bounded iterations to prevent infinite spin
-        // In practice this should succeed in 1-2 iterations; 1000 indicates a bug
-        for _ in 0..1000 {
+        loop {
             let current = self.current.load(Ordering::Relaxed);
             if current >= self.max {
                 return None;
@@ -785,14 +795,9 @@ impl ConnectionCounter {
                     counter: Arc::clone(self),
                 });
             }
-            // Hint to the CPU that we're spinning (avoids pipeline stalls)
+            // Hint to the CPU that we're spinning (avoids pipeline stalls).
             std::hint::spin_loop();
         }
-        // This should never be reached in normal operation
-        tracing::error!(
-            "ConnectionCounter CAS loop exceeded 1000 iterations - possible contention bug"
-        );
-        None
     }
 
     /// Get current connection count.

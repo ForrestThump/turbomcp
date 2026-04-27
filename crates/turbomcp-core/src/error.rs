@@ -99,6 +99,8 @@ pub enum ErrorKind {
     CapabilityNotSupported,
     /// Protocol version mismatch (MCP -32007)
     ProtocolVersionMismatch,
+    /// URL elicitation required (MCP -32042)
+    UrlElicitationRequired,
     /// User rejected the request (MCP -1)
     UserRejected,
 
@@ -426,26 +428,7 @@ impl McpError {
     /// Create an error from a JSON-RPC error code
     #[must_use]
     pub fn from_rpc_code(code: i32, message: impl Into<String>) -> Self {
-        let kind = match code {
-            -1 => ErrorKind::UserRejected,
-            -32001 => ErrorKind::ToolNotFound,
-            -32002 => ErrorKind::ToolExecutionFailed,
-            -32003 => ErrorKind::PromptNotFound,
-            -32004 => ErrorKind::ResourceNotFound,
-            -32005 => ErrorKind::ResourceAccessDenied,
-            -32006 => ErrorKind::CapabilityNotSupported,
-            -32007 => ErrorKind::ProtocolVersionMismatch,
-            -32008 => ErrorKind::Authentication,
-            -32009 => ErrorKind::RateLimited,
-            -32010 => ErrorKind::ServerOverloaded,
-            -32600 => ErrorKind::InvalidRequest,
-            -32601 => ErrorKind::MethodNotFound,
-            -32602 => ErrorKind::InvalidParams,
-            -32603 => ErrorKind::Internal,
-            -32700 => ErrorKind::ParseError,
-            _ => ErrorKind::Internal,
-        };
-        Self::new(kind, message)
+        Self::new(ErrorKind::from_i32(code), message)
     }
 
     /// Set the operation context
@@ -525,8 +508,10 @@ impl McpError {
             ErrorKind::ParseError => -32700,
             ErrorKind::InvalidRequest => -32600,
             ErrorKind::MethodNotFound => -32601,
-            ErrorKind::InvalidParams | ErrorKind::Serialization => -32602,
-            ErrorKind::Internal => -32603,
+            ErrorKind::InvalidParams => -32602,
+            // Serialization is a server-side bug; map to Internal so it doesn't
+            // collide on the wire with user-visible parameter validation errors.
+            ErrorKind::Internal | ErrorKind::Serialization => -32603,
             // MCP specific
             ErrorKind::UserRejected => -1,
             ErrorKind::ToolNotFound => -32001,
@@ -536,6 +521,7 @@ impl McpError {
             ErrorKind::ResourceAccessDenied => -32005,
             ErrorKind::CapabilityNotSupported => -32006,
             ErrorKind::ProtocolVersionMismatch => -32007,
+            ErrorKind::UrlElicitationRequired => -32042,
             ErrorKind::Authentication => -32008,
             ErrorKind::RateLimited => -32009,
             ErrorKind::ServerOverloaded => -32010,
@@ -568,6 +554,8 @@ impl McpError {
             | ErrorKind::PromptNotFound
             | ErrorKind::ResourceNotFound
             | ErrorKind::MethodNotFound => 404,
+            // URL elicitation: server requests client open a URL to continue auth/consent
+            ErrorKind::UrlElicitationRequired => 403,
             ErrorKind::Timeout => 408,
             ErrorKind::RateLimited => 429,
             ErrorKind::Cancelled => 499,
@@ -606,7 +594,7 @@ impl ErrorKind {
             -32009 => Self::RateLimited,
             -32010 => Self::ServerOverloaded,
             // MCP 2025-11-25: URL elicitation required
-            -32042 => Self::CapabilityNotSupported,
+            -32042 => Self::UrlElicitationRequired,
             // Standard JSON-RPC
             -32600 => Self::InvalidRequest,
             -32601 => Self::MethodNotFound,
@@ -628,6 +616,7 @@ impl ErrorKind {
             Self::ResourceAccessDenied => "Resource access denied",
             Self::CapabilityNotSupported => "Capability not supported",
             Self::ProtocolVersionMismatch => "Protocol version mismatch",
+            Self::UrlElicitationRequired => "URL elicitation required",
             Self::UserRejected => "User rejected request",
             Self::ParseError => "Parse error",
             Self::InvalidRequest => "Invalid request",
@@ -806,10 +795,10 @@ mod tests {
         assert_eq!(ErrorKind::from_i32(-32008), ErrorKind::Authentication);
         assert_eq!(ErrorKind::from_i32(-32009), ErrorKind::RateLimited);
         assert_eq!(ErrorKind::from_i32(-32010), ErrorKind::ServerOverloaded);
-        // MCP 2025-11-25: URL elicitation required maps to CapabilityNotSupported
+        // MCP 2025-11-25: URL elicitation required has its own variant
         assert_eq!(
             ErrorKind::from_i32(-32042),
-            ErrorKind::CapabilityNotSupported
+            ErrorKind::UrlElicitationRequired
         );
         // Standard JSON-RPC codes
         assert_eq!(ErrorKind::from_i32(-32600), ErrorKind::InvalidRequest);

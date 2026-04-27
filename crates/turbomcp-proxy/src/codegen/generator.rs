@@ -43,7 +43,9 @@ impl Default for GenConfig {
             version: None,
             frontend_type: FrontendType::Http,
             backend_type: BackendType::Stdio,
-            turbomcp_version: "2.1.1".to_string(),
+            // Pin to the proxy crate's own version so generated projects compile
+            // against the same TurboMCP that produced them.
+            turbomcp_version: env!("CARGO_PKG_VERSION").to_string(),
         }
     }
 }

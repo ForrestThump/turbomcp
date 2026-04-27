@@ -272,6 +272,50 @@ pub async fn route_request<H: McpHandler>(
             }
         }
 
+        // Resource subscriptions
+        "resources/subscribe" => {
+            let params = request.params.unwrap_or_default();
+            let Some(uri) = params.get("uri").and_then(|v| v.as_str()) else {
+                return JsonRpcOutgoing::error(id, McpError::invalid_params("Missing uri"));
+            };
+            match handler.subscribe(uri, ctx).await {
+                Ok(()) => JsonRpcOutgoing::success(id, serde_json::json!({})),
+                Err(err) => JsonRpcOutgoing::error(id, err),
+            }
+        }
+
+        "resources/unsubscribe" => {
+            let params = request.params.unwrap_or_default();
+            let Some(uri) = params.get("uri").and_then(|v| v.as_str()) else {
+                return JsonRpcOutgoing::error(id, McpError::invalid_params("Missing uri"));
+            };
+            match handler.unsubscribe(uri, ctx).await {
+                Ok(()) => JsonRpcOutgoing::success(id, serde_json::json!({})),
+                Err(err) => JsonRpcOutgoing::error(id, err),
+            }
+        }
+
+        // Logging
+        "logging/setLevel" => {
+            let params = request.params.unwrap_or_default();
+            let Some(level) = params.get("level").and_then(|v| v.as_str()) else {
+                return JsonRpcOutgoing::error(id, McpError::invalid_params("Missing level"));
+            };
+            match handler.set_log_level(level, ctx).await {
+                Ok(()) => JsonRpcOutgoing::success(id, serde_json::json!({})),
+                Err(err) => JsonRpcOutgoing::error(id, err),
+            }
+        }
+
+        // Completions
+        "completion/complete" => {
+            let params = request.params.unwrap_or_default();
+            match handler.complete(params, ctx).await {
+                Ok(value) => JsonRpcOutgoing::success(id, value),
+                Err(err) => JsonRpcOutgoing::error(id, err),
+            }
+        }
+
         // Ping
         "ping" => JsonRpcOutgoing::success(id, serde_json::json!({})),
 
@@ -327,6 +371,14 @@ fn build_initialize_result<H: McpHandler>(
 /// This is a convenience function for parsing incoming messages.
 pub fn parse_request(input: &str) -> Result<JsonRpcIncoming, McpError> {
     JsonRpcIncoming::parse(input).map_err(|e| McpError::parse_error(e.to_string()))
+}
+
+/// Parse a pre-parsed `serde_json::Value` into a JSON-RPC incoming request.
+/// Avoids the second JSON parse on the line transports' hot path: callers can
+/// parse once into `Value` (to detect server-to-client responses), then use this
+/// to convert into the typed request without re-parsing the source string.
+pub fn parse_request_from_value(value: serde_json::Value) -> Result<JsonRpcIncoming, McpError> {
+    serde_json::from_value(value).map_err(|e| McpError::parse_error(e.to_string()))
 }
 
 /// Serialize a JSON-RPC outgoing response to a string.

@@ -41,9 +41,11 @@ pub use error::{OpenApiError, Result};
 pub use handler::OpenApiHandler;
 pub use mapping::{McpType, RouteMapping, RouteRule};
 pub use parser::parse_spec;
-pub use provider::{ExtractedOperation, ExtractedParameter, OpenApiProvider};
+pub use provider::{AuthProvider, ExtractedOperation, ExtractedParameter, OpenApiProvider};
 
 /// Prelude for common imports.
 pub mod prelude {
-    pub use super::{McpType, OpenApiHandler, OpenApiProvider, RouteMapping, RouteRule};
+    pub use super::{
+        AuthProvider, McpType, OpenApiHandler, OpenApiProvider, RouteMapping, RouteRule,
+    };
 }

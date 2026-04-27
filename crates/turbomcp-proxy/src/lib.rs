@@ -115,5 +115,6 @@ pub mod prelude {
 /// Version of turbomcp-proxy
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// MCP protocol version supported
-pub const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
+/// MCP protocol version supported. Re-exports the canonical value from
+/// `turbomcp_protocol::PROTOCOL_VERSION` to avoid version drift.
+pub use turbomcp_protocol::PROTOCOL_VERSION as MCP_PROTOCOL_VERSION;

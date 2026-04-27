@@ -423,7 +423,11 @@ pub struct ClientRegistrationRequest {
 }
 
 /// Dynamic Client Registration Response (RFC 7591)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// **Security note**: `client_secret` and `registration_access_token` are bearer
+/// credentials. The `Debug` implementation redacts them to prevent accidental
+/// exposure in logs.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ClientRegistrationResponse {
     /// Unique client identifier (REQUIRED)
     pub client_id: String,
@@ -460,6 +464,36 @@ pub struct ClientRegistrationResponse {
     /// Confirmed scope
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+}
+
+// Manual Debug impl: `client_secret` and `registration_access_token` are bearer
+// credentials — verbatim logging exposes them to any tracing/log sink.
+impl std::fmt::Debug for ClientRegistrationResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClientRegistrationResponse")
+            .field("client_id", &self.client_id)
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "registration_access_token",
+                &self
+                    .registration_access_token
+                    .as_ref()
+                    .map(|_| "[REDACTED]"),
+            )
+            .field("registration_client_uri", &self.registration_client_uri)
+            .field("client_id_issued_at", &self.client_id_issued_at)
+            .field("client_secret_expires_at", &self.client_secret_expires_at)
+            .field("redirect_uris", &self.redirect_uris)
+            .field("response_types", &self.response_types)
+            .field("grant_types", &self.grant_types)
+            .field("application_type", &self.application_type)
+            .field("client_name", &self.client_name)
+            .field("scope", &self.scope)
+            .finish()
+    }
 }
 
 /// Application type for OAuth client (RFC 7591)

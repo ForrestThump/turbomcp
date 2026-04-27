@@ -367,47 +367,72 @@ impl<T: Transport + Send + 'static> SessionManager<T> {
             loop {
                 interval_timer.tick().await;
 
+                // Snapshot the (id, client Arc) pairs under a read lock and
+                // release it before pinging. The previous implementation held
+                // a write lock for the entire iteration, blocking every other
+                // session-map read for `timeout × N` (default 5s × N), which
+                // froze the whole client during health-check passes.
+                let snapshot: Vec<(String, _)> = {
+                    let connections = connections.read().await;
+                    connections
+                        .iter()
+                        .map(|(id, managed)| (id.clone(), managed.client.clone()))
+                        .collect()
+                };
+
+                // Ping all sessions in parallel.
+                let mut join_set = tokio::task::JoinSet::new();
+                for (id, client) in snapshot {
+                    let timeout = timeout;
+                    join_set.spawn(async move {
+                        let res = tokio::time::timeout(timeout, client.ping()).await;
+                        let ok = matches!(res, Ok(Ok(_)));
+                        (id, ok)
+                    });
+                }
+
+                let mut results = Vec::new();
+                while let Some(res) = join_set.join_next().await {
+                    if let Ok(pair) = res {
+                        results.push(pair);
+                    }
+                }
+
+                // Re-acquire the write lock just long enough to apply state
+                // transitions for the sessions still in the map.
                 let mut connections = connections.write().await;
-
-                for (id, managed) in connections.iter_mut() {
-                    // Perform health check (ping)
-                    let health_result = tokio::time::timeout(timeout, managed.client.ping()).await;
-
-                    match health_result {
-                        Ok(Ok(_)) => {
-                            // Health check successful
-                            managed.info.last_health_check = Some(Instant::now());
-                            managed.info.failed_health_checks = 0;
-
-                            if managed.info.state != ConnectionState::Healthy {
-                                tracing::info!(
-                                    connection_id = %id,
-                                    "Connection recovered and is now healthy"
-                                );
-                                managed.info.state = ConnectionState::Healthy;
-                            }
+                for (id, ok) in results {
+                    let Some(managed) = connections.get_mut(&id) else {
+                        continue; // session was removed between snapshot and apply
+                    };
+                    if ok {
+                        managed.info.last_health_check = Some(Instant::now());
+                        managed.info.failed_health_checks = 0;
+                        if managed.info.state != ConnectionState::Healthy {
+                            tracing::info!(
+                                connection_id = %id,
+                                "Connection recovered and is now healthy"
+                            );
+                            managed.info.state = ConnectionState::Healthy;
                         }
-                        Ok(Err(_)) | Err(_) => {
-                            // Health check failed
-                            managed.info.failed_health_checks += 1;
-
-                            if managed.info.failed_health_checks >= threshold {
-                                if managed.info.state != ConnectionState::Unhealthy {
-                                    tracing::warn!(
-                                        connection_id = %id,
-                                        failed_checks = managed.info.failed_health_checks,
-                                        "Connection marked as unhealthy"
-                                    );
-                                    managed.info.state = ConnectionState::Unhealthy;
-                                }
-                            } else if managed.info.state == ConnectionState::Healthy {
-                                tracing::debug!(
+                    } else {
+                        managed.info.failed_health_checks += 1;
+                        if managed.info.failed_health_checks >= threshold {
+                            if managed.info.state != ConnectionState::Unhealthy {
+                                tracing::warn!(
                                     connection_id = %id,
                                     failed_checks = managed.info.failed_health_checks,
-                                    "Connection degraded"
+                                    "Connection marked as unhealthy"
                                 );
-                                managed.info.state = ConnectionState::Degraded;
+                                managed.info.state = ConnectionState::Unhealthy;
                             }
+                        } else if managed.info.state == ConnectionState::Healthy {
+                            tracing::debug!(
+                                connection_id = %id,
+                                failed_checks = managed.info.failed_health_checks,
+                                "Connection degraded"
+                            );
+                            managed.info.state = ConnectionState::Degraded;
                         }
                     }
                 }

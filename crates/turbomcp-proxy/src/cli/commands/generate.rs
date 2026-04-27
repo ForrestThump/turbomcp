@@ -145,7 +145,8 @@ impl GenerateCommand {
             version: Some(self.version.clone()),
             frontend_type,
             backend_type,
-            turbomcp_version: "2.1.1".to_string(),
+            // Pin generated code to the same TurboMCP release the CLI is built from.
+            turbomcp_version: env!("CARGO_PKG_VERSION").to_string(),
         };
 
         let project = generator.generate(&config)?;
@@ -358,6 +359,7 @@ mod tests {
         // Test that --release requires --build
         let cmd = GenerateCommand {
             backend: BackendArgs {
+                endpoint_path: None,
                 backend: Some(CliBackendType::Stdio),
                 cmd: Some("python".to_string()),
                 args: vec!["server.py".to_string()],
@@ -388,6 +390,7 @@ mod tests {
     fn test_parse_frontend_type() {
         let cmd = GenerateCommand {
             backend: BackendArgs {
+                endpoint_path: None,
                 backend: Some(CliBackendType::Stdio),
                 cmd: Some("python".to_string()),
                 args: vec![],

@@ -110,7 +110,7 @@ pub fn test_initialize_request() -> InitializeRequest {
             version: "1.0.0".to_string(),
             ..Default::default()
         },
-        _meta: None,
+        meta: None,
     }
 }
 

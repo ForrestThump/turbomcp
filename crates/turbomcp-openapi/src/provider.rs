@@ -4,7 +4,9 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use openapiv3::{OpenAPI, Operation, Parameter, ParameterSchemaOrContent, ReferenceOr, Schema};
+use openapiv3::{
+    OpenAPI, Operation, Parameter, ParameterSchemaOrContent, ReferenceOr, Schema, SecurityScheme,
+};
 use serde_json::{Value, json};
 use url::Url;
 
@@ -32,6 +34,19 @@ pub struct ExtractedOperation {
     pub request_body_schema: Option<Value>,
     /// What MCP type this maps to
     pub mcp_type: McpType,
+    /// Effective security requirements: a list of alternative
+    /// [`SecurityRequirement`](openapiv3::SecurityRequirement) objects. Each
+    /// entry maps a scheme name from `components.securitySchemes` to the
+    /// scopes that must be present. Satisfy any one alternative. Operation-level
+    /// `security` overrides the spec-level `security`; an explicit empty list
+    /// (`security: []`) on an operation disables auth.
+    pub security: Vec<HashMap<String, Vec<String>>>,
+    /// JSON Schema of the operation's primary success response (first 2xx
+    /// `application/json` response, with `$ref`s inlined). Surfaces in the
+    /// generated MCP `Tool::output_schema` for clients that consume MCP
+    /// 2025-11-25's `outputSchema`. `None` if the operation has no JSON
+    /// response or only `default` / non-2xx responses.
+    pub response_schema: Option<Value>,
 }
 
 /// A parameter extracted from an OpenAPI operation.
@@ -51,6 +66,60 @@ pub struct ExtractedParameter {
 
 /// Default request timeout in seconds.
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
+
+/// Hook for satisfying an operation's [`SecurityRequirement`](openapiv3::SecurityRequirement)s
+/// before the request is sent.
+///
+/// OpenAPI specifications declare auth via `securitySchemes` (`apiKey`,
+/// `http bearer`/`basic`, `oauth2`, `openIdConnect`) and per-operation/spec-level
+/// `security`. This crate parses both — `OpenApiProvider::security_schemes`
+/// returns the scheme definitions, and each [`ExtractedOperation::security`]
+/// holds the operation's effective requirements. Implement this trait to
+/// inject credentials matching one of the requirement alternatives.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use std::collections::HashMap;
+/// use std::sync::Arc;
+/// use turbomcp_openapi::{AuthProvider, OpenApiProvider};
+///
+/// #[derive(Debug)]
+/// struct StaticBearer(String);
+///
+/// impl AuthProvider for StaticBearer {
+///     fn apply(
+///         &self,
+///         request: reqwest::RequestBuilder,
+///         _requirements: &[HashMap<String, Vec<String>>],
+///         _schemes: &HashMap<String, openapiv3::SecurityScheme>,
+///     ) -> reqwest::RequestBuilder {
+///         request.bearer_auth(&self.0)
+///     }
+/// }
+///
+/// let provider = OpenApiProvider::from_string(spec)?
+///     .with_auth_provider(Arc::new(StaticBearer("token".into())));
+/// ```
+pub trait AuthProvider: Send + Sync + std::fmt::Debug {
+    /// Apply auth to an outgoing request.
+    ///
+    /// `requirements` is the list of alternative [`SecurityRequirement`](openapiv3::SecurityRequirement)
+    /// objects from the operation; satisfying any one alternative is sufficient.
+    /// Each entry maps a scheme name (from `components.securitySchemes`) to the
+    /// required scopes. `schemes` is the spec's `components.securitySchemes`
+    /// map, with references already resolved.
+    ///
+    /// Returning the unmodified `request` is acceptable for operations whose
+    /// requirements your implementation cannot satisfy — the request will then
+    /// fail with whatever auth error the upstream returns.
+    fn apply(
+        &self,
+        request: reqwest::RequestBuilder,
+        requirements: &[HashMap<String, Vec<String>>],
+        schemes: &HashMap<String, SecurityScheme>,
+    ) -> reqwest::RequestBuilder;
+}
 
 /// OpenAPI to MCP provider.
 ///
@@ -78,30 +147,84 @@ pub struct OpenApiProvider {
     client: reqwest::Client,
     /// Extracted operations
     operations: Vec<ExtractedOperation>,
+    /// Resolved security scheme definitions, keyed by scheme name.
+    security_schemes: HashMap<String, SecurityScheme>,
     /// Request timeout
     timeout: std::time::Duration,
+    /// Optional auth provider that satisfies each operation's `security` requirements.
+    auth_provider: Option<Arc<dyn AuthProvider>>,
 }
 
 impl OpenApiProvider {
     /// Create a provider from a parsed OpenAPI specification.
+    ///
+    /// If `spec.servers` is non-empty, `base_url` is initialized from
+    /// `spec.servers[0].url` (with any default `variables` substituted in). Use
+    /// [`Self::with_base_url`] to override. Server URLs that fail to parse as
+    /// absolute leave `base_url` unset; `with_base_url` must then be called
+    /// before any tool/resource invocation.
     pub fn from_spec(spec: OpenAPI) -> Self {
         let mapping = RouteMapping::default_rules();
         let timeout = std::time::Duration::from_secs(DEFAULT_TIMEOUT_SECS);
+        // `Client::builder().build()` only fails on egregious config (e.g.
+        // a missing TLS backend) — not silently downgrading to
+        // `Client::new()` (which would lose the configured timeout) is the
+        // correct stance: the user asked for a timeout, surface the error.
         let client = reqwest::Client::builder()
             .timeout(timeout)
             .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+            .expect("reqwest::Client::builder() failed; check TLS backend / build features");
+
+        let base_url = spec
+            .servers
+            .first()
+            .and_then(|server| Self::resolve_server_url(server).ok());
+        let security_schemes = Self::collect_security_schemes(&spec);
 
         let mut provider = Self {
             spec,
-            base_url: None,
+            base_url,
             mapping,
             client,
             operations: Vec::new(),
+            security_schemes,
             timeout,
+            auth_provider: None,
         };
         provider.extract_operations();
         provider
+    }
+
+    /// Substitute the default values for any `{var}` placeholders in a server URL,
+    /// then parse the result into a [`Url`].
+    fn resolve_server_url(server: &openapiv3::Server) -> Result<Url> {
+        let mut url = server.url.clone();
+        if let Some(vars) = &server.variables {
+            for (name, var) in vars {
+                let placeholder = format!("{{{name}}}");
+                url = url.replace(&placeholder, &var.default);
+            }
+        }
+        Ok(Url::parse(&url)?)
+    }
+
+    /// Resolve all `securitySchemes` to inline `SecurityScheme` definitions.
+    /// `Reference` entries (`{"$ref": "..."}`) at the top level are skipped:
+    /// the OpenAPI spec allows them but they're rare in practice and would
+    /// require a separate dereference pass against `components`.
+    fn collect_security_schemes(spec: &OpenAPI) -> HashMap<String, SecurityScheme> {
+        spec.components
+            .as_ref()
+            .map(|c| {
+                c.security_schemes
+                    .iter()
+                    .filter_map(|(name, entry)| match entry {
+                        ReferenceOr::Item(scheme) => Some((name.clone(), scheme.clone())),
+                        ReferenceOr::Reference { .. } => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Create a provider from an OpenAPI specification string.
@@ -148,6 +271,28 @@ impl OpenApiProvider {
         self
     }
 
+    /// Install an [`AuthProvider`] that injects credentials matching each
+    /// operation's [`SecurityRequirement`](openapiv3::SecurityRequirement)s.
+    /// Without this, operations on authenticated upstream APIs will fail with
+    /// 401 unless the caller has installed equivalent auth via
+    /// [`Self::with_client`].
+    #[must_use]
+    pub fn with_auth_provider(mut self, provider: Arc<dyn AuthProvider>) -> Self {
+        self.auth_provider = Some(provider);
+        self
+    }
+
+    /// Get the spec's security scheme definitions, keyed by scheme name.
+    /// Reference entries are silently dropped (rare in practice).
+    pub fn security_schemes(&self) -> &HashMap<String, SecurityScheme> {
+        &self.security_schemes
+    }
+
+    /// Get the installed auth provider, if any.
+    pub(crate) fn auth_provider(&self) -> Option<&Arc<dyn AuthProvider>> {
+        self.auth_provider.as_ref()
+    }
+
     /// Set a custom request timeout.
     ///
     /// This rebuilds the HTTP client with the new timeout. The default timeout
@@ -155,10 +300,13 @@ impl OpenApiProvider {
     #[must_use]
     pub fn with_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.timeout = timeout;
+        // See `from_spec`: rebuilding without the configured timeout would
+        // silently regress to reqwest's default; expect on builder failure
+        // instead so the caller's intent isn't lost.
         self.client = reqwest::Client::builder()
             .timeout(timeout)
             .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+            .expect("reqwest::Client::builder() failed in with_timeout");
         self
     }
 
@@ -260,6 +408,56 @@ impl OpenApiProvider {
             ReferenceOr::Reference { .. } => None,
         });
 
+        // Operation-level `security` overrides spec-level. An explicit empty
+        // list (`security: []`) on the operation disables auth and must NOT
+        // fall back to spec-level — we model that as the empty Vec.
+        let security = operation
+            .security
+            .as_ref()
+            .or(self.spec.security.as_ref())
+            .map(|reqs| {
+                reqs.iter()
+                    .map(|req| {
+                        req.iter()
+                            .map(|(name, scopes)| (name.clone(), scopes.clone()))
+                            .collect::<HashMap<_, _>>()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Pick the first 2xx response with an `application/json` body and
+        // inline its schema. Falls back to whichever 2xx the iterator yields
+        // first if none expose a JSON body.
+        let response_schema = operation
+            .responses
+            .responses
+            .iter()
+            .filter_map(|(code, resp)| {
+                let code_str = code.to_string();
+                let is_2xx = code_str
+                    .strip_prefix('2')
+                    .map(|rest| {
+                        rest.len() == 2
+                            && rest
+                                .chars()
+                                .all(|c| c.is_ascii_digit() || c == 'X' || c == 'x')
+                    })
+                    .unwrap_or(false);
+                if !is_2xx {
+                    return None;
+                }
+                match resp {
+                    ReferenceOr::Item(r) => r
+                        .content
+                        .get("application/json")
+                        .and_then(|mt| mt.schema.as_ref())
+                        .and_then(|s| self.schema_to_json(s)),
+                    ReferenceOr::Reference { .. } => None,
+                }
+            })
+            .next();
+
         ExtractedOperation {
             method: method.to_string(),
             path: path.to_string(),
@@ -269,6 +467,8 @@ impl OpenApiProvider {
             parameters,
             request_body_schema,
             mcp_type,
+            security,
+            response_schema,
         }
     }
 
@@ -385,22 +585,27 @@ impl OpenApiProvider {
     }
 
     /// Look up a `#/components/schemas/Name` reference in the parsed spec.
+    /// Follows reference chains up to `MAX_DEPTH` levels deep with cycle detection,
+    /// so chains like `Foo -> Bar -> Baz` resolve correctly without unbounded recursion.
     fn lookup_ref(&self, reference: &str) -> Option<&Schema> {
         const PREFIX: &str = "#/components/schemas/";
-        let name = reference.strip_prefix(PREFIX)?;
+        const MAX_DEPTH: usize = 10;
+        let mut name = reference.strip_prefix(PREFIX)?;
         let components = self.spec.components.as_ref()?;
-        let entry = components.schemas.get(name)?;
-        match entry {
-            ReferenceOr::Item(schema) => Some(schema),
-            ReferenceOr::Reference { reference } => {
-                // Single level of indirection; avoid unbounded recursion.
-                let nested_name = reference.strip_prefix(PREFIX)?;
-                match components.schemas.get(nested_name)? {
-                    ReferenceOr::Item(schema) => Some(schema),
-                    ReferenceOr::Reference { .. } => None,
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for _ in 0..MAX_DEPTH {
+            if !seen.insert(name) {
+                // Cycle.
+                return None;
+            }
+            match components.schemas.get(name)? {
+                ReferenceOr::Item(schema) => return Some(schema),
+                ReferenceOr::Reference { reference } => {
+                    name = reference.strip_prefix(PREFIX)?;
                 }
             }
         }
+        None
     }
 
     /// Build the full URL for an operation.
@@ -687,6 +892,120 @@ mod tests {
             next.get("$ref").and_then(|v| v.as_str()),
             Some("#/components/schemas/Node")
         );
+    }
+
+    #[test]
+    fn test_base_url_defaults_from_servers() {
+        const SPEC: &str = r#"{
+            "openapi": "3.0.0",
+            "info": { "title": "T", "version": "1.0.0" },
+            "servers": [
+                { "url": "https://api.example.com/v1" }
+            ],
+            "paths": {}
+        }"#;
+        let provider = OpenApiProvider::from_string(SPEC).unwrap();
+        assert_eq!(
+            provider.base_url.as_ref().map(Url::as_str),
+            Some("https://api.example.com/v1")
+        );
+    }
+
+    #[test]
+    fn test_base_url_substitutes_server_variables() {
+        const SPEC: &str = r#"{
+            "openapi": "3.0.0",
+            "info": { "title": "T", "version": "1.0.0" },
+            "servers": [
+                {
+                    "url": "https://{host}/api",
+                    "variables": {
+                        "host": { "default": "api.example.com" }
+                    }
+                }
+            ],
+            "paths": {}
+        }"#;
+        let provider = OpenApiProvider::from_string(SPEC).unwrap();
+        assert_eq!(
+            provider.base_url.as_ref().map(Url::as_str),
+            Some("https://api.example.com/api")
+        );
+    }
+
+    #[test]
+    fn test_with_base_url_overrides_servers_default() {
+        const SPEC: &str = r#"{
+            "openapi": "3.0.0",
+            "info": { "title": "T", "version": "1.0.0" },
+            "servers": [{ "url": "https://default.example.com" }],
+            "paths": {}
+        }"#;
+        let provider = OpenApiProvider::from_string(SPEC)
+            .unwrap()
+            .with_base_url("https://override.example.com")
+            .unwrap();
+        assert_eq!(
+            provider.base_url.as_ref().map(Url::as_str),
+            Some("https://override.example.com/")
+        );
+    }
+
+    #[test]
+    fn test_security_propagated_to_extracted_operation() {
+        const SPEC: &str = r#"{
+            "openapi": "3.0.0",
+            "info": { "title": "T", "version": "1.0.0" },
+            "security": [{ "globalKey": [] }],
+            "components": {
+                "securitySchemes": {
+                    "globalKey": {
+                        "type": "apiKey",
+                        "name": "X-API-Key",
+                        "in": "header"
+                    },
+                    "perOpBearer": {
+                        "type": "http",
+                        "scheme": "bearer"
+                    }
+                }
+            },
+            "paths": {
+                "/admin": {
+                    "post": {
+                        "operationId": "adminOp",
+                        "security": [{ "perOpBearer": [] }],
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                },
+                "/public": {
+                    "get": {
+                        "operationId": "publicOp",
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            }
+        }"#;
+        let provider = OpenApiProvider::from_string(SPEC).unwrap();
+
+        let admin = provider
+            .operations()
+            .iter()
+            .find(|op| op.operation_id.as_deref() == Some("adminOp"))
+            .unwrap();
+        assert_eq!(admin.security.len(), 1);
+        assert!(admin.security[0].contains_key("perOpBearer"));
+
+        let public = provider
+            .operations()
+            .iter()
+            .find(|op| op.operation_id.as_deref() == Some("publicOp"))
+            .unwrap();
+        // No operation-level security → falls back to spec-level
+        assert_eq!(public.security.len(), 1);
+        assert!(public.security[0].contains_key("globalKey"));
+
+        assert_eq!(provider.security_schemes().len(), 2);
     }
 
     #[test]

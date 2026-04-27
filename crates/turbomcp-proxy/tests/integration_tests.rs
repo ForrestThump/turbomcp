@@ -51,6 +51,7 @@ fn test_backend_transport_types() {
 
     let _http = BackendTransport::Http {
         url: "http://localhost:3000".to_string(),
+        endpoint_path: None,
         auth_token: None,
     };
 

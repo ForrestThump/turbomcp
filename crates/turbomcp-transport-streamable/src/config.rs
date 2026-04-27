@@ -44,13 +44,22 @@ pub struct StreamableConfig {
 
     /// Allowed origins for CORS and DNS rebinding protection.
     ///
-    /// If empty, all origins are allowed (not recommended for production).
-    /// Default: empty (all origins)
+    /// **Empty means no allowlist configured.** Combined with
+    /// [`OriginValidation::validate`] (the default), any browser-issued
+    /// request is accepted — this is the right default for plumbing/tests
+    /// but not for production. To fail closed when the allowlist is empty,
+    /// route requests through [`OriginValidation::validate_strict`] instead.
+    /// Default: empty (no restrictions; permissive)
     pub allowed_origins: Vec<String>,
 
     /// Whether to require origin validation.
     ///
-    /// When enabled, requests without valid Origin header are rejected.
+    /// When enabled, requests without valid Origin header are rejected. Note
+    /// this only forces an Origin header to be **present**; it does not
+    /// constrain *which* origin is acceptable (that comes from
+    /// `allowed_origins`). Recommended production config:
+    /// `require_origin = true` AND `allowed_origins` non-empty AND callers
+    /// using `validate_strict`.
     /// Default: false
     pub require_origin: bool,
 

@@ -150,7 +150,7 @@ pub use turbomcp_types::{
 
 // Re-export server builder and transport
 
-/// Extension trait providing transport-specific serve methods (`serve_stdio`, `serve_http`, etc.)
+/// Extension trait providing transport-specific run methods (`run_stdio`, `run_http`, etc.)
 pub use turbomcp_server::McpHandlerExt;
 
 /// Extension trait for MCP server operations
@@ -370,10 +370,17 @@ pub mod prelude {
     #[cfg_attr(docsrs, doc(cfg(feature = "telemetry")))]
     pub use turbomcp_telemetry::{TelemetryConfig, TelemetryConfigBuilder, TelemetryGuard};
 
-    /// Client types for full-stack development
+    /// Client types for full-stack development.
+    ///
+    /// `turbomcp_client::ClientCapabilities` is re-exported under the alias
+    /// `ClientCapsConfig` to avoid name-clashing with
+    /// `turbomcp_protocol::ClientCapabilities` (also re-exported at the
+    /// crate root). Users of the prelude get `ClientCapsConfig` for the
+    /// builder-side config and `ClientCapabilities` for the protocol-level
+    /// type.
     #[cfg(feature = "client-integration")]
     #[cfg_attr(docsrs, doc(cfg(feature = "client-integration")))]
-    pub use turbomcp_client::{Client, ClientBuilder, ClientCapabilities};
+    pub use turbomcp_client::{Client, ClientBuilder, ClientCapabilities as ClientCapsConfig};
 
     // Testing utilities
     pub use crate::testing::{McpTestClient, McpToolResultAssertions, ToolResultAssertions};

@@ -72,8 +72,21 @@ pub type Result<T> = std::result::Result<T, DpopError>;
 /// DPoP JWT header type as defined in RFC 9449
 pub const DPOP_JWT_TYPE: &str = "dpop+jwt";
 
-/// Maximum clock skew tolerance (5 minutes)
+/// Hard cap on clock skew accepted for DPoP proofs.
+///
+/// 5 minutes matches the upper bound RFC 9449 §11.1 considers acceptable; this
+/// is the *maximum* a DPoP validator may use, not the recommended default.
+/// Most deployments should use the smaller [`DEFAULT_CLOCK_SKEW_SECONDS`].
 pub const MAX_CLOCK_SKEW_SECONDS: i64 = 300;
+
+/// Default clock skew tolerance for DPoP proof validation (60 seconds).
+///
+/// RFC 9449 §11.1 recommends a short tolerance window so an exfiltrated proof
+/// is replayable for as little time as possible. 60 seconds matches
+/// [`DEFAULT_PROOF_LIFETIME_SECONDS`], so the effective acceptance window is
+/// `lifetime + skew = 120s`. The previous default was [`MAX_CLOCK_SKEW_SECONDS`]
+/// (300s) which made the effective window 6 minutes — needlessly permissive.
+pub const DEFAULT_CLOCK_SKEW_SECONDS: i64 = 60;
 
 /// Default proof lifetime (60 seconds)
 pub const DEFAULT_PROOF_LIFETIME_SECONDS: u64 = 60;

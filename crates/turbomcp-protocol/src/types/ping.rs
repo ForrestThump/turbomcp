@@ -5,10 +5,18 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Ping request parameters (optional data)
+/// Ping request parameters.
+///
+/// Per MCP 2025-11-25 (`schema.ts:578-581`), `PingRequest.params?` only carries
+/// optional `_meta`. The `data` field is a **TurboMCP-specific extension** used
+/// by the WebSocket reconnect probe (`turbomcp-websocket`) to echo arbitrary
+/// payload bytes for round-trip verification. Spec-strict peers will tolerate
+/// the extra field on receive (extra params are allowed) but will not echo it
+/// back. Callers writing portable code should leave `data: None`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PingParams {
-    /// Optional data to echo back
+    /// Optional data to echo back. **Non-spec TurboMCP extension** —
+    /// see the type-level docs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Value>,
 }

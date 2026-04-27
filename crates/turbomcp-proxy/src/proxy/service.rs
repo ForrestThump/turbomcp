@@ -3,6 +3,10 @@
 //! This service implements the `McpService` trait from turbomcp-transport,
 //! enabling it to be used with the Axum integration for HTTP/SSE transport.
 
+// In-tree consumer of the deprecated `turbomcp_transport::axum` subtree.
+// See `cli/commands/serve.rs` for the migration plan.
+#![allow(deprecated)]
+
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -13,7 +17,17 @@ use turbomcp_protocol::{Error as McpError, Result as McpResult, jsonrpc::JsonRpc
 use turbomcp_transport::tower::SessionInfo;
 
 use super::BackendConnector;
+use crate::error::ProxyError;
 use crate::introspection::ServerSpec;
+
+/// Convert a `ProxyError` into an `McpError`, preserving the upstream JSON-RPC
+/// error code (e.g. `-32601`, `-32602`, user-rejected `-1`) when the failure
+/// originated as a wire-level error from the backend MCP server. Pre-3.2.0 the
+/// proxy stringified everything to `-32603 Internal error`, breaking frontend
+/// retry/decision logic that keys off codes.
+fn proxy_error_to_mcp(err: ProxyError) -> McpError {
+    err.into()
+}
 
 /// Proxy service that forwards MCP requests to a backend server
 ///
@@ -66,7 +80,7 @@ impl ProxyService {
                     .backend
                     .list_tools()
                     .await
-                    .map_err(|e| McpError::internal(e.to_string()))?;
+                    .map_err(proxy_error_to_mcp)?;
 
                 Ok(serde_json::json!({
                     "tools": tools
@@ -87,7 +101,7 @@ impl ProxyService {
                     .backend
                     .call_tool(&call_request.name, call_request.arguments)
                     .await
-                    .map_err(|e| McpError::internal(e.to_string()))?;
+                    .map_err(proxy_error_to_mcp)?;
 
                 Ok(serde_json::to_value(result).map_err(|e| McpError::internal(e.to_string()))?)
             }
@@ -99,7 +113,7 @@ impl ProxyService {
                     .backend
                     .list_resources()
                     .await
-                    .map_err(|e| McpError::internal(e.to_string()))?;
+                    .map_err(proxy_error_to_mcp)?;
 
                 Ok(serde_json::json!({
                     "resources": resources
@@ -120,7 +134,7 @@ impl ProxyService {
                     .backend
                     .read_resource(&read_request.uri)
                     .await
-                    .map_err(|e| McpError::internal(e.to_string()))?;
+                    .map_err(proxy_error_to_mcp)?;
 
                 Ok(serde_json::json!({
                     "contents": contents
@@ -134,7 +148,7 @@ impl ProxyService {
                     .backend
                     .list_prompts()
                     .await
-                    .map_err(|e| McpError::internal(e.to_string()))?;
+                    .map_err(proxy_error_to_mcp)?;
 
                 Ok(serde_json::json!({
                     "prompts": prompts
@@ -158,7 +172,7 @@ impl ProxyService {
                     .backend
                     .get_prompt(&get_request.name, arguments)
                     .await
-                    .map_err(|e| McpError::internal(e.to_string()))?;
+                    .map_err(proxy_error_to_mcp)?;
 
                 Ok(serde_json::to_value(result).map_err(|e| McpError::internal(e.to_string()))?)
             }

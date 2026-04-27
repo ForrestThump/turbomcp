@@ -2,9 +2,8 @@
 
 use super::*;
 
-use serde_json::json;
-use crate::jsonrpc::*;
 use crate::types::RequestId;
+use serde_json::json;
 
 #[test]
 fn test_jsonrpc_version_serialization() {
@@ -126,6 +125,29 @@ fn test_jsonrpc_response_parse_error() {
     let error = response.error().unwrap();
     assert_eq!(error.code, -32700);
     assert_eq!(error.message, "Custom parse error");
+}
+
+/// Per JSON-RPC 2.0 §5.1, when the server cannot determine the request id
+/// (parse error / invalid request) the response object MUST contain
+/// `id: null`. The field cannot be omitted. Guard the wire shape here so that
+/// any future serde/transparent-newtype regression is caught immediately.
+#[test]
+fn test_parse_error_id_is_null_on_the_wire() {
+    let response = JsonRpcResponse::parse_error(None);
+    let v: serde_json::Value = serde_json::to_value(&response).unwrap();
+    assert_eq!(v.get("id"), Some(&serde_json::Value::Null));
+    let s = serde_json::to_string(&response).unwrap();
+    assert!(s.contains("\"id\":null"), "expected id:null in {s}");
+}
+
+/// Per JSON-RPC 2.0 §6, a Notification MUST NOT contain an `id` member. Our
+/// `JsonRpcNotification` type omits the field entirely (no `Option<...>` field),
+/// but verify the on-wire shape so a future refactor cannot accidentally add it.
+#[test]
+fn test_notification_has_no_id_on_the_wire() {
+    let n = JsonRpcNotification::without_params("notifications/cancelled".into());
+    let v: serde_json::Value = serde_json::to_value(&n).unwrap();
+    assert!(v.get("id").is_none(), "notification must not carry id");
 }
 
 #[test]
@@ -448,3 +470,52 @@ fn test_empty_method_name() {
     assert_eq!(parsed.method, "");
 }
 
+/// JSON-RPC 2.0 §5: a response object MUST contain `result` xor `error`.
+/// A payload carrying both must be rejected — the previous `#[serde(untagged)]`
+/// derive silently picked `Success` and dropped the error.
+#[test]
+fn test_response_payload_rejects_both_result_and_error() {
+    let raw = r#"{"jsonrpc":"2.0","id":1,"result":{},"error":{"code":-32603,"message":"x"}}"#;
+    let err = serde_json::from_str::<JsonRpcResponse>(raw)
+        .expect_err("response with both result and error must be rejected");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("exactly one of") && msg.contains("not both"),
+        "expected mutex error message, got: {msg}"
+    );
+}
+
+/// JSON-RPC 2.0 §5: a response object MUST contain `result` xor `error`.
+/// A payload with neither field must be rejected with a clear single-line
+/// message rather than serde's "missing field `result`" diagnostic.
+#[test]
+fn test_response_payload_rejects_neither_result_nor_error() {
+    let raw = r#"{"jsonrpc":"2.0","id":1}"#;
+    let err = serde_json::from_str::<JsonRpcResponse>(raw)
+        .expect_err("response with neither result nor error must be rejected");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("exactly one of"),
+        "expected mutex error message, got: {msg}"
+    );
+}
+
+/// Lone-error response shape parses as the Error variant — guards the positive
+/// path now that the deserializer is custom.
+#[test]
+fn test_response_payload_accepts_error_only() {
+    let raw = r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"Method not found"}}"#;
+    let resp: JsonRpcResponse = serde_json::from_str(raw).unwrap();
+    assert!(resp.is_error());
+    assert_eq!(resp.error().unwrap().code, -32601);
+}
+
+/// Lone-result response shape parses as the Success variant — guards the
+/// positive path now that the deserializer is custom.
+#[test]
+fn test_response_payload_accepts_result_only() {
+    let raw = r#"{"jsonrpc":"2.0","id":1,"result":{"ok":true}}"#;
+    let resp: JsonRpcResponse = serde_json::from_str(raw).unwrap();
+    assert!(resp.is_success());
+    assert_eq!(resp.result().unwrap(), &json!({"ok": true}));
+}

@@ -3,10 +3,33 @@
 //! This module provides flexible authentication mechanisms including
 //! Bearer tokens, API keys, and custom header authentication.
 //! Supports multiple authentication methods and environments.
+//!
+//! ## Security
+//!
+//! Token validation uses constant-time comparison via [`subtle::ConstantTimeEq`]
+//! to prevent timing side-channels. The total validation time is `O(n)` in the
+//! number of configured keys (each compared in constant time). For deployments
+//! with thousands of keys, prefer pre-hashed lookup with a constant-time HMAC
+//! verifier in front of this module.
 
 use super::errors::SecurityError;
 use crate::security::SecurityHeaders;
 use std::collections::HashSet;
+use subtle::ConstantTimeEq;
+use zeroize::Zeroize;
+
+/// Compare a presented credential against the configured set in constant time
+/// per candidate. The early-return on a match leaks only "matched / not
+/// matched", not which key matched or where the bytes diverge.
+fn ct_contains(set: &HashSet<String>, presented: &str) -> bool {
+    let presented_bytes = presented.as_bytes();
+    let mut matched = 0u8;
+    for candidate in set {
+        let eq: u8 = presented_bytes.ct_eq(candidate.as_bytes()).unwrap_u8();
+        matched |= eq;
+    }
+    matched != 0
+}
 
 /// Authentication methods
 #[derive(Clone, Debug)]
@@ -19,7 +42,14 @@ pub enum AuthMethod {
     Custom(String),
 }
 
-/// Authentication configuration
+/// Authentication configuration.
+///
+/// API keys are stored as plain `String`s in a `HashSet` for fast set
+/// operations and hash-based lookup; comparison itself goes through the
+/// constant-time [`ct_contains`] helper to prevent timing leaks. On
+/// `Drop`, every key is wiped via [`zeroize::Zeroize`] before the
+/// allocation is released, mitigating recovery from process core dumps
+/// or memory scanning.
 #[derive(Clone, Debug)]
 pub struct AuthConfig {
     /// Whether authentication is required
@@ -36,6 +66,18 @@ impl Default for AuthConfig {
             require_auth: false,
             api_keys: HashSet::new(),
             method: AuthMethod::Bearer,
+        }
+    }
+}
+
+impl Drop for AuthConfig {
+    fn drop(&mut self) {
+        // Zero each API key on drop. `HashSet` doesn't expose mutable access
+        // to its values (so the contained `String`s cannot be `zeroize()`'d
+        // in place), so we drain the set into temporary `String`s and zero
+        // those — `String::zeroize` overwrites the heap buffer before drop.
+        for mut k in self.api_keys.drain() {
+            k.zeroize();
         }
     }
 }
@@ -66,9 +108,13 @@ impl AuthConfig {
         self.method = method;
     }
 
-    /// Check if API key is valid
+    /// Check if API key is valid (constant-time per candidate).
+    ///
+    /// Comparison is timing-safe: the time taken does not reveal which
+    /// candidate key matched or where a non-matching key diverges. The total
+    /// time is linear in the number of configured keys.
     pub fn is_valid_key(&self, key: &str) -> bool {
-        self.api_keys.contains(key)
+        ct_contains(&self.api_keys, key)
     }
 }
 
@@ -107,7 +153,7 @@ fn validate_bearer_token(config: &AuthConfig, auth_header: &str) -> Result<(), S
     }
 
     let token = &auth_header[7..];
-    if !config.api_keys.contains(token) {
+    if !ct_contains(&config.api_keys, token) {
         return Err(SecurityError::AuthenticationFailed(
             "Invalid bearer token".to_string(),
         ));
@@ -125,7 +171,7 @@ fn validate_api_key(config: &AuthConfig, auth_header: &str) -> Result<(), Securi
     }
 
     let key = &auth_header[7..];
-    if !config.api_keys.contains(key) {
+    if !ct_contains(&config.api_keys, key) {
         return Err(SecurityError::AuthenticationFailed(
             "Invalid API key".to_string(),
         ));
@@ -134,20 +180,23 @@ fn validate_api_key(config: &AuthConfig, auth_header: &str) -> Result<(), Securi
     Ok(())
 }
 
-/// Validate custom header authentication
+/// Validate custom header authentication.
+///
+/// Note: the error message intentionally does not echo the header *value*; it
+/// only names the header. We do echo `header_name` because it is a static
+/// configuration value, not peer-controlled input.
 fn validate_custom_header(
     config: &AuthConfig,
     headers: &SecurityHeaders,
     header_name: &str,
 ) -> Result<(), SecurityError> {
     let custom_value = headers.get(header_name).ok_or_else(|| {
-        SecurityError::AuthenticationFailed(format!("Missing {} header", header_name))
+        SecurityError::AuthenticationFailed(format!("Missing {header_name} header"))
     })?;
 
-    if !config.api_keys.contains(custom_value) {
+    if !ct_contains(&config.api_keys, custom_value) {
         return Err(SecurityError::AuthenticationFailed(format!(
-            "Invalid {} value",
-            header_name
+            "Invalid {header_name} value"
         )));
     }
 
@@ -239,10 +288,11 @@ mod tests {
 
     #[test]
     fn test_no_auth_required() {
-        let config = AuthConfig {
-            require_auth: false,
-            ..Default::default()
-        };
+        // Build the config field-by-field rather than using struct update
+        // syntax: `AuthConfig` implements `Drop` (to zeroize API keys), and
+        // E0509 forbids moving fields out of a Drop-impl'd value.
+        let mut config = AuthConfig::default();
+        config.require_auth = false;
         let headers = HashMap::new();
 
         assert!(validate_authentication(&config, &headers).is_ok());

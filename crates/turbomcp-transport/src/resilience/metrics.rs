@@ -8,6 +8,7 @@
 //! - Operation latency measurements
 
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::RwLock;
@@ -62,7 +63,7 @@ pub struct MetricsSnapshot {
 /// Latency statistics tracker
 #[derive(Debug)]
 pub struct LatencyTracker {
-    samples: Vec<u64>,
+    samples: VecDeque<u64>,
     max_samples: usize,
 }
 
@@ -194,16 +195,17 @@ impl LatencyTracker {
     /// Create a new latency tracker
     pub fn new(max_samples: usize) -> Self {
         Self {
-            samples: Vec::with_capacity(max_samples),
+            samples: VecDeque::with_capacity(max_samples),
             max_samples,
         }
     }
 
-    /// Add a latency sample
+    /// Add a latency sample. Eviction of the oldest sample is O(1) thanks to
+    /// the underlying ring buffer.
     pub fn add_sample(&mut self, latency_us: u64) {
-        self.samples.push(latency_us);
+        self.samples.push_back(latency_us);
         if self.samples.len() > self.max_samples {
-            self.samples.remove(0);
+            self.samples.pop_front();
         }
     }
 
@@ -223,7 +225,7 @@ impl LatencyTracker {
             return 0.0;
         }
 
-        let mut sorted = self.samples.clone();
+        let mut sorted: Vec<u64> = self.samples.iter().copied().collect();
         sorted.sort_unstable();
 
         let len = sorted.len();
@@ -240,7 +242,7 @@ impl LatencyTracker {
             return 0.0;
         }
 
-        let mut sorted = self.samples.clone();
+        let mut sorted: Vec<u64> = self.samples.iter().copied().collect();
         sorted.sort_unstable();
 
         let index = ((sorted.len() as f64) * 0.95) as usize;

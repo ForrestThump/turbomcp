@@ -284,17 +284,19 @@ impl SessionSecurityManager {
         // Validate session security
         session.validate_security(&self.config, current_ip, user_agent)?;
 
-        // Check if session ID should be regenerated
+        // Check if session ID should be regenerated.
+        //
+        // Hold the lock across the rotation: the previous "drop the lock,
+        // reacquire, remove old, insert new" pattern opened a window where a
+        // concurrent `validate_session` call observing the *old* id could
+        // succeed mid-rotation. `parking_lot::Mutex` has no re-entrancy issue,
+        // so we keep one continuous critical section.
         if session.should_regenerate(&self.config) {
             let old_id = session.id.clone();
             session.regenerate_id();
             session.update_activity(current_ip);
 
-            // Move session to new ID
             let updated_session = session.clone();
-            drop(sessions); // Release the lock
-
-            let mut sessions = self.sessions.lock();
             sessions.remove(&old_id);
             sessions.insert(updated_session.id.clone(), updated_session.clone());
 

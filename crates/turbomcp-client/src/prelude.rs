@@ -44,6 +44,8 @@ pub use crate::{
 
     InitializeResult,
 
+    // Sampling
+    LlmServerInfo,
     LogHandler,
     LoggingNotification,
     PromptListChangedHandler,
@@ -53,9 +55,7 @@ pub use crate::{
     // Result/Error (most commonly used) - re-exported from turbomcp_protocol
     Result, // Note: This is Result<T, Box<Error>> from protocol
     RootsHandler,
-    // Sampling
     SamplingHandler,
-    ServerInfo,
     ToolListChangedHandler,
     UserInteractionHandler,
 };

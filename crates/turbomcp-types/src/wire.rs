@@ -8,7 +8,9 @@
 //! on the same types as native transports.
 
 #[cfg(not(feature = "std"))]
-use alloc::{string::String, vec, vec::Vec};
+use alloc::{collections::BTreeMap as HashMap, string::String, vec, vec::Vec};
+#[cfg(feature = "std")]
+use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -35,8 +37,12 @@ pub struct InitializeRequest {
     #[serde(rename = "clientInfo")]
     pub client_info: Implementation,
     /// Optional metadata for the request.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub _meta: Option<Value>,
+    ///
+    /// Per MCP 2025-11-25, `_meta` is always `{ [key: string]: unknown }` —
+    /// modelled here as `HashMap<String, Value>` so non-object values are
+    /// rejected at deserialize time.
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<HashMap<String, Value>>,
 }
 
 /// The response to a successful `initialize` request.
@@ -55,9 +61,9 @@ pub struct InitializeResult {
     /// Optional human-readable instructions for the client.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
-    /// Optional metadata for the result.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub _meta: Option<Value>,
+    /// Optional metadata for the result. See note on `InitializeRequest::meta`.
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<HashMap<String, Value>>,
 }
 
 /// Sent by the client after a successful `InitializeResult` to confirm readiness.
@@ -92,13 +98,13 @@ pub struct CallToolResult {
     ///
     /// For client applications and tools to pass context that should NOT be
     /// exposed to LLMs (tracking IDs, metrics, cache status, etc.).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub _meta: Option<Value>,
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<HashMap<String, Value>>,
     /// Optional task ID when tool execution is augmented with task tracking
     /// (MCP 2025-11-25 draft — SEP-1686).
     ///
     /// When a tool call includes task metadata, the server creates a task to
-    /// track the operation and returns the task_id here. Clients use this to
+    /// track the operation and returns the `task_id` here. Clients use this to
     /// monitor progress via `tasks/get` or retrieve final results via
     /// `tasks/result`.
     #[serde(rename = "taskId", skip_serializing_if = "Option::is_none")]
@@ -181,6 +187,6 @@ pub struct GetPromptResult {
     /// The sequence of messages that compose the prompt.
     pub messages: Vec<PromptMessage>,
     /// Optional metadata for the result.
-    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
-    pub _meta: Option<Value>,
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<HashMap<String, Value>>,
 }

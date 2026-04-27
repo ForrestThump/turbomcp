@@ -40,7 +40,10 @@
 //!     ))
 //!     .with_scopes(vec!["read".to_string(), "write".to_string()]);
 //!
-//! let oauth = OAuthProvider::new(config);
+//! // Production: pass a durable token store (e.g. Durable Objects)
+//! //   let oauth = OAuthProvider::new(config, Arc::new(store));
+//! // Tests / local dev: explicit in-memory opt-in
+//! let oauth = OAuthProvider::with_memory_store(config);
 //!
 //! // In your worker:
 //! #[event(fetch)]

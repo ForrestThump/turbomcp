@@ -395,6 +395,96 @@ pub trait McpHandler: Clone + MaybeSend + MaybeSync + 'static {
         }
     }
 
+    // ===== Resource subscriptions (MCP 2025-11-25) =====
+
+    /// Subscribes to update notifications for the given resource URI.
+    ///
+    /// Called in response to `resources/subscribe` requests. The default
+    /// implementation returns `capability_not_supported`. Servers that
+    /// advertise `resources.subscribe = true` MUST override this method —
+    /// the router calls it whenever a client invokes `resources/subscribe`.
+    ///
+    /// # Arguments
+    ///
+    /// * `uri` - The URI being subscribed to.
+    /// * `ctx` - Request context.
+    fn subscribe<'a>(
+        &'a self,
+        _uri: &'a str,
+        _ctx: &'a RequestContext,
+    ) -> impl Future<Output = McpResult<()>> + MaybeSend + 'a {
+        async {
+            Err(crate::error::McpError::capability_not_supported(
+                "resources/subscribe",
+            ))
+        }
+    }
+
+    /// Cancels a previously installed resource subscription.
+    ///
+    /// Default implementation returns `capability_not_supported`.
+    fn unsubscribe<'a>(
+        &'a self,
+        _uri: &'a str,
+        _ctx: &'a RequestContext,
+    ) -> impl Future<Output = McpResult<()>> + MaybeSend + 'a {
+        async {
+            Err(crate::error::McpError::capability_not_supported(
+                "resources/unsubscribe",
+            ))
+        }
+    }
+
+    // ===== Logging (MCP 2025-11-25) =====
+
+    /// Sets the minimum log level the server should emit via
+    /// `notifications/message`.
+    ///
+    /// Called in response to `logging/setLevel`. The level is the raw spec
+    /// string (`"debug" | "info" | "notice" | "warning" | "error" |
+    /// "critical" | "alert" | "emergency"`). The default returns
+    /// `capability_not_supported`; servers advertising the `logging`
+    /// capability must override and persist the level for use by their
+    /// `LoggingNotification`-emitting code.
+    fn set_log_level<'a>(
+        &'a self,
+        _level: &'a str,
+        _ctx: &'a RequestContext,
+    ) -> impl Future<Output = McpResult<()>> + MaybeSend + 'a {
+        async {
+            Err(crate::error::McpError::capability_not_supported(
+                "logging/setLevel",
+            ))
+        }
+    }
+
+    // ===== Completions (MCP 2025-11-25) =====
+
+    /// Returns argument completion suggestions.
+    ///
+    /// Called in response to `completion/complete`. `params` is the raw
+    /// JSON-RPC `params` object (i.e. the `CompleteRequestParams` shape:
+    /// `{ ref: …, argument: { name, value }, context?: { arguments } }`).
+    /// The return value is the raw `CompleteResult` shape (`{ completion:
+    /// { values, total?, hasMore? }, _meta? }`).
+    ///
+    /// We accept and return `serde_json::Value` here because the typed
+    /// `CompleteRequestParams` / `CompleteResult` live in `turbomcp-protocol`
+    /// (which depends on this crate, so we cannot depend on it here without
+    /// inverting the layer cake). Higher-level wrappers in `turbomcp` /
+    /// `#[server]` may expose typed signatures over this raw shape.
+    fn complete<'a>(
+        &'a self,
+        _params: Value,
+        _ctx: &'a RequestContext,
+    ) -> impl Future<Output = McpResult<Value>> + MaybeSend + 'a {
+        async {
+            Err(crate::error::McpError::capability_not_supported(
+                "completion/complete",
+            ))
+        }
+    }
+
     // ===== Lifecycle Hooks =====
 
     /// Called when the server is initialized.

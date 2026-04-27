@@ -235,7 +235,12 @@ where
     }
 }
 
-/// Optimized ring buffer for single-writer multiple-reader scenarios
+/// Ring buffer for single-writer / multiple-reader scenarios.
+///
+/// **Note:** Despite living in `lock_free`, slot synchronization is via
+/// `parking_lot::RwLock<Option<T>>` — only the head/tail cursors are atomic.
+/// Suitable for low-contention SPMC use; a true lock-free ring would need
+/// per-slot atomics or a crate like `crossbeam-queue`.
 #[derive(Debug)]
 pub struct RingBuffer<T> {
     buffer: Arc<Vec<RwLock<Option<T>>>>,

@@ -2,7 +2,7 @@
 
 use super::TelemetryLayerConfig;
 use crate::attributes::McpSpanContext;
-use crate::span_attributes::*;
+use crate::span_attributes::{MCP_DURATION_MS, MCP_ERROR_MESSAGE, MCP_STATUS};
 use futures_util::future::BoxFuture;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -59,6 +59,7 @@ where
         self.inner.poll_ready(cx)
     }
 
+    #[allow(clippy::too_many_lines)]
     fn call(&mut self, req: serde_json::Value) -> Self::Future {
         let start = Instant::now();
         let config = Arc::clone(&self.config);
@@ -70,12 +71,16 @@ where
             .unwrap_or("unknown")
             .to_string();
 
-        // Extract request ID
-        let request_id = req.get("id").map(|id| match id {
-            serde_json::Value::Number(n) => n.to_string(),
-            serde_json::Value::String(s) => s.clone(),
-            _ => "unknown".to_string(),
-        });
+        // Extract request ID (skip when redacted to avoid per-request cardinality)
+        let request_id = if config.redact_request_id {
+            None
+        } else {
+            req.get("id").map(|id| match id {
+                serde_json::Value::Number(n) => n.to_string(),
+                serde_json::Value::String(s) => s.clone(),
+                _ => "unknown".to_string(),
+            })
+        };
 
         // Check if we should instrument this method
         if !config.should_instrument(&method) {
@@ -94,7 +99,7 @@ where
             None
         };
 
-        let resource_uri = if method == "resources/read" {
+        let resource_uri = if method == "resources/read" && !config.redact_resource_uri {
             req.get("params")
                 .and_then(|p| p.get("uri"))
                 .and_then(|u| u.as_str())
@@ -169,11 +174,15 @@ where
                 // Log completion
                 if config.record_timing {
                     let current_span = Span::current();
-                    current_span.record(MCP_DURATION_MS, duration.as_millis() as i64);
+                    let duration_ms = i64::try_from(duration.as_millis()).unwrap_or(i64::MAX);
+                    current_span.record(MCP_DURATION_MS, duration_ms);
                     current_span.record(MCP_STATUS, if success { "success" } else { "error" });
 
                     if let Some(ref err) = error_msg {
-                        current_span.record(MCP_ERROR_MESSAGE, err.as_str());
+                        let truncated = truncate_error_message(err, config.error_message_max_len);
+                        if !truncated.is_empty() {
+                            current_span.record(MCP_ERROR_MESSAGE, truncated.as_ref());
+                        }
                     }
 
                     info!(
@@ -243,7 +252,8 @@ where
 
                 if config.record_timing {
                     let current_span = Span::current();
-                    current_span.record(MCP_DURATION_MS, duration.as_millis() as i64);
+                    let duration_ms = i64::try_from(duration.as_millis()).unwrap_or(i64::MAX);
+                    current_span.record(MCP_DURATION_MS, duration_ms);
                     current_span.record(MCP_STATUS, if success { "success" } else { "error" });
 
                     info!(
@@ -261,6 +271,28 @@ where
     }
 }
 
+/// Bounded copy of a JSON-RPC error message for span recording. JSON-RPC
+/// `error.message` can be arbitrary user-controlled or backend-leaked text;
+/// the layer truncates it before exporting so OTel collectors don't ingest
+/// kilobyte stack traces or echoed user input verbatim.
+fn truncate_error_message(msg: &str, max_len: usize) -> std::borrow::Cow<'_, str> {
+    if max_len == 0 {
+        return std::borrow::Cow::Borrowed("");
+    }
+    if msg.len() <= max_len {
+        return std::borrow::Cow::Borrowed(msg);
+    }
+    // Truncate at a UTF-8 char boundary, then append a marker.
+    let mut end = max_len;
+    while end > 0 && !msg.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = String::with_capacity(end + 14);
+    out.push_str(&msg[..end]);
+    out.push_str("…[truncated]");
+    std::borrow::Cow::Owned(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,5 +305,34 @@ mod tests {
         // Just verify the config is accessible
         assert!(config.record_timing);
         assert!(config.record_sizes);
+    }
+
+    #[test]
+    fn test_truncate_error_message_short() {
+        let msg = "boom";
+        let out = truncate_error_message(msg, 512);
+        assert_eq!(out, "boom");
+    }
+
+    #[test]
+    fn test_truncate_error_message_long() {
+        let msg = "x".repeat(1024);
+        let out = truncate_error_message(&msg, 16);
+        assert!(out.starts_with("xxxxxxxxxxxxxxxx"));
+        assert!(out.ends_with("…[truncated]"));
+    }
+
+    #[test]
+    fn test_truncate_error_message_zero_len() {
+        let out = truncate_error_message("anything", 0);
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn test_truncate_error_message_utf8_boundary() {
+        // 'é' is two bytes; max_len 5 lands inside the 4th char's bytes
+        let msg = "héllo world";
+        let out = truncate_error_message(msg, 5);
+        assert!(out.starts_with("héll"));
     }
 }

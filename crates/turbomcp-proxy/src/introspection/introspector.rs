@@ -157,7 +157,7 @@ impl McpIntrospector {
                 version: self.client_version.clone(),
                 ..Default::default()
             },
-            _meta: None,
+            meta: None,
         };
 
         backend.initialize(request).await

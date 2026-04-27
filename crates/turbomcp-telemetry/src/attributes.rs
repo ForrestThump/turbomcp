@@ -2,7 +2,12 @@
 //!
 //! Provides utilities for creating properly attributed spans for MCP operations.
 
-use crate::span_attributes::*;
+use crate::span_attributes::{
+    MCP_CLIENT_NAME, MCP_CLIENT_VERSION, MCP_DURATION_MS, MCP_ERROR_MESSAGE, MCP_METHOD,
+    MCP_PROMPT_NAME, MCP_PROTOCOL_VERSION, MCP_REQUEST_ID, MCP_RESOURCE_URI, MCP_SERVER_NAME,
+    MCP_SERVER_VERSION, MCP_SESSION_ID, MCP_STATUS, MCP_TENANT_ID, MCP_TOOL_NAME, MCP_TRANSPORT,
+    MCP_USER_ID,
+};
 use std::time::Duration;
 use tracing::{Span, info_span};
 
@@ -200,9 +205,14 @@ impl McpSpanContext {
     }
 }
 
-/// Record request completion on a span
+/// Record request completion on a span.
+///
+/// Used by the tower service's request-completion hook (see
+/// `tower::service::record_completion_for_span`). Public so external
+/// observability adapters can plug into the same recording shape.
 pub fn record_completion(span: &Span, duration: Duration, success: bool, error: Option<&str>) {
-    span.record(MCP_DURATION_MS, duration.as_millis() as i64);
+    let duration_ms = i64::try_from(duration.as_millis()).unwrap_or(i64::MAX);
+    span.record(MCP_DURATION_MS, duration_ms);
     span.record(MCP_STATUS, if success { "success" } else { "error" });
 
     if let Some(err) = error {

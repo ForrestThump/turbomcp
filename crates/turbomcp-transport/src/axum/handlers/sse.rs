@@ -1,5 +1,9 @@
 //! Server-Sent Events handler for real-time MCP communication
 
+// See `mod.rs` — internal subtree references silenced; deprecation fires for
+// external consumers via the source-level `#[deprecated]` attributes.
+#![allow(deprecated)]
+
 use std::convert::Infallible;
 
 use axum::{

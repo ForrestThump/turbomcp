@@ -15,6 +15,9 @@ pub struct Root {
     /// Optional human-readable name for this root
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Optional metadata per the current MCP specification
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub _meta: Option<serde_json::Value>,
 }
 
 /// List roots request with optional metadata

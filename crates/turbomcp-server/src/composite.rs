@@ -355,16 +355,31 @@ impl CompositeHandler {
 
     /// Find a registered prefix that `s` starts with, followed by the given separator.
     /// Returns `(prefix, remainder)`. Longest prefix wins to handle nested mount points.
+    /// Avoids per-iteration string allocation (the previous `format!("{prefix}{sep}")`
+    /// was O(n × prefix.len) on every routed call).
     fn match_prefix<'a>(&self, s: &'a str, sep: &str) -> Option<(&'a str, &'a str)> {
+        let sep_bytes = sep.as_bytes();
         let mut best: Option<(&str, &'a str)> = None;
         for h in self.handlers.iter() {
-            let with_sep = format!("{}{}", h.prefix, sep);
-            if let Some(rest) = s.strip_prefix(&with_sep) {
-                let prefix_slice = &s[..h.prefix.len()];
-                match best {
-                    Some((p, _)) if p.len() >= h.prefix.len() => {}
-                    _ => best = Some((prefix_slice, rest)),
-                }
+            let prefix_len = h.prefix.len();
+            let total = prefix_len + sep.len();
+            if s.len() < total {
+                continue;
+            }
+            if !s.is_char_boundary(prefix_len) || !s.is_char_boundary(total) {
+                continue;
+            }
+            if &s.as_bytes()[..prefix_len] != h.prefix.as_bytes() {
+                continue;
+            }
+            if &s.as_bytes()[prefix_len..total] != sep_bytes {
+                continue;
+            }
+            let prefix_slice = &s[..prefix_len];
+            let rest = &s[total..];
+            match best {
+                Some((p, _)) if p.len() >= prefix_len => {}
+                _ => best = Some((prefix_slice, rest)),
             }
         }
         best

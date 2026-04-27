@@ -490,8 +490,16 @@ impl DpopProof {
             }
         })?;
 
-        // Use proper validation with signature verification enabled (RFC 9449 requirement)
-        let validation = Validation::new(jwt_header.alg);
+        // Configure validation for DPoP JWTs (RFC 9449):
+        // - DPoP proofs use `iat` for freshness, not `exp` — disable exp validation
+        // - DPoP proofs have no `aud` claim — disable audience validation
+        // - `iat` is required per RFC 9449 §4.2
+        // Leaving these as the Validation::new() defaults would reject every valid
+        // DPoP proof because jsonwebtoken treats a missing `exp` as an error by default,
+        // and it would require an `aud` claim that DPoP proofs never carry.
+        let mut validation = Validation::new(jwt_header.alg);
+        validation.validate_exp = false; // DPoP uses iat, not exp
+        validation.set_required_spec_claims(&["iat"]); // Require iat per RFC 9449 §4.2
 
         // Decode and validate JWT signature using the embedded public key
         let token_data = decode::<DpopPayload>(jwt, &decoding_key, &validation).map_err(|e| {

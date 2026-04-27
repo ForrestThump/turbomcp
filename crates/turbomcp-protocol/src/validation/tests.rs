@@ -319,9 +319,10 @@ fn test_validate_response_valid_error() {
 
 #[test]
 fn test_validate_response_both_result_and_error() {
-    // Test that JSON with both result and error fields deserializes to Success variant
-    // (serde's untagged enum picks the first matching variant - Success)
-    // This validates that our type-safe design enforces single variant behavior
+    // Per JSON-RPC 2.0 §5, a response object MUST contain exactly one of
+    // `result` or `error`. Pre-3.2.0 the untagged enum silently dropped the
+    // error field by selecting `Success` first; the custom Deserialize now
+    // rejects the input with a clear error so callers can return -32600.
     let json_with_both = r#"{
         "jsonrpc": "2.0",
         "result": {"status": "success"},
@@ -332,13 +333,11 @@ fn test_validate_response_both_result_and_error() {
         "id": "test"
     }"#;
 
-    let response = serde_json::from_str::<JsonRpcResponse>(json_with_both).unwrap();
-
-    // Should parse as Success (first variant), ignoring the error field
-    assert!(response.is_success());
-    assert!(!response.is_error());
-    assert!(response.result().is_some());
-    assert!(response.error().is_none());
+    let err = serde_json::from_str::<JsonRpcResponse>(json_with_both).unwrap_err();
+    assert!(
+        err.to_string().contains("not both"),
+        "expected 'not both' diagnostic, got: {err}"
+    );
 }
 
 #[test]
@@ -1119,6 +1118,6 @@ fn create_valid_initialize_request() -> InitializeRequest {
             version: "1.0.0".to_string(),
             ..Default::default()
         },
-        _meta: None,
+        meta: None,
     }
 }

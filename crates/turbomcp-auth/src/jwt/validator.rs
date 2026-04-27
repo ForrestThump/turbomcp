@@ -480,10 +480,25 @@ impl JwtValidator {
             .exp
             .map(|exp| UNIX_EPOCH + Duration::from_secs(exp));
 
+        // Subject claim is a per-user identifier and is therefore PII in many
+        // deployments — log a SHA-256 prefix instead of the raw value so that
+        // structured-log destinations can still correlate validations from the
+        // same user without storing the user-id in cleartext.
+        let sub_hash = match token_data.claims.sub.as_deref() {
+            Some(sub) => {
+                use sha2::{Digest, Sha256};
+                let digest = Sha256::digest(sub.as_bytes());
+                format!(
+                    "sha256:{:02x}{:02x}{:02x}{:02x}",
+                    digest[0], digest[1], digest[2], digest[3]
+                )
+            }
+            None => "<none>".to_string(),
+        };
         debug!(
             issuer = %self.expected_issuer,
             audience = %self.expected_audience,
-            subject = ?token_data.claims.sub,
+            subject_hash = %sub_hash,
             algorithm = ?header.alg,
             "JWT validation successful"
         );

@@ -3,6 +3,10 @@
 //! This module provides the main `McpServerConfig` struct with environment-specific
 //! presets and builder pattern methods for configuring the MCP server.
 
+// See `mod.rs` — internal subtree references silenced; deprecation fires for
+// external consumers via the source-level `#[deprecated]` attributes.
+#![allow(deprecated)]
+
 use std::time::Duration;
 
 use super::{
@@ -10,7 +14,15 @@ use super::{
 };
 
 /// Production-grade configuration for MCP server with comprehensive production settings
+///
+/// **Deprecated since 3.2.0.** This subtree predates the MCP 2025-11-25 Streamable
+/// HTTP rework. Use `turbomcp_server::transport::http` for spec-compliant serving.
 #[derive(Debug, Clone)]
+#[deprecated(
+    since = "3.2.0",
+    note = "Use `turbomcp_server::transport::http` for spec-compliant Streamable HTTP \
+            (MCP 2025-11-25). This subtree will be removed in a future major release."
+)]
 pub struct McpServerConfig {
     /// Maximum request size in bytes
     pub max_request_size: usize,

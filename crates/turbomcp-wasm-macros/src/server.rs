@@ -88,66 +88,127 @@ impl ComponentAttrs {
     /// Supports multiple formats:
     /// - `#[tool("description")]` - just description
     /// - `#[tool(description = "desc", tags = ["a", "b"], version = "1.0")]` - full syntax
-    fn parse(attr: &Attribute) -> Self {
+    ///
+    /// Unknown keys (`descriptio = "..."` typo, etc.) and non-string-literal
+    /// values now produce a `syn::Error` so the user sees a compile error
+    /// instead of a silently-default-named tool.
+    fn parse(attr: &Attribute) -> syn::Result<Self> {
         let mut attrs = Self::default();
 
         // Try parsing as #[attr("value")]
         if let Ok(lit) = attr.parse_args::<LitStr>() {
             attrs.description = Some(lit.value());
-            return attrs;
+            return Ok(attrs);
         }
 
         // Try parsing as #[attr(description = "value", tags = [...], version = "...")]
         if let Ok(args) = attr.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated) {
-            for meta in args {
-                if let Meta::NameValue(nv) = &meta
-                    && let Some(key) = nv.path.get_ident().map(|i| i.to_string())
-                    && let Expr::Lit(ExprLit {
-                        lit: Lit::Str(s), ..
-                    }) = &nv.value
-                {
-                    match key.as_str() {
-                        "description" => attrs.description = Some(s.value()),
-                        "version" => attrs.version = Some(s.value()),
-                        _ => {}
+            for meta in &args {
+                let nv = match meta {
+                    Meta::NameValue(nv) => nv,
+                    _ => continue,
+                };
+                let Some(key) = nv.path.get_ident().map(|i| i.to_string()) else {
+                    continue;
+                };
+                match key.as_str() {
+                    "description" | "version" => {
+                        let Expr::Lit(ExprLit {
+                            lit: Lit::Str(s), ..
+                        }) = &nv.value
+                        else {
+                            return Err(syn::Error::new_spanned(
+                                &nv.value,
+                                format!("`{key}` must be a string literal"),
+                            ));
+                        };
+                        if key == "description" {
+                            attrs.description = Some(s.value());
+                        } else {
+                            attrs.version = Some(s.value());
+                        }
+                    }
+                    "tags" => {
+                        // Parsed below from the token stream.
+                    }
+                    other => {
+                        return Err(syn::Error::new_spanned(
+                            &nv.path,
+                            format!(
+                                "unknown component attribute `{other}`; expected one of `description`, `tags`, `version`",
+                            ),
+                        ));
                     }
                 }
             }
 
-            // Parse tags using alternative method (handles array syntax)
+            // Parse tags using alternative method (handles array syntax).
             let token_str = attr.meta.to_token_stream().to_string();
             attrs.tags = parse_tags_array(&token_str);
         }
 
-        attrs
+        Ok(attrs)
     }
 }
 
-/// Parse `tags = ["a", "b", "c"]` pattern from token string.
+/// Parse `tags = [..]` pattern from a token stream by walking the token tree
+/// rather than substring-matching on the rendered string.
+///
+/// Pre-3.2.0 implementation called `token_str.find("tags")`, which would match
+/// the literal substring inside an unrelated description (e.g.
+/// `description = "tags=[…] in your code"`) and then mis-parse the `[…]` that
+/// followed. Walking the token stream restricts matches to a bare `tags` ident
+/// followed by `=` and a bracketed group. Recurses into nested groups
+/// (parens / braces / brackets) so callers can pass either the full attribute
+/// (`#[tool(tags = […])]`) or just the parenthesized contents.
 fn parse_tags_array(token_str: &str) -> Vec<String> {
-    let Some(tags_start) = token_str.find("tags") else {
+    let Ok(tokens) = syn::parse_str::<proc_macro2::TokenStream>(token_str) else {
         return Vec::new();
     };
-    let Some(bracket_start) = token_str[tags_start..].find('[') else {
-        return Vec::new();
-    };
-    let after_bracket = &token_str[tags_start + bracket_start + 1..];
-    let Some(bracket_end) = after_bracket.find(']') else {
-        return Vec::new();
-    };
+    parse_tags_array_in(tokens)
+}
 
-    let tags_content = &after_bracket[..bracket_end];
-    tags_content
-        .split(',')
-        .filter_map(|part| {
-            let part = part.trim();
-            if part.starts_with('"') && part.ends_with('"') && part.len() >= 2 {
-                Some(part[1..part.len() - 1].to_string())
-            } else {
-                None
+fn parse_tags_array_in(tokens: proc_macro2::TokenStream) -> Vec<String> {
+    let mut iter = tokens.into_iter().peekable();
+    while let Some(token) = iter.next() {
+        match &token {
+            proc_macro2::TokenTree::Ident(ident) if ident == "tags" => {
+                // `tags` `=` `[..]` — peek the following two tokens.
+                let Some(proc_macro2::TokenTree::Punct(p)) = iter.next() else {
+                    continue;
+                };
+                if p.as_char() != '=' {
+                    continue;
+                }
+                let Some(proc_macro2::TokenTree::Group(group)) = iter.next() else {
+                    continue;
+                };
+                if group.delimiter() != proc_macro2::Delimiter::Bracket {
+                    continue;
+                }
+                return group
+                    .stream()
+                    .into_iter()
+                    .filter_map(|t| match t {
+                        proc_macro2::TokenTree::Literal(lit) => {
+                            syn::parse_str::<syn::LitStr>(&lit.to_string())
+                                .ok()
+                                .map(|s| s.value())
+                        }
+                        _ => None,
+                    })
+                    .collect();
             }
-        })
-        .collect()
+            proc_macro2::TokenTree::Group(group) => {
+                let nested = parse_tags_array_in(group.stream());
+                if !nested.is_empty() {
+                    return nested;
+                }
+            }
+            _ => {}
+        }
+    }
+    Vec::new()
 }
 
 /// Information about a tool method
@@ -195,9 +256,9 @@ pub fn generate_server(args: ServerArgs, mut impl_block: ItemImpl) -> Result<Tok
     let struct_name = extract_struct_name(&impl_block)?;
 
     // Extract methods with MCP attributes
-    let tools = extract_tool_methods(&impl_block);
-    let resources = extract_resource_methods(&impl_block);
-    let prompts = extract_prompt_methods(&impl_block);
+    let tools = extract_tool_methods(&impl_block)?;
+    let resources = extract_resource_methods(&impl_block)?;
+    let prompts = extract_prompt_methods(&impl_block)?;
 
     // Strip MCP attributes from methods
     strip_mcp_attributes(&mut impl_block);
@@ -381,14 +442,14 @@ fn extract_struct_name(impl_block: &ItemImpl) -> Result<Ident> {
 }
 
 /// Extract tool methods from impl block
-fn extract_tool_methods(impl_block: &ItemImpl) -> Vec<ToolMethod> {
+fn extract_tool_methods(impl_block: &ItemImpl) -> syn::Result<Vec<ToolMethod>> {
     let mut tools = Vec::new();
 
     for item in &impl_block.items {
         if let ImplItem::Fn(method) = item {
             for attr in &method.attrs {
                 if attr.path().is_ident("tool") {
-                    let attrs = ComponentAttrs::parse(attr);
+                    let attrs = ComponentAttrs::parse(attr)?;
                     let description = attrs.description.unwrap_or_else(|| "Tool".to_string());
                     let (has_context, arg_type) = extract_tool_arg_type_with_ctx(&method.sig);
 
@@ -406,18 +467,18 @@ fn extract_tool_methods(impl_block: &ItemImpl) -> Vec<ToolMethod> {
         }
     }
 
-    tools
+    Ok(tools)
 }
 
 /// Extract resource methods from impl block
-fn extract_resource_methods(impl_block: &ItemImpl) -> Vec<ResourceMethod> {
+fn extract_resource_methods(impl_block: &ItemImpl) -> syn::Result<Vec<ResourceMethod>> {
     let mut resources = Vec::new();
 
     for item in &impl_block.items {
         if let ImplItem::Fn(method) = item {
             for attr in &method.attrs {
                 if attr.path().is_ident("resource") {
-                    let attrs = ComponentAttrs::parse(attr);
+                    let attrs = ComponentAttrs::parse(attr)?;
                     let uri_template = attrs
                         .description
                         .unwrap_or_else(|| "resource://".to_string());
@@ -436,18 +497,18 @@ fn extract_resource_methods(impl_block: &ItemImpl) -> Vec<ResourceMethod> {
         }
     }
 
-    resources
+    Ok(resources)
 }
 
 /// Extract prompt methods from impl block
-fn extract_prompt_methods(impl_block: &ItemImpl) -> Vec<PromptMethod> {
+fn extract_prompt_methods(impl_block: &ItemImpl) -> syn::Result<Vec<PromptMethod>> {
     let mut prompts = Vec::new();
 
     for item in &impl_block.items {
         if let ImplItem::Fn(method) = item {
             for attr in &method.attrs {
                 if attr.path().is_ident("prompt") {
-                    let attrs = ComponentAttrs::parse(attr);
+                    let attrs = ComponentAttrs::parse(attr)?;
                     let description = attrs.description.unwrap_or_else(|| "Prompt".to_string());
                     let (has_context, has_args, arg_type) =
                         extract_prompt_arg_info_with_ctx(&method.sig);
@@ -467,7 +528,7 @@ fn extract_prompt_methods(impl_block: &ItemImpl) -> Vec<PromptMethod> {
         }
     }
 
-    prompts
+    Ok(prompts)
 }
 
 /// Extract the argument type from a tool method signature, along with context detection.

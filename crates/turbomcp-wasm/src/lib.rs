@@ -68,11 +68,11 @@
 //! ```toml
 //! # Cargo.toml
 //! [dependencies]
-//! turbomcp-wasm = { version = "3.0", default-features = false, features = ["wasm-server"] }
-//! worker = "0.7"
+//! turbomcp-wasm = { version = "3.1", default-features = false, features = ["wasm-server"] }
+//! worker = "0.8"
 //! serde = { version = "1.0", features = ["derive"] }
-//! schemars = "1.0"  # For automatic JSON schema generation
-//! getrandom = { version = "0.3", features = ["wasm_js"] }
+//! schemars = "1.2"  # For automatic JSON schema generation
+//! getrandom = { version = "0.4", features = ["wasm_js"] }
 //! ```
 //!
 //! ```bash

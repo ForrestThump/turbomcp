@@ -230,12 +230,12 @@ pub trait TokenStore: Send + Sync + 'static {
 /// # Example
 ///
 /// ```ignore
-/// // Tests and development: default OAuthProvider uses MemoryTokenStore
-/// let oauth = OAuthProvider::new(config);
+/// // Tests and development: explicit in-memory opt-in (constructor names the trade-off)
+/// let oauth = OAuthProvider::with_memory_store(config);
 ///
-/// // Production Workers: supply a DurableObjectTokenStore explicitly
+/// // Production Workers: pass a DurableObjectTokenStore at construction
 /// let store = DurableObjectTokenStore::from_env(&env, "MCP_OAUTH_TOKENS")?;
-/// let oauth = OAuthProvider::new(config).with_store(Arc::new(store));
+/// let oauth = OAuthProvider::new(config, Arc::new(store));
 /// ```
 #[derive(Debug, Default)]
 pub struct MemoryTokenStore {

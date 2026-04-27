@@ -1,4 +1,4 @@
-//! OpenTelemetry integration and observability for TurboMCP SDK
+//! `OpenTelemetry` integration and observability for `TurboMCP` SDK
 //!
 //! This crate provides comprehensive telemetry capabilities for MCP servers and clients:
 //!

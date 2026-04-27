@@ -303,23 +303,23 @@ impl<T: Transport + 'static> Client<T> {
     /// ```
     pub async fn shutdown(&self) -> Result<()> {
         self.inner.shutdown_requested.store(true, Ordering::Relaxed);
-        tracing::info!("🛑 Shutting down MCP client");
+        tracing::info!("Shutting down MCP client");
 
         // 1. Shutdown message dispatcher
         self.inner.protocol.dispatcher().shutdown();
-        tracing::debug!("✅ Message dispatcher stopped");
+        tracing::debug!("Message dispatcher stopped");
 
         // 2. Disconnect transport (WebSocket: stops reconnection, HTTP: closes connections)
         match self.inner.protocol.transport().disconnect().await {
             Ok(()) => {
-                tracing::info!("✅ Transport disconnected successfully");
+                tracing::info!("Transport disconnected successfully");
             }
             Err(e) => {
                 tracing::warn!("Transport disconnect error (may already be closed): {}", e);
             }
         }
 
-        tracing::info!("✅ MCP client shutdown complete");
+        tracing::info!("MCP client shutdown complete");
         Ok(())
     }
 }
@@ -466,7 +466,9 @@ impl Client<turbomcp_transport::tcp::TcpTransport> {
     ///
     /// # Arguments
     ///
-    /// * `addr` - Server address (e.g., "127.0.0.1:8765" or localhost:8765")
+    /// * `addr` - Server address as a numeric `SocketAddr` (e.g. `"127.0.0.1:8765"`,
+    ///   `"[::1]:8765"`). DNS hostnames like `"localhost:8765"` are NOT resolved here —
+    ///   pre-resolve via `tokio::net::lookup_host` if needed.
     ///
     /// # Returns
     ///
@@ -594,13 +596,13 @@ impl<T: Transport + 'static> Client<T> {
                 };
 
                 tracing::debug!(
-                    "🔄 [request_handler] Handling server-initiated request: method={}, id={:?}",
+                    "[request_handler] Handling server-initiated request: method={}, id={:?}",
                     method,
                     req_id
                 );
                 if let Err(e) = client.handle_request(request).await {
                     tracing::error!(
-                        "❌ [request_handler] Error handling server request '{}': {}",
+                        "[request_handler] Error handling server request '{}': {}",
                         method,
                         e
                     );
@@ -608,12 +610,11 @@ impl<T: Transport + 'static> Client<T> {
                     tracing::error!("   Error kind: {:?}", e.kind);
                 } else {
                     tracing::debug!(
-                        "✅ [request_handler] Successfully handled server request: method={}, id={:?}",
+                        "[request_handler] Successfully handled server request: method={}, id={:?}",
                         method,
                         req_id
                     );
                 }
-                // Permit automatically released on drop ✅
             });
             Ok(())
         });
@@ -683,7 +684,7 @@ impl<T: Transport + 'static> Client<T> {
                         }
                         Err(e) => {
                             tracing::warn!(
-                                "⚠️  [handle_request] Sampling handler returned error: {}",
+                                "[handle_request] Sampling handler returned error: {}",
                                 e
                             );
 
@@ -694,8 +695,8 @@ impl<T: Transport + 'static> Client<T> {
                             {
                                 // HandlerError has explicit JSON-RPC code mapping
                                 let json_err = handler_err.into_jsonrpc_error();
-                                tracing::info!(
-                                    "📋 [handle_request] HandlerError mapped to JSON-RPC code: {}",
+                                tracing::debug!(
+                                    "[handle_request] HandlerError mapped to JSON-RPC code: {}",
                                     json_err.code
                                 );
                                 (json_err.code, json_err.message)
@@ -703,8 +704,8 @@ impl<T: Transport + 'static> Client<T> {
                                 e.downcast_ref::<turbomcp_protocol::Error>()
                             {
                                 // Protocol errors have ErrorKind-based mapping
-                                tracing::info!(
-                                    "📋 [handle_request] Protocol error mapped to code: {}",
+                                tracing::debug!(
+                                    "[handle_request] Protocol error mapped to code: {}",
                                     proto_err.jsonrpc_error_code()
                                 );
                                 (proto_err.jsonrpc_error_code(), proto_err.to_string())
@@ -712,7 +713,7 @@ impl<T: Transport + 'static> Client<T> {
                                 // Generic errors default to Internal (-32603)
                                 // Log the error type for debugging (should rarely hit this path)
                                 tracing::warn!(
-                                    "📋 [handle_request] Sampling handler returned unknown error type (not HandlerError or Protocol error): {}",
+                                    "[handle_request] Sampling handler returned unknown error type (not HandlerError or Protocol error): {}",
                                     std::any::type_name_of_val(&*e)
                                 );
                                 (-32603, format!("Sampling handler error: {}", e))
@@ -726,15 +727,11 @@ impl<T: Transport + 'static> Client<T> {
                             let response =
                                 JsonRpcResponse::error_response(error, request.id.clone());
 
-                            tracing::info!(
-                                "🔄 [handle_request] Attempting to send error response for request: {:?}",
+                            tracing::debug!(
+                                "[handle_request] Sending error response for request: {:?}",
                                 request.id
                             );
                             self.send_response(response).await?;
-                            tracing::info!(
-                                "✅ [handle_request] Error response sent successfully for request: {:?}",
-                                request.id
-                            );
                         }
                     }
                 } else {
@@ -1004,23 +1001,29 @@ impl<T: Transport + 'static> Client<T> {
     }
 
     async fn send_response(&self, response: JsonRpcResponse) -> Result<()> {
-        tracing::info!(
-            "📤 [send_response] Sending JSON-RPC response: id={:?}",
-            response.id
+        tracing::debug!(
+            response_id = ?response.id,
+            "Sending JSON-RPC response"
         );
 
         let payload = serde_json::to_vec(&response).map_err(|e| {
-            tracing::error!("❌ [send_response] Failed to serialize response: {}", e);
+            tracing::error!("send_response failed to serialize: {e}");
             Error::internal(format!("Failed to serialize response: {}", e))
         })?;
 
+        // Server-initiated responses (sampling/createMessage, elicitation/create)
+        // can carry sensitive LLM output, user-elicited credentials, or PII.
+        // Log only size+id at debug; the body is `trace!`-only so operators
+        // must opt in explicitly via RUST_LOG.
         tracing::debug!(
-            "📤 [send_response] Response payload: {} bytes",
-            payload.len()
+            response_id = ?response.id,
+            payload_bytes = payload.len(),
+            "Response serialized"
         );
-        tracing::debug!(
-            "📤 [send_response] Response JSON: {}",
-            String::from_utf8_lossy(&payload)
+        tracing::trace!(
+            response_id = ?response.id,
+            response_json = %String::from_utf8_lossy(&payload),
+            "Response payload (trace-only; may contain sensitive data)"
         );
 
         let message = TransportMessage::new(
@@ -1034,14 +1037,11 @@ impl<T: Transport + 'static> Client<T> {
             .send(message)
             .await
             .map_err(|e| {
-                tracing::error!("❌ [send_response] Transport send failed: {}", e);
+                tracing::error!("send_response transport send failed: {e}");
                 Error::transport(format!("Failed to send response: {}", e))
             })?;
 
-        tracing::info!(
-            "✅ [send_response] Response sent successfully: id={:?}",
-            response.id
-        );
+        tracing::debug!(response_id = ?response.id, "Response sent");
         Ok(())
     }
 
@@ -1103,10 +1103,21 @@ impl<T: Transport + 'static> Client<T> {
                 title: Some("TurboMCP Client".to_string()),
                 ..Default::default()
             },
-            _meta: None,
+            meta: None,
         };
 
         self.initialize_with_request(request).await
+    }
+
+    /// Whether [`Client::initialize`] has completed for this client.
+    ///
+    /// Lock-free; safe to call from any task. Useful for callers that
+    /// previously had to pattern-match on
+    /// `Error::invalid_request("Client not initialized")` to detect the
+    /// initialized state.
+    #[must_use]
+    pub fn is_initialized(&self) -> bool {
+        self.inner.initialized.load(Ordering::Relaxed)
     }
 
     /// Initialize the MCP session with an explicit initialize request.
@@ -1300,6 +1311,9 @@ impl<T: Transport + 'static> Client<T> {
     /// Returns the current `Task` state including status, timestamps, and messages.
     #[cfg(feature = "experimental-tasks")]
     pub async fn get_task(&self, task_id: &str) -> Result<Task> {
+        if !self.inner.initialized.load(Ordering::Relaxed) {
+            return Err(Error::invalid_request("Client not initialized"));
+        }
         let request = GetTaskRequest {
             task_id: task_id.to_string(),
         };
@@ -1328,6 +1342,9 @@ impl<T: Transport + 'static> Client<T> {
     /// Returns the updated `Task` state (typically with status "cancelled").
     #[cfg(feature = "experimental-tasks")]
     pub async fn cancel_task(&self, task_id: &str) -> Result<Task> {
+        if !self.inner.initialized.load(Ordering::Relaxed) {
+            return Err(Error::invalid_request("Client not initialized"));
+        }
         let request = CancelTaskRequest {
             task_id: task_id.to_string(),
         };
@@ -1361,6 +1378,9 @@ impl<T: Transport + 'static> Client<T> {
         cursor: Option<String>,
         limit: Option<usize>,
     ) -> Result<ListTasksResult> {
+        if !self.inner.initialized.load(Ordering::Relaxed) {
+            return Err(Error::invalid_request("Client not initialized"));
+        }
         let request = ListTasksRequest { cursor, limit };
 
         self.inner
@@ -1388,6 +1408,9 @@ impl<T: Transport + 'static> Client<T> {
     /// Returns a `GetTaskPayloadResult` containing the operation result (e.g. CallToolResult).
     #[cfg(feature = "experimental-tasks")]
     pub async fn get_task_result(&self, task_id: &str) -> Result<GetTaskPayloadResult> {
+        if !self.inner.initialized.load(Ordering::Relaxed) {
+            return Err(Error::invalid_request("Client not initialized"));
+        }
         let request = GetTaskPayloadRequest {
             task_id: task_id.to_string(),
         };

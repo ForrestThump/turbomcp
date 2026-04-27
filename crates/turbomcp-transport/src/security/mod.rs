@@ -105,9 +105,9 @@ pub use rate_limit::{RateLimitConfig, RateLimiter, check_rate_limit};
 pub use session::{SecureSessionInfo, SessionSecurityConfig, SessionSecurityManager};
 pub use utils::{
     HeaderValue, SecurityHeaders, create_cors_headers, create_security_headers, extract_api_key,
-    extract_bearer_token, extract_client_ip, generate_secure_token, is_localhost_origin,
-    is_safe_header_value, sanitize_header_value, size_limits, validate_json_size,
-    validate_message_size, validate_string_size,
+    extract_bearer_token, extract_client_ip, extract_client_ip_with_trust, generate_secure_token,
+    is_localhost_origin, is_safe_header_value, sanitize_header_value, size_limits,
+    validate_json_size, validate_message_size, validate_string_size,
 };
 pub use validator::SecurityValidator;
 

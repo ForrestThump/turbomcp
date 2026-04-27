@@ -7,7 +7,9 @@ use std::time::Duration;
 
 use futures::{SinkExt as _, StreamExt as _};
 use tokio::time::sleep;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::connect_async_with_config;
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tracing::{debug, error, info, trace, warn};
 
 use super::types::WebSocketBidirectionalTransport;
@@ -512,7 +514,13 @@ impl WebSocketBidirectionalTransport {
                             }
                         }
 
-                        match connect_async(url).await {
+                        // Mirror the size cap applied in `connect_client` so reconnects
+                        // do not silently fall back to tungstenite's 64 MiB default.
+                        let ws_config = WebSocketConfig::default()
+                            .max_message_size(Some(config.max_message_size))
+                            .max_frame_size(Some(config.max_message_size));
+
+                        match connect_async_with_config(url, Some(ws_config), false).await {
                             Ok((_stream, _)) => {
                                 info!("Reconnection successful for session {}", session_id);
                                 // Note: In a full implementation, we would need to call setup_stream here

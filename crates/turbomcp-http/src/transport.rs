@@ -88,15 +88,12 @@ impl RetryPolicy {
                 let base_delay = base.as_millis() as u64 * 2u64.pow(attempt);
                 let max_delay_ms = max_delay.as_millis() as u64;
                 let capped = base_delay.min(max_delay_ms);
-                // Add ±25% jitter to prevent thundering herd
+                // Add ±25% jitter to prevent thundering herd. Sourced per-instance
+                // from `fastrand` so concurrent clients on the same attempt number
+                // do not produce identical delays.
                 let jitter_range = capped / 4;
                 let jitter_offset = if jitter_range > 0 {
-                    // Use simple deterministic-ish jitter from attempt number
-                    // (avoids adding rand dependency just for this)
-                    let hash = (attempt as u64)
-                        .wrapping_mul(6364136223846793005)
-                        .wrapping_add(1442695040888963407);
-                    hash % (jitter_range * 2)
+                    fastrand::u64(0..jitter_range * 2)
                 } else {
                     0
                 };
@@ -255,6 +252,27 @@ impl StreamableHttpClientTransport {
         let mut client_builder = HttpClient::builder()
             .use_rustls_tls()
             .timeout(config.timeout);
+
+        // Redirect policy: when carrying a bearer token, only follow same-origin redirects
+        // so the `Authorization: Bearer …` header (preserved by reqwest across redirects)
+        // cannot leak to a third-party host. Without an auth token we keep the default
+        // redirect behaviour (up to 10 follows) for compatibility with bog-standard HTTP.
+        if config.auth_token.is_some() {
+            client_builder =
+                client_builder.redirect(reqwest::redirect::Policy::custom(|attempt| {
+                    if attempt.previous().len() >= 10 {
+                        return attempt.error("too many redirects");
+                    }
+                    let prev_origin = attempt.previous().last().map(reqwest::Url::origin);
+                    if prev_origin.as_ref() == Some(&attempt.url().origin()) {
+                        attempt.follow()
+                    } else {
+                        // Stop the redirect chain; surface a 3xx to the caller so they can
+                        // re-authenticate against the new origin if appropriate.
+                        attempt.stop()
+                    }
+                }));
+        }
 
         // Set User-Agent header if configured
         if let Some(ref user_agent) = config.user_agent {
@@ -549,8 +567,16 @@ impl StreamableHttpClientTransport {
                     let mut stream = response.bytes_stream();
                     let mut buffer = String::new();
                     let read_timeout = config.sse_read_timeout;
+                    // Cap a single SSE event's accumulated buffer at the response-size limit so
+                    // a server that streams indefinitely without ever emitting `\n\n` cannot
+                    // OOM the client. `None` keeps the historical "no cap" behaviour.
+                    let buffer_cap = config
+                        .limits
+                        .enforce_on_streams
+                        .then_some(config.limits.max_response_size)
+                        .flatten();
 
-                    loop {
+                    'sse_loop: loop {
                         let chunk_result =
                             match tokio::time::timeout(read_timeout, stream.next()).await {
                                 Ok(Some(r)) => r,
@@ -584,6 +610,17 @@ impl StreamableHttpClientTransport {
                                     {
                                         warn!("Failed to process SSE event: {}", e);
                                     }
+                                }
+
+                                if let Some(cap) = buffer_cap
+                                    && buffer.len() > cap
+                                {
+                                    error!(
+                                        "SSE event buffer exceeded {} bytes without an event \
+                                         boundary; closing stream to avoid OOM",
+                                        cap
+                                    );
+                                    break 'sse_loop;
                                 }
                             }
                             Err(e) => {
@@ -922,8 +959,16 @@ impl Transport for StreamableHttpClientTransport {
                 // Process SSE stream inline (not spawned) to ensure proper ordering
                 let mut stream = response.bytes_stream();
                 let mut buffer = String::new();
+                // Same buffer cap as the GET SSE loop — a buggy or malicious server that
+                // streams without ever closing an event must not OOM the client.
+                let buffer_cap = self
+                    .config
+                    .limits
+                    .enforce_on_streams
+                    .then_some(self.config.limits.max_response_size)
+                    .flatten();
 
-                while let Some(chunk_result) = stream.next().await {
+                'post_sse_loop: while let Some(chunk_result) = stream.next().await {
                     match chunk_result {
                         Ok(chunk) => {
                             let chunk_str = String::from_utf8_lossy(&chunk);
@@ -943,6 +988,17 @@ impl Transport for StreamableHttpClientTransport {
                                 {
                                     warn!("Failed to process POST SSE event: {}", e);
                                 }
+                            }
+
+                            if let Some(cap) = buffer_cap
+                                && buffer.len() > cap
+                            {
+                                error!(
+                                    "POST SSE event buffer exceeded {} bytes without an event \
+                                     boundary; closing stream to avoid OOM",
+                                    cap
+                                );
+                                break 'post_sse_loop;
                             }
                         }
                         Err(e) => {

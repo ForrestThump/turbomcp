@@ -9,7 +9,8 @@ use futures::{SinkExt, StreamExt as _};
 use serde_json::json;
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, RwLock};
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async_with_config};
 use tracing::{debug, info, trace, warn};
 use uuid::Uuid;
 
@@ -67,9 +68,20 @@ impl WebSocketBidirectionalTransport {
     pub async fn connect_client(&self, url: &str) -> TransportResult<()> {
         info!("Connecting to WebSocket server at {}", url);
 
-        let (stream, _response) = connect_async(url).await.map_err(|e| {
-            TransportError::ConnectionFailed(format!("WebSocket connection failed: {}", e))
-        })?;
+        // Enforce the configured `max_message_size` on the wire. Without this,
+        // tokio-tungstenite uses its ~64 MiB default and ignores our limit
+        // entirely — the optional `validate_message` helper only catches things
+        // on the send path, never on incoming frames.
+        let max_message_size = self.config.lock().max_message_size;
+        let ws_config = WebSocketConfig::default()
+            .max_message_size(Some(max_message_size))
+            .max_frame_size(Some(max_message_size));
+
+        let (stream, _response) = connect_async_with_config(url, Some(ws_config), false)
+            .await
+            .map_err(|e| {
+                TransportError::ConnectionFailed(format!("WebSocket connection failed: {}", e))
+            })?;
 
         self.setup_stream(stream).await?;
 

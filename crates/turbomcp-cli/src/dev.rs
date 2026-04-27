@@ -41,6 +41,12 @@ pub fn execute(args: &DevArgs) -> Result<()> {
         );
     }
 
+    if args.inspector {
+        eprintln!(
+            "Warning: --inspector / --inspector-port are not yet implemented and will be ignored."
+        );
+    }
+
     if args.watch {
         run_with_watch(args, is_cargo_project)
     } else if is_cargo_project {
@@ -160,15 +166,10 @@ fn build_cargo_run_args(args: &DevArgs) -> String {
     cmd_args.join(" ")
 }
 
-/// Check if a command is available in PATH.
+/// Check if a command is available in PATH using the cross-platform `which` crate
+/// (works on Windows, macOS, and Linux without shelling out).
 fn is_command_available(cmd: &str) -> bool {
-    Command::new("which")
-        .arg(cmd)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    which::which(cmd).is_ok()
 }
 
 /// Check if a path is an executable file.

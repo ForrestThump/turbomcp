@@ -263,23 +263,36 @@ pub struct StoredEvent {
 pub struct Session {
     /// Ring buffer of recent events for replay on reconnection
     pub event_buffer: VecDeque<StoredEvent>,
+    /// Maximum number of events retained in the replay buffer.
+    ///
+    /// Stored explicitly because [`VecDeque::capacity`] may report a value
+    /// larger than the requested size (rounded up by the allocator), which
+    /// would otherwise allow `event_buffer` to grow beyond the configured
+    /// limit.
+    buffer_size: usize,
     /// Active SSE stream senders for broadcasting
     pub sse_senders: Vec<mpsc::UnboundedSender<StoredEvent>>,
 }
 
 impl Session {
-    /// Create a new session with the specified replay buffer size
+    /// Create a new session with the specified replay buffer size.
+    ///
+    /// A `buffer_size` of `0` is clamped to `1` so that newly broadcast events
+    /// are always retained (the buffer always holds at least the most recent
+    /// event).
     pub fn new(buffer_size: usize) -> Self {
+        let buffer_size = buffer_size.max(1);
         Self {
             event_buffer: VecDeque::with_capacity(buffer_size),
+            buffer_size,
             sse_senders: Vec::new(),
         }
     }
 
     /// Add event to buffer and broadcast to all connected streams
     pub fn broadcast_event(&mut self, event: StoredEvent) {
-        // Add to replay buffer
-        if self.event_buffer.len() >= self.event_buffer.capacity() {
+        // Add to replay buffer (bounded by configured size, not allocator capacity)
+        while self.event_buffer.len() >= self.buffer_size {
             self.event_buffer.pop_front();
         }
         self.event_buffer.push_back(event.clone());

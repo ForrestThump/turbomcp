@@ -791,13 +791,13 @@ impl MessageSerializer {
     fn compress(&self, data: Bytes) -> Bytes {
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
         if let Err(e) = std::io::Write::write_all(&mut encoder, &data) {
-            eprintln!("Failed to compress data: {}", e);
+            tracing::warn!(error = %e, "Failed to compress message; falling back to original payload");
             return data; // Return original data on error
         }
         match encoder.finish() {
             Ok(compressed_data) => Bytes::from(compressed_data),
             Err(e) => {
-                eprintln!("Failed to finish compression: {}", e);
+                tracing::warn!(error = %e, "Failed to finish compression; falling back to original payload");
                 data // Return original data on error
             }
         }

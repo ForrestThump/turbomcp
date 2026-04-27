@@ -558,34 +558,37 @@ impl ProtocolValidator {
     pub fn validate_string_format(value: &str, format: &str) -> std::result::Result<(), String> {
         match format {
             "email" => {
-                // RFC 5322 basic validation
-                if !value.contains('@') || !value.contains('.') {
-                    return Err(format!("Invalid email format: {}", value));
+                // RFC 5321 / RFC 5322 syntactic validation. We only catch
+                // glaringly malformed addresses here — DNS / mailbox-existence
+                // checks are out of scope for a wire validator.
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    return Err(format!("Invalid email format: {value}"));
                 }
-                let parts: Vec<&str> = value.split('@').collect();
-                if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
-                    return Err(format!("Invalid email format: {}", value));
+                let Some((local, domain)) = trimmed.rsplit_once('@') else {
+                    return Err(format!("Invalid email format: {value}"));
+                };
+                if local.is_empty() || domain.is_empty() {
+                    return Err(format!("Invalid email format: {value}"));
+                }
+                // Domain must have at least one dot, and no label may be
+                // empty or trailing-dot-only (rejects "a@b.", "@.", ".@.").
+                let labels: Vec<&str> = domain.split('.').collect();
+                if labels.len() < 2 || labels.iter().any(|l| l.is_empty()) {
+                    return Err(format!("Invalid email format: {value}"));
                 }
             }
-            // Basic URI validation - must have a scheme
-            "uri" if !value.contains("://") && !value.starts_with('/') => {
-                return Err(format!("Invalid URI format: {}", value));
+            // URI validation per JSON Schema `format: "uri"` — must be an absolute URI
+            // with a scheme. Bare paths like "/etc/passwd" are URI-references, not URIs,
+            // and are rejected here. Use `url::Url::parse` for the actual structural check.
+            "uri" if url::Url::parse(value).is_err() => {
+                return Err(format!("Invalid URI format: {value}"));
             }
             "date" => {
-                // ISO 8601 date format: YYYY-MM-DD
-                let parts: Vec<&str> = value.split('-').collect();
-                if parts.len() != 3 {
-                    return Err("Date must be in ISO 8601 format (YYYY-MM-DD)".to_string());
-                }
-                if parts[0].len() != 4 || parts[1].len() != 2 || parts[2].len() != 2 {
-                    return Err("Date must be in ISO 8601 format (YYYY-MM-DD)".to_string());
-                }
-                // Basic numeric check
-                for part in parts {
-                    if !part.chars().all(|c| c.is_ascii_digit()) {
-                        return Err("Date components must be numeric".to_string());
-                    }
-                }
+                // Use chrono for full month/day-range validation rather than
+                // just ASCII-digit shape checks (rejects 9999-13-99, 2025-1-7).
+                chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
+                    .map_err(|e| format!("Date must be in ISO 8601 format (YYYY-MM-DD): {e}"))?;
             }
             "date-time" => {
                 // ISO 8601 datetime format: YYYY-MM-DDTHH:MM:SS[.sss][Z|±HH:MM]

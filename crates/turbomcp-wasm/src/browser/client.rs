@@ -3,6 +3,7 @@
 use super::transport::FetchTransport;
 use serde::{Deserialize, Serialize};
 use serde_wasm_bindgen::{from_value, to_value};
+use turbomcp_core::PROTOCOL_VERSION;
 use turbomcp_types::{
     CallToolResult, ClientCapabilities, GetPromptResult, Implementation, InitializeResult, Prompt,
     Resource, ResourceContent, ResourceTemplate, ServerCapabilities, Tool,
@@ -29,7 +30,7 @@ impl McpClient {
             initialized: false,
             server_info: None,
             server_capabilities: None,
-            protocol_version: "2025-11-25".to_string(),
+            protocol_version: PROTOCOL_VERSION.to_string(),
         }
     }
 

@@ -1,5 +1,9 @@
 //! JSON-RPC HTTP handler for MCP requests
 
+// See `mod.rs` — internal subtree references silenced; deprecation fires for
+// external consumers via the source-level `#[deprecated]` attributes.
+#![allow(deprecated)]
+
 use axum::{
     Json,
     extract::{Extension, State},
@@ -15,8 +19,42 @@ use crate::tower::SessionInfo;
 pub async fn json_rpc_handler(
     State(app_state): State<McpAppState>,
     Extension(session): Extension<SessionInfo>,
-    Json(request): Json<JsonRpcRequest>,
+    Json(raw): Json<serde_json::Value>,
 ) -> Result<Json<JsonRpcResponse>, StatusCode> {
+    // MCP 2025-11-25 deprecates JSON-RPC batches. Surface a spec-compliant
+    // -32600 with a stable reason rather than serde's generic "expected
+    // object" diagnostic.
+    if raw.is_array() {
+        return Ok(Json(JsonRpcResponse {
+            jsonrpc: "2.0".to_string(),
+            id: None,
+            result: None,
+            error: Some(JsonRpcError {
+                code: -32600,
+                message: "Invalid Request".to_string(),
+                data: Some(serde_json::json!({
+                    "reason": "JSON-RPC batches are not supported in MCP 2025-11-25"
+                })),
+            }),
+        }));
+    }
+
+    let request: JsonRpcRequest = match serde_json::from_value(raw) {
+        Ok(r) => r,
+        Err(e) => {
+            return Ok(Json(JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                id: None,
+                result: None,
+                error: Some(JsonRpcError {
+                    code: -32600,
+                    message: "Invalid Request".to_string(),
+                    data: Some(serde_json::json!({ "reason": e.to_string() })),
+                }),
+            }));
+        }
+    };
+
     trace!("Processing JSON-RPC request: {:?}", request);
 
     // Validate JSON-RPC format

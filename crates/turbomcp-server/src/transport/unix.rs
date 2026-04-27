@@ -190,8 +190,13 @@ async fn reject_connection(stream: tokio::net::UnixStream) {
     use tokio::io::AsyncWriteExt;
 
     let mut stream = stream;
-    let error_response =
-        router::JsonRpcOutgoing::error(None, McpError::internal("Server at maximum capacity"));
+    // JSON-RPC §5.1: pre-parse error responses MUST use `id: null` on the
+    // wire. The shared `JsonRpcOutgoing` skips serializing `id` when `None`,
+    // so emit an explicit null here.
+    let error_response = router::JsonRpcOutgoing::error(
+        Some(serde_json::Value::Null),
+        McpError::internal("Server at maximum capacity"),
+    );
 
     if let Ok(response_str) = router::serialize_response(&error_response) {
         let _ = stream.write_all(response_str.as_bytes()).await;

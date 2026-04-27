@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     completion::CompleteRequestParams,
-    elicitation::ElicitRequestParams,
+    elicitation::{ElicitRequestParams, ElicitationCompleteNotification},
     initialization::{InitializeRequest, InitializedNotification},
     logging::{LoggingNotification, ProgressNotification, SetLevelRequest},
     ping::PingParams,
@@ -18,6 +18,10 @@ use super::{
     },
     roots::{ListRootsRequest, RootsListChangedNotification},
     sampling::CreateMessageRequest,
+    tasks::{
+        CancelTaskRequest, GetTaskPayloadRequest, GetTaskRequest, ListTasksRequest,
+        TaskStatusNotification,
+    },
     tools::{CallToolRequest, ListToolsRequest},
 };
 
@@ -77,6 +81,23 @@ pub enum ClientRequest {
     /// Ping to check connection
     #[serde(rename = "ping")]
     Ping(PingParams),
+
+    /// Get task status (Tasks API, MCP 2025-11-25, schema.ts:2520-2527)
+    #[serde(rename = "tasks/get")]
+    TasksGet(GetTaskRequest),
+
+    /// Get task result payload (Tasks API)
+    #[serde(rename = "tasks/result")]
+    TasksResult(GetTaskPayloadRequest),
+
+    /// List tasks (Tasks API)
+    #[serde(rename = "tasks/list")]
+    TasksList(ListTasksRequest),
+
+    /// Cancel a task (Tasks API). Distinct from `notifications/cancelled`,
+    /// which targets non-task requests per spec.
+    #[serde(rename = "tasks/cancel")]
+    TasksCancel(CancelTaskRequest),
 }
 
 /// Server-initiated request
@@ -101,6 +122,10 @@ pub enum ServerRequest {
 }
 
 /// Client-sent notification
+///
+/// Per MCP 2025-11-25 (`schema.ts:2535`), `CancelledNotification` and
+/// `TaskStatusNotification` are bidirectional — they appear in both
+/// `ClientNotification` and `ServerNotification`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method")]
 pub enum ClientNotification {
@@ -111,6 +136,14 @@ pub enum ClientNotification {
     /// Roots list changed
     #[serde(rename = "notifications/roots/list_changed")]
     RootsListChanged(RootsListChangedNotification),
+
+    /// Request cancellation (bidirectional per spec)
+    #[serde(rename = "notifications/cancelled")]
+    Cancelled(CancelledNotification),
+
+    /// Task status change (bidirectional per spec)
+    #[serde(rename = "notifications/tasks/status")]
+    TaskStatus(TaskStatusNotification),
 }
 
 /// Server-sent notification
@@ -148,14 +181,31 @@ pub enum ServerNotification {
     /// Roots list changed
     #[serde(rename = "notifications/roots/list_changed")]
     RootsListChanged,
+
+    /// Elicitation completed (MCP 2025-11-25, schema.ts:2562-2570)
+    #[serde(rename = "notifications/elicitation/complete")]
+    ElicitationComplete(ElicitationCompleteNotification),
+
+    /// Task status change (bidirectional per spec)
+    #[serde(rename = "notifications/tasks/status")]
+    TaskStatus(TaskStatusNotification),
 }
 
-/// Cancellation notification
+/// Cancellation notification.
+///
+/// Per MCP 2025-11-25, `requestId` should technically be optional (it MUST be
+/// provided when cancelling non-task requests; tasks use `tasks/cancel`
+/// instead). This implementation keeps `request_id` required for now — see the
+/// audit report for follow-up.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CancelledNotification {
     /// Request ID that was cancelled
     #[serde(rename = "requestId")]
     pub request_id: super::core::RequestId,
     /// Optional reason for cancellation
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Optional metadata per the current MCP specification
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub _meta: Option<serde_json::Value>,
 }

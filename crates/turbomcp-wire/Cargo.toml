@@ -31,12 +31,15 @@ thiserror = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
 
 [features]
-default = ["std", "json"]
+default = ["std"]
 std = ["serde/std", "serde_json/std", "thiserror", "tracing"]
+# `json` is always available — `serde_json` and `JsonCodec` are unconditional.
+# Kept as an alias for downstream callers that already write `features = ["json"]`,
+# but disabling it has no effect.
 json = []
 simd = ["sonic-rs"]
 msgpack = ["rmp-serde"]
-full = ["std", "json", "simd", "msgpack"]
+full = ["std", "simd", "msgpack"]
 
 [dev-dependencies]
 tokio = { workspace = true }

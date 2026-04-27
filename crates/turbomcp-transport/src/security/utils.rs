@@ -37,8 +37,50 @@ pub fn validate_json_size(json: &serde_json::Value, max_size: usize) -> Result<(
     validate_string_size(&json_string, max_size)
 }
 
-/// Extract client IP from various header sources
+/// Extract a client IP by walking proxy headers.
+///
+/// # ⚠ DO NOT TRUST IN PRODUCTION
+///
+/// This function reads `X-Forwarded-For`, `X-Real-IP`, `CF-Connecting-IP`,
+/// and `X-Client-IP` *without verifying* that the request actually arrived
+/// through a trusted proxy. Any direct client can spoof these headers to
+/// (a) evade per-IP rate limiting, (b) satisfy origin-validation's
+/// loopback short-circuit, or (c) influence session IP-binding decisions.
+///
+/// New code should call [`extract_client_ip_with_trust`] instead, passing the
+/// verified peer socket address and a trusted-proxy allowlist.
 pub fn extract_client_ip(headers: &SecurityHeaders) -> Option<std::net::IpAddr> {
+    extract_client_ip_from_proxy_headers(headers)
+}
+
+/// Extract a client IP, only honouring proxy headers when the immediate peer
+/// is a trusted proxy.
+///
+/// `peer_ip` must be the actual TCP/QUIC peer (e.g. axum's
+/// `ConnectInfo<SocketAddr>::ip()`). `trusted_proxies` is the allowlist of
+/// proxy IPs / CIDRs your edge layer is configured behind. When `peer_ip`
+/// is *not* in the allowlist, proxy headers are ignored and `peer_ip` is
+/// returned verbatim — a direct client can no longer spoof headers to
+/// pretend to be someone else.
+///
+/// `trusted_proxies` accepts CIDR notation (`10.0.0.0/8`, `192.168.1.0/24`,
+/// `::1/128`) and bare addresses (`10.0.0.5`). Entries that fail to parse
+/// are silently skipped — an empty / all-bad list means "trust nothing"
+/// which is the secure default.
+pub fn extract_client_ip_with_trust(
+    headers: &SecurityHeaders,
+    peer_ip: std::net::IpAddr,
+    trusted_proxies: &[String],
+) -> std::net::IpAddr {
+    if peer_is_trusted(peer_ip, trusted_proxies)
+        && let Some(spoofed) = extract_client_ip_from_proxy_headers(headers)
+    {
+        return spoofed;
+    }
+    peer_ip
+}
+
+fn extract_client_ip_from_proxy_headers(headers: &SecurityHeaders) -> Option<std::net::IpAddr> {
     // Check X-Forwarded-For header first (most common)
     if let Some(forwarded) = headers.get("X-Forwarded-For")
         && let Some(first_ip) = forwarded.split(',').next()
@@ -69,6 +111,77 @@ pub fn extract_client_ip(headers: &SecurityHeaders) -> Option<std::net::IpAddr> 
     }
 
     None
+}
+
+fn peer_is_trusted(peer: std::net::IpAddr, trusted: &[String]) -> bool {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    for entry in trusted {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        // CIDR form: split into <addr>/<prefix>.
+        if let Some((addr, prefix)) = entry.split_once('/') {
+            let Ok(prefix_len): Result<u8, _> = prefix.parse() else {
+                continue;
+            };
+            match (peer, addr.parse::<IpAddr>()) {
+                (IpAddr::V4(p), Ok(IpAddr::V4(net)))
+                    if prefix_len <= 32 && cidr_match_v4(p, net, prefix_len) =>
+                {
+                    return true;
+                }
+                (IpAddr::V6(p), Ok(IpAddr::V6(net)))
+                    if prefix_len <= 128 && cidr_match_v6(p, net, prefix_len) =>
+                {
+                    return true;
+                }
+                _ => {}
+            }
+            continue;
+        }
+        // Bare-address form.
+        if let Ok(addr) = entry.parse::<IpAddr>()
+            && addr == peer
+        {
+            return true;
+        }
+        // Mismatched-family forms fall through and we keep scanning. As a
+        // last-resort defensive check, normalise IPv4-mapped IPv6 peers
+        // against IPv4 trust entries.
+        if let (IpAddr::V6(v6), Ok(IpAddr::V4(v4))) = (peer, entry.parse::<IpAddr>())
+            && let Some(mapped) = v6.to_ipv4_mapped()
+            && mapped == v4
+        {
+            return true;
+        }
+        // And vice-versa: IPv4 peer vs `::ffff:x.y.z.w` trust entry.
+        if let (IpAddr::V4(v4), Ok(IpAddr::V6(v6))) = (peer, entry.parse::<IpAddr>())
+            && let Some(mapped) = v6.to_ipv4_mapped()
+            && mapped == v4
+        {
+            return true;
+        }
+        // Suppress unused-warning paths when neither V6 method exists.
+        let _ = (Ipv4Addr::UNSPECIFIED, Ipv6Addr::UNSPECIFIED);
+    }
+    false
+}
+
+fn cidr_match_v4(peer: std::net::Ipv4Addr, net: std::net::Ipv4Addr, prefix: u8) -> bool {
+    if prefix == 0 {
+        return true;
+    }
+    let mask = u32::MAX << (32 - prefix);
+    (u32::from(peer) & mask) == (u32::from(net) & mask)
+}
+
+fn cidr_match_v6(peer: std::net::Ipv6Addr, net: std::net::Ipv6Addr, prefix: u8) -> bool {
+    if prefix == 0 {
+        return true;
+    }
+    let mask = u128::MAX << (128 - prefix);
+    (u128::from(peer) & mask) == (u128::from(net) & mask)
 }
 
 /// Sanitize header value to prevent header injection attacks
@@ -167,18 +280,36 @@ pub fn extract_api_key(auth_header: &str) -> Option<&str> {
     }
 }
 
-/// Check if origin is localhost variant
+/// Check if `origin` is a loopback origin on http/https.
+///
+/// Parses the origin via `url::Url` rather than `starts_with`, so
+/// `http://localhost.evil.com`, `http://localhost@evil.com`, and
+/// `http://localhost:8080@evil.com` no longer match. The host must be
+/// exactly `localhost`, an IPv4 loopback (`127.0.0.0/8`), or `[::1]`.
 pub fn is_localhost_origin(origin: &str) -> bool {
-    let localhost_patterns = [
-        "http://localhost",
-        "https://localhost",
-        "http://127.0.0.1",
-        "https://127.0.0.1",
-    ];
-
-    localhost_patterns
-        .iter()
-        .any(|&pattern| origin.starts_with(pattern))
+    let Ok(url) = url::Url::parse(origin.trim()) else {
+        return false;
+    };
+    let scheme = url.scheme();
+    if scheme != "http" && scheme != "https" {
+        return false;
+    }
+    // Reject anything with userinfo, path, query, or fragment — those can be
+    // used to smuggle a different effective host past naïve checks.
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || (url.path() != "/" && !url.path().is_empty())
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return false;
+    }
+    match url.host() {
+        Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
 }
 
 /// Generate a cryptographically secure random string for tokens/keys

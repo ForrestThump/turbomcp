@@ -623,6 +623,7 @@ pub trait ResourceUpdateHandler: Send + Sync + std::fmt::Debug {
 ///                 .map(|dir| Root {
 ///                     uri: format!("file://{}", dir).into(),
 ///                     name: Some(dir.split('/').last().unwrap_or("").to_string()),
+///                     _meta: None,
 ///                 })
 ///                 .collect())
 ///         })

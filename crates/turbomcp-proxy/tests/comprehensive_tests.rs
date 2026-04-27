@@ -24,6 +24,7 @@ fn test_all_backend_transport_variants_constructible() {
     // HTTP backend
     let _http = BackendTransport::Http {
         url: "https://localhost:3000".to_string(),
+        endpoint_path: None,
         auth_token: None,
     };
 
@@ -323,7 +324,8 @@ fn test_backend_config_http_variant() {
     let cfg = BackendConfig {
         transport: BackendTransport::Http {
             url: "https://localhost:3000".to_string(),
-            auth_token: Some("token123".to_string()),
+            endpoint_path: None,
+            auth_token: Some(secrecy::SecretString::from("token123".to_string())),
         },
         client_name: "test".to_string(),
         client_version: "1.0.0".to_string(),

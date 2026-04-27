@@ -116,32 +116,28 @@ impl SecurityValidator {
     pub fn get_request_count(&self, client_ip: IpAddr) -> usize {
         self.rate_limiter
             .as_ref()
-            .map(|limiter| limiter.get_request_count(client_ip))
-            .unwrap_or(0)
+            .map_or(0, |limiter| limiter.get_request_count(client_ip))
     }
 
     /// Get remaining requests for a client (if rate limiting enabled)
     pub fn get_remaining_requests(&self, client_ip: IpAddr) -> usize {
-        self.rate_limiter
-            .as_ref()
-            .map(|limiter| limiter.get_remaining_requests(client_ip))
-            .unwrap_or(usize::MAX)
+        self.rate_limiter.as_ref().map_or(usize::MAX, |limiter| {
+            limiter.get_remaining_requests(client_ip)
+        })
     }
 
     /// Clean up expired rate limit entries
     pub fn cleanup_expired(&self) -> usize {
         self.rate_limiter
             .as_ref()
-            .map(|limiter| limiter.cleanup_expired())
-            .unwrap_or(0)
+            .map_or(0, RateLimiter::cleanup_expired)
     }
 
     /// Get total number of tracked clients (if rate limiting enabled)
     pub fn client_count(&self) -> usize {
         self.rate_limiter
             .as_ref()
-            .map(|limiter| limiter.client_count())
-            .unwrap_or(0)
+            .map_or(0, RateLimiter::client_count)
     }
 }
 

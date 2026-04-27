@@ -256,7 +256,9 @@ impl WasmJwtAuthenticator {
     fn validate_claims(&self, payload: &JwtPayload) -> Result<(), AuthError> {
         let now = (js_sys::Date::now() / 1000.0) as u64;
 
-        // Validate expiration
+        // Validate expiration: tolerate `leeway_seconds` of *late* arrival, i.e.
+        // accept tokens whose `exp` was recently in the past. Equivalent to
+        // shifting the "now" reading backwards by leeway.
         if self.config.validate_exp
             && let Some(exp) = payload.exp
             && now > exp + self.config.leeway_seconds
@@ -264,7 +266,11 @@ impl WasmJwtAuthenticator {
             return Err(AuthError::TokenExpired);
         }
 
-        // Validate not-before
+        // Validate not-before: tolerate `leeway_seconds` of *early* arrival, i.e.
+        // accept tokens whose `nbf` is slightly in the future. Equivalent to
+        // shifting the "now" reading forwards by leeway. The asymmetric form
+        // (`now + leeway < nbf` vs `now > exp + leeway`) is intentional —
+        // both extend the validity window outwards by `leeway_seconds`.
         if self.config.validate_nbf
             && let Some(nbf) = payload.nbf
             && now + self.config.leeway_seconds < nbf

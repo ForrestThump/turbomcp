@@ -137,7 +137,10 @@ impl BidirectionalTransport for WebSocketBidirectionalTransport {
                     self.session_id
                 );
             } else {
-                tracing::warn!(
+                // Race with timeout cleanup is normal: the timeout path may have
+                // already removed the entry before the response handler calls
+                // stop_correlation. Log at debug rather than warn.
+                tracing::debug!(
                     "Attempted to stop non-existent correlation {} in session {}",
                     correlation_id,
                     self.session_id

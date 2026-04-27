@@ -4,6 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::core::ProgressToken;
+
 /// Log level enumeration
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "lowercase")]
@@ -37,7 +39,12 @@ pub struct SetLevelRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SetLevelResult {}
 
-/// Logging notification
+/// Logging notification (sent by server on `notifications/message`).
+///
+/// Spec name is `LoggingMessageNotification` (`schema.ts:1551`); the local
+/// `LoggingNotification` alias predates the spec rename. Both names refer
+/// to the same wire shape — see also [`LoggingMessageNotification`] for the
+/// spec-faithful name.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoggingNotification {
     /// Log level
@@ -49,21 +56,30 @@ pub struct LoggingNotification {
     pub logger: Option<String>,
 }
 
+/// Spec-faithful name for `notifications/message` — same wire shape as
+/// [`LoggingNotification`] (kept as an alias for backwards compatibility).
+pub type LoggingMessageNotification = LoggingNotification;
+
 /// Progress notification for reporting progress on long-running operations.
 ///
 /// Servers can send progress notifications to clients to update them on
 /// the status of operations. The `progress_token` should match the token
 /// provided in the original request's `_meta` field.
 ///
+/// Per MCP 2025-11-25 (`schema.ts:23`, `:1551-1561`):
+/// - `progressToken` is `string | number` — see [`ProgressToken`].
+/// - `progress` and `total` are JSON numbers (floats); they MAY express
+///   fractional progress (e.g., `45.7 / 100.0`).
+///
 /// # Example
 ///
 /// ```rust
-/// use turbomcp_protocol::types::ProgressNotification;
+/// use turbomcp_protocol::types::{ProgressNotification, ProgressToken};
 ///
 /// let notification = ProgressNotification {
-///     progress_token: "request-123".to_string(),
-///     progress: 50,
-///     total: Some(100),
+///     progress_token: ProgressToken::from("request-123"),
+///     progress: 50.0,
+///     total: Some(100.0),
 ///     message: Some("Processing files...".to_string()),
 /// };
 /// ```
@@ -72,15 +88,15 @@ pub struct ProgressNotification {
     /// Token identifying the request this progress is for.
     /// This should match the `progressToken` from the request's `_meta` field.
     #[serde(rename = "progressToken")]
-    pub progress_token: String,
+    pub progress_token: ProgressToken,
 
-    /// Current progress value.
-    pub progress: u64,
+    /// Current progress value (JSON number; floats permitted).
+    pub progress: f64,
 
     /// Optional total value (for percentage calculation).
     /// If provided, progress/total gives the completion percentage.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub total: Option<u64>,
+    pub total: Option<f64>,
 
     /// Optional human-readable progress message.
     #[serde(skip_serializing_if = "Option::is_none")]

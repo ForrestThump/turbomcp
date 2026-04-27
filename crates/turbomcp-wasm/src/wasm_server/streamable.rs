@@ -127,8 +127,19 @@ impl SessionStore for MemorySessionStore {
     }
 
     async fn store_event(&self, id: &SessionId, event: StoredEvent) -> Result<(), Self::Error> {
+        // Silent no-op for unknown sessions is the trait contract
+        // (`Error = Infallible`), but log so the caller-visible "stored"
+        // signal vs the actual no-op is observable in dev/debug.
         if let Some(events) = self.events.borrow_mut().get_mut(id.as_str()) {
             events.push(event);
+        } else {
+            web_sys::console::warn_1(
+                &format!(
+                    "MemorySessionStore::store_event: session {} not found; event dropped",
+                    id.as_str()
+                )
+                .into(),
+            );
         }
         Ok(())
     }
@@ -219,8 +230,15 @@ impl SessionStore for MemorySessionStore {
     }
 
     async fn store_event(&self, id: &SessionId, event: StoredEvent) -> Result<(), Self::Error> {
+        // See MemorySessionStore: silent no-op for unknown sessions, with a
+        // warn log so callers can spot the discrepancy.
         if let Some(events) = self.events.lock().unwrap().get_mut(id.as_str()) {
             events.push(event);
+        } else {
+            eprintln!(
+                "warning: store_event: session {} not found; event dropped",
+                id.as_str()
+            );
         }
         Ok(())
     }
@@ -634,15 +652,33 @@ impl<S: SessionStore> StreamableHandler<S> {
 
     /// Handle initialize request.
     fn handle_initialize(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
-        use turbomcp_core::PROTOCOL_VERSION;
         use turbomcp_protocol::types::InitializeResult;
 
+        // Extract requested protocolVersion (string) without binding to a
+        // specific InitializeParams shape — the request may carry extra fields.
+        let requested_version = req
+            .params
+            .as_ref()
+            .and_then(|v| v.get("protocolVersion"))
+            .and_then(|v| v.as_str());
+
+        let negotiated = match super::version_negotiation::negotiate_str(requested_version) {
+            Ok(v) => v,
+            Err(supported) => {
+                return JsonRpcResponse::error(
+                    req.id.clone(),
+                    error_codes::INVALID_PARAMS,
+                    format!("Unsupported protocolVersion. Supported versions: {supported}"),
+                );
+            }
+        };
+
         let result = InitializeResult {
-            protocol_version: PROTOCOL_VERSION.into(),
+            protocol_version: negotiated,
             capabilities: self.server.capabilities.clone(),
             server_info: self.server.server_info.clone(),
             instructions: self.server.instructions.clone(),
-            _meta: None,
+            meta: None,
         };
 
         match serde_json::to_value(&result) {

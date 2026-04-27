@@ -117,6 +117,9 @@ pub struct ChildProcessTransport {
     /// Background task handles (tokio::sync::Mutex - crosses await boundaries)
     _stdin_task: Arc<TokioMutex<Option<tokio::task::JoinHandle<()>>>>,
     _stdout_task: Arc<TokioMutex<Option<tokio::task::JoinHandle<()>>>>,
+    /// stderr drain task; tracked so `stop_process` can abort it on shutdown
+    /// rather than relying on stderr-EOF after `kill_on_drop` to make it exit.
+    _stderr_task: Arc<TokioMutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 impl ChildProcessTransport {
@@ -143,6 +146,7 @@ impl ChildProcessTransport {
             stdout_receiver: Arc::new(TokioMutex::new(None)),
             _stdin_task: Arc::new(TokioMutex::new(None)),
             _stdout_task: Arc::new(TokioMutex::new(None)),
+            _stderr_task: Arc::new(TokioMutex::new(None)),
         }
     }
 
@@ -251,7 +255,7 @@ impl ChildProcessTransport {
         };
 
         // Start STDERR reader task for logging
-        let _stderr_task = {
+        let stderr_task = {
             let reader = BufReader::new(stderr);
             tokio::spawn(async move {
                 let mut lines = reader.lines();
@@ -268,6 +272,7 @@ impl ChildProcessTransport {
         *self.stdout_receiver.lock().await = Some(stdout_rx);
         *self._stdin_task.lock().await = Some(stdin_task);
         *self._stdout_task.lock().await = Some(stdout_task);
+        *self._stderr_task.lock().await = Some(stderr_task);
 
         // Update state
         *self.state.lock() = TransportState::Connected;
@@ -332,6 +337,20 @@ impl ChildProcessTransport {
         // Drop communication channels first
         *self.stdin_sender.lock().await = None;
         *self.stdout_receiver.lock().await = None;
+
+        // Abort drain tasks so they don't outlive the process. The previous
+        // implementation waited for stderr-EOF after `kill_on_drop`, which
+        // worked but left the tasks dangling on shutdown paths that didn't
+        // immediately drop the transport.
+        if let Some(handle) = self._stdin_task.lock().await.take() {
+            handle.abort();
+        }
+        if let Some(handle) = self._stdout_task.lock().await.take() {
+            handle.abort();
+        }
+        if let Some(handle) = self._stderr_task.lock().await.take() {
+            handle.abort();
+        }
 
         if let Some(mut child) = self.child.lock().await.take() {
             // Try graceful shutdown first

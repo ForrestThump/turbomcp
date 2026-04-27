@@ -111,6 +111,7 @@ mod rich_context;
 mod server;
 mod traits;
 mod types;
+mod version_negotiation;
 mod visibility;
 
 #[cfg(feature = "auth")]

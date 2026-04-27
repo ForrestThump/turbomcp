@@ -38,7 +38,7 @@ use turbomcp_core::error::{McpError, McpResult};
 use turbomcp_core::handler::McpHandler;
 use turbomcp_core::jsonrpc::JsonRpcResponse as CoreJsonRpcResponse;
 use turbomcp_transport::security::{
-    OriginConfig, SecurityHeaders, extract_client_ip, validate_origin,
+    OriginConfig, SecurityHeaders, extract_client_ip, extract_client_ip_with_trust, validate_origin,
 };
 use turbomcp_types::ProtocolVersion;
 use uuid::Uuid;
@@ -539,12 +539,38 @@ fn to_security_headers(headers: &HeaderMap) -> SecurityHeaders {
         .collect()
 }
 
-fn extract_request_ip(headers: &HeaderMap, extensions: &axum::http::Extensions) -> Option<IpAddr> {
+fn extract_request_ip(
+    headers: &HeaderMap,
+    extensions: &axum::http::Extensions,
+    config: Option<&ServerConfig>,
+) -> Option<IpAddr> {
     let security_headers = to_security_headers(headers);
-    extensions
+    let peer_ip = extensions
         .get::<axum::extract::ConnectInfo<SocketAddr>>()
-        .map(|connect_info| connect_info.0.ip())
-        .or_else(|| extract_client_ip(&security_headers))
+        .map(|connect_info| connect_info.0.ip());
+
+    match peer_ip {
+        Some(peer) => {
+            // Honour proxy headers only when the immediate peer is a trusted
+            // reverse proxy. Direct clients get their real socket IP back,
+            // so `X-Forwarded-For` smuggling can't bypass per-IP rate limits
+            // or the loopback short-circuit in origin validation.
+            let trusted = config
+                .map(|c| c.origin_validation.trusted_proxies.as_slice())
+                .unwrap_or(&[]);
+            Some(extract_client_ip_with_trust(
+                &security_headers,
+                peer,
+                trusted,
+            ))
+        }
+        None => {
+            // No `ConnectInfo` (e.g. tower::Service composed without it).
+            // Fall back to header extraction, which is documented as
+            // unsafe; callers in this state must trust the upstream layer.
+            extract_client_ip(&security_headers)
+        }
+    }
 }
 
 fn origin_config(config: Option<&ServerConfig>) -> OriginConfig {
@@ -588,6 +614,15 @@ fn validate_protocol_header(
     expected: Option<&ProtocolVersion>,
 ) -> Result<(), StatusCode> {
     let Some(raw) = headers.get("mcp-protocol-version") else {
+        // Per MCP 2025-11-25 §Streamable HTTP, post-init requests MUST carry
+        // `Mcp-Protocol-Version`. Pre-init (no `expected` yet) is permissive
+        // so that the very first POST `initialize` doesn't have to negotiate
+        // a version it hasn't seen yet. After session creation, missing
+        // header → 400 with a `tracing::warn!` for observability.
+        if expected.is_some() {
+            tracing::warn!("Post-init request missing required Mcp-Protocol-Version header");
+            return Err(StatusCode::BAD_REQUEST);
+        }
         return Ok(());
     };
 
@@ -646,7 +681,7 @@ async fn handle_json_rpc<H: McpHandler>(
 ) -> Response {
     let (parts, body) = request.into_parts();
     let headers = parts.headers;
-    let client_ip = extract_request_ip(&headers, &parts.extensions);
+    let client_ip = extract_request_ip(&headers, &parts.extensions, state.config.as_ref());
     if let Err(status) = validate_origin_header(&headers, client_ip, state.config.as_ref()) {
         return empty_response(status);
     }
@@ -766,7 +801,7 @@ async fn handle_sse<H: McpHandler>(
 ) -> Response {
     let (parts, _) = request.into_parts();
     let headers = parts.headers;
-    let client_ip = extract_request_ip(&headers, &parts.extensions);
+    let client_ip = extract_request_ip(&headers, &parts.extensions, state.config.as_ref());
     if let Err(status) = validate_origin_header(&headers, client_ip, state.config.as_ref()) {
         return empty_response(status);
     }
@@ -838,7 +873,7 @@ async fn handle_delete_session<H: McpHandler>(
 ) -> Response {
     let (parts, _) = request.into_parts();
     let headers = parts.headers;
-    let client_ip = extract_request_ip(&headers, &parts.extensions);
+    let client_ip = extract_request_ip(&headers, &parts.extensions, state.config.as_ref());
     if let Err(status) = validate_origin_header(&headers, client_ip, state.config.as_ref()) {
         return empty_response(status);
     }

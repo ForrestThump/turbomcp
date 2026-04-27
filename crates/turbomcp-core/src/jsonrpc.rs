@@ -266,8 +266,10 @@ impl ResponseId {
     }
 }
 
-/// JSON-RPC response payload
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// JSON-RPC response payload — enforces JSON-RPC 2.0 §5 mutual exclusion of
+/// `result` and `error` on deserialize. `Serialize` keeps the untagged shape
+/// so the wire format is unchanged.
+#[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum JsonRpcResponsePayload {
     /// Successful response
@@ -280,6 +282,33 @@ pub enum JsonRpcResponsePayload {
         /// Response error
         error: JsonRpcError,
     },
+}
+
+impl<'de> Deserialize<'de> for JsonRpcResponsePayload {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Helper {
+            #[serde(default)]
+            result: Option<Value>,
+            #[serde(default)]
+            error: Option<JsonRpcError>,
+        }
+
+        let h = Helper::deserialize(deserializer)?;
+        match (h.result, h.error) {
+            (Some(result), None) => Ok(Self::Success { result }),
+            (None, Some(error)) => Ok(Self::Error { error }),
+            (Some(_), Some(_)) => Err(serde::de::Error::custom(
+                "JSON-RPC response must contain exactly one of `result` or `error`, not both",
+            )),
+            (None, None) => Err(serde::de::Error::custom(
+                "JSON-RPC response must contain exactly one of `result` or `error`",
+            )),
+        }
+    }
 }
 
 /// JSON-RPC response message
@@ -467,8 +496,9 @@ impl From<JsonRpcErrorCode> for JsonRpcError {
 /// ```
 #[derive(Debug, Clone, Deserialize)]
 pub struct JsonRpcIncoming {
-    /// JSON-RPC version (always "2.0")
-    #[allow(dead_code)]
+    /// JSON-RPC version. Required to be "2.0" per JSON-RPC 2.0 §4.
+    /// Validated by [`Self::validate`] / [`Self::parse`]; raw deserialize accepts any
+    /// string for diagnostic purposes (so callers can report a 1.0/missing-version error).
     pub jsonrpc: String,
     /// Request ID (None for notifications)
     #[serde(default)]
@@ -496,6 +526,15 @@ impl JsonRpcIncoming {
     /// Parse from JSON string
     pub fn parse(input: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(input)
+    }
+
+    /// Validate the JSON-RPC version field is exactly `"2.0"` per JSON-RPC 2.0 §4.
+    /// Callers should invoke this after `parse` to enforce strictness; the raw
+    /// deserialize is intentionally lenient so the parse error path can produce
+    /// a useful `-32600 Invalid Request` response with the offending value.
+    #[must_use]
+    pub fn is_valid_version(&self) -> bool {
+        self.jsonrpc == "2.0"
     }
 }
 
@@ -525,8 +564,13 @@ impl JsonRpcIncoming {
 pub struct JsonRpcOutgoing {
     /// JSON-RPC version (always "2.0")
     pub jsonrpc: String,
-    /// Request ID (echoed from request, None for notifications/parse errors)
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Request id, echoed from the originating request.
+    ///
+    /// Per JSON-RPC 2.0 §5.1, error responses for which the id cannot be
+    /// determined (parse error, invalid request) **MUST** contain `id: null`.
+    /// We therefore always serialize this field — `None` becomes `null`.
+    /// Notifications never produce a `JsonRpcOutgoing` that reaches the wire
+    /// (gated by [`Self::should_send`]).
     pub id: Option<Value>,
     /// Result (mutually exclusive with error)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -664,5 +708,32 @@ mod tests {
     fn test_outgoing_notification_ack() {
         let response = JsonRpcOutgoing::notification_ack();
         assert!(!response.should_send());
+    }
+
+    /// JSON-RPC 2.0 §5: a response object MUST contain `result` xor `error`.
+    /// Both-present and neither-present payloads must be rejected.
+    #[test]
+    fn test_response_payload_rejects_both_result_and_error() {
+        let raw = r#"{"jsonrpc":"2.0","id":1,"result":{},"error":{"code":-32603,"message":"x"}}"#;
+        let err = serde_json::from_str::<JsonRpcResponse>(raw)
+            .expect_err("response with both result and error must be rejected");
+        assert!(err.to_string().contains("exactly one of"));
+    }
+
+    #[test]
+    fn test_response_payload_rejects_neither_result_nor_error() {
+        let raw = r#"{"jsonrpc":"2.0","id":1}"#;
+        let err = serde_json::from_str::<JsonRpcResponse>(raw)
+            .expect_err("response with neither result nor error must be rejected");
+        assert!(err.to_string().contains("exactly one of"));
+    }
+
+    #[test]
+    fn test_response_payload_accepts_error_only() {
+        let raw =
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"Method not found"}}"#;
+        let resp: JsonRpcResponse = serde_json::from_str(raw).unwrap();
+        assert!(resp.is_error());
+        assert_eq!(resp.error().unwrap().code, -32601);
     }
 }

@@ -198,8 +198,8 @@ impl Transport for StdioTransport {
         let response_json = self.read_line()?;
         let response: JsonRpcResponse<R> = serde_json::from_str(&response_json)?;
 
-        // Check response ID matches (optional but good practice)
-        if response.id != Some(id) {
+        // Check response ID matches (structural compare; tolerates any spec-valid id type)
+        if !response.id_matches(id) {
             return Err(TransportError::Protocol(format!(
                 "Response ID mismatch: expected {id}, got {:?}",
                 response.id

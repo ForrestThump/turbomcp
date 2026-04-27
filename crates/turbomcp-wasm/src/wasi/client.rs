@@ -7,6 +7,7 @@ use super::http::HttpTransport;
 use super::stdio::StdioTransport;
 use super::transport::{Transport, TransportError};
 use serde::{Deserialize, Serialize};
+use turbomcp_core::PROTOCOL_VERSION;
 use turbomcp_types::{
     CallToolResult, ClientCapabilities, GetPromptResult, Implementation, InitializeResult, Prompt,
     Resource, ResourceContent, ResourceTemplate, ServerCapabilities, Tool,
@@ -111,7 +112,7 @@ impl McpClient {
             initialized: false,
             server_info: None,
             server_capabilities: None,
-            protocol_version: "2025-11-25".to_string(),
+            protocol_version: PROTOCOL_VERSION.to_string(),
         }
     }
 
@@ -123,7 +124,7 @@ impl McpClient {
             initialized: false,
             server_info: None,
             server_capabilities: None,
-            protocol_version: "2025-11-25".to_string(),
+            protocol_version: PROTOCOL_VERSION.to_string(),
         }
     }
 
@@ -365,7 +366,7 @@ mod tests {
     fn test_client_protocol_version() {
         let transport = StdioTransport::new();
         let client = McpClient::with_stdio(transport);
-        assert_eq!(client.protocol_version(), "2025-11-25");
+        assert_eq!(client.protocol_version(), PROTOCOL_VERSION);
     }
 
     #[test]

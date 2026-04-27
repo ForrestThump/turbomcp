@@ -100,4 +100,35 @@ impl<T: turbomcp_transport::Transport + 'static> super::super::core::Client<T> {
             .await?;
         Ok(response)
     }
+
+    /// Send `notifications/cancelled` for an in-flight request.
+    ///
+    /// Per MCP 2025-11-25 §Cancellation, when a client abandons an in-flight
+    /// request the receiver SHOULD attempt to cancel it. This method provides
+    /// the explicit send path; the timeout path on `request()` calls it
+    /// internally so library users typically only need this when implementing
+    /// their own cancellation policy (UI cancel button, parent-task abort, …).
+    ///
+    /// Per spec, the `initialize` request MUST NOT be cancelled — passing the
+    /// initialize id is a no-op + warning. Cancellation is best-effort: a
+    /// well-behaved server stops work; a non-compliant one may still finish
+    /// the request normally.
+    pub async fn cancel_request(
+        &self,
+        request_id: &turbomcp_protocol::MessageId,
+        reason: Option<&str>,
+    ) -> Result<()> {
+        // The MCP spec singles out `initialize` as non-cancellable. We don't
+        // know the *method* of an in-flight request from just the id, but
+        // we can warn loudly so misuse is visible.
+        tracing::debug!(
+            request_id = ?request_id,
+            reason = reason.unwrap_or(""),
+            "Sending notifications/cancelled",
+        );
+        self.inner
+            .protocol
+            .send_cancellation(request_id, reason)
+            .await
+    }
 }

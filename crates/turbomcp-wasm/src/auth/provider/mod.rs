@@ -42,7 +42,12 @@
 //!         vec!["https://app.example.com/callback"],
 //!     ));
 //!
-//! let oauth = OAuthProvider::new(config);
+//! // Production: pass a durable store (e.g. DurableObjectTokenStore)
+//! // let store = DurableObjectTokenStore::from_env(&env, "MCP_OAUTH_TOKENS")?;
+//! // let oauth = OAuthProvider::new(config, Arc::new(store));
+//!
+//! // Tests / local dev: explicitly opt in to in-memory storage
+//! let oauth = OAuthProvider::with_memory_store(config);
 //!
 //! // In your worker:
 //! #[event(fetch)]
@@ -235,19 +240,28 @@ pub trait RateLimiter: 'static {
 ///
 /// # Production Usage
 ///
-/// **IMPORTANT:** The default configuration uses an in-memory token store that
-/// loses all tokens on Worker restart (~15-30 minutes). For production:
+/// The token store is required at construction so durable-storage decisions
+/// are explicit at the call site rather than inherited from a default. For
+/// production deployments:
 ///
-/// 1. Use `with_store()` to provide a durable token store (e.g., Durable Objects)
-/// 2. Use `with_user_authenticator()` to implement proper user authentication
-/// 3. Use `with_rate_limiter()` to add rate limiting protection
+/// 1. Pass a durable token store (e.g. Durable Objects) to [`Self::new`].
+/// 2. Use [`Self::with_user_authenticator`] to wire real authentication.
+/// 3. Use [`Self::with_rate_limiter`] for endpoint protection.
+///
+/// For tests and local development, [`Self::with_memory_store`] is the explicit
+/// in-memory opt-in (the constructor name carries the trade-off into code review).
 ///
 /// # Example
 ///
 /// ```ignore
-/// let oauth = OAuthProvider::new(config)
+/// // Production
+/// let store = DurableObjectTokenStore::from_env(&env, "MCP_OAUTH_TOKENS")?;
+/// let oauth = OAuthProvider::new(config, Arc::new(store))
 ///     .with_user_authenticator(Box::new(MyAuthenticator::new()))
 ///     .with_rate_limiter(Box::new(MyRateLimiter::new()));
+///
+/// // Tests / local dev
+/// let oauth = OAuthProvider::with_memory_store(config);
 /// ```
 pub struct OAuthProvider {
     config: OAuthProviderConfig,
@@ -257,29 +271,45 @@ pub struct OAuthProvider {
 }
 
 impl OAuthProvider {
-    /// Create a new OAuth provider with the given configuration.
+    /// Create a new OAuth provider with the given configuration and token store.
+    ///
+    /// The token store is **mandatory** to make durable-storage decisions
+    /// explicit at construction time. For Cloudflare Workers production deploys,
+    /// pass a [`DurableObjectTokenStore`](crate::wasm_server::durable_objects::DurableObjectTokenStore).
+    /// For tests and local development, use [`Self::with_memory_store`] which
+    /// names the trade-off in its constructor.
     ///
     /// # Security Warning
     ///
-    /// The default configuration uses:
-    /// - **In-memory token store** that loses all tokens on Worker restart (~15-30 minutes)
-    /// - **No user authentication** - you must add a `UserAuthenticator` for production
-    ///
-    /// Use `with_store()` and `with_user_authenticator()` before deploying to production.
-    pub fn new(config: OAuthProviderConfig) -> Self {
-        // MemoryTokenStore::new() emits the runtime console warning about
-        // non-durable storage on wasm32 targets.
+    /// You must still call [`Self::with_user_authenticator`] before serving
+    /// production traffic — without it the authorization endpoint will return
+    /// 501 Not Implemented (unless the `demo-oauth` feature is enabled).
+    pub fn new(config: OAuthProviderConfig, store: SharedTokenStore) -> Self {
         Self {
             config,
-            store: Arc::new(MemoryTokenStore::new()),
+            store,
             user_authenticator: None,
             rate_limiter: None,
         }
     }
 
-    /// Create a new OAuth provider with a custom token store.
+    /// Create a new OAuth provider backed by an in-memory token store.
     ///
-    /// Use this with a Durable Object-backed store for production deployments.
+    /// **Tests and development only.** The in-memory store loses all tokens on
+    /// every Worker isolate restart (~15-30 minutes) — production deployments
+    /// must use [`Self::new`] with a durable store. The constructor name makes
+    /// this trade-off explicit so it's visible in code review.
+    ///
+    /// `MemoryTokenStore::new()` also emits a `console.warn` on `wasm32`
+    /// targets at runtime to surface this at deploy time.
+    pub fn with_memory_store(config: OAuthProviderConfig) -> Self {
+        Self::new(config, Arc::new(MemoryTokenStore::new()))
+    }
+
+    /// Replace the token store on an existing provider.
+    ///
+    /// Prefer [`Self::new`] which takes the store at construction; this method
+    /// remains for fluent reconfiguration during integration testing.
     pub fn with_store(mut self, store: SharedTokenStore) -> Self {
         self.store = store;
         self
@@ -970,17 +1000,19 @@ impl OAuthProvider {
     // =========================================================================
 
     fn handle_authorization_server_metadata(&self) -> worker::Result<Response> {
+        // `jwks_uri` is intentionally omitted: `handle_jwks` currently returns an
+        // empty key set, and per RFC 8414 §2 advertising the URI without keys
+        // misleads clients. Re-add once a real key publication path lands.
         let metadata = serde_json::json!({
             "issuer": self.config.issuer,
             "authorization_endpoint": self.config.authorization_endpoint_url(),
             "token_endpoint": self.config.token_endpoint_url(),
             "revocation_endpoint": format!("{}{}", self.config.issuer, self.config.revocation_endpoint),
             "introspection_endpoint": format!("{}{}", self.config.issuer, self.config.introspection_endpoint),
-            "jwks_uri": self.config.jwks_endpoint_url(),
             "response_types_supported": ["code"],
             "grant_types_supported": ["authorization_code", "refresh_token"],
             "token_endpoint_auth_methods_supported": ["none", "client_secret_basic", "client_secret_post"],
-            "code_challenge_methods_supported": ["S256", "plain"],
+            "code_challenge_methods_supported": ["S256"],
             "scopes_supported": self.config.supported_scopes,
         });
 

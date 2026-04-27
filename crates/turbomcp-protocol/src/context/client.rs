@@ -25,7 +25,12 @@ pub struct ClientCapabilities {
 }
 
 /// Client identifier types for authentication and tracking
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Debug` is implemented manually to redact secret-bearing variants
+/// (`Token`, `Session`) so bearer tokens / session cookies do not leak
+/// into tracing logs. The plaintext can still be retrieved via
+/// [`ClientId::as_str`].
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClientId {
     /// Explicit client ID from header
     Header(String),
@@ -39,6 +44,19 @@ pub enum ClientId {
     UserAgent(String),
     /// Anonymous client
     Anonymous,
+}
+
+impl std::fmt::Debug for ClientId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Header(id) => f.debug_tuple("Header").field(id).finish(),
+            Self::Token(_) => f.debug_tuple("Token").field(&"<redacted>").finish(),
+            Self::Session(_) => f.debug_tuple("Session").field(&"<redacted>").finish(),
+            Self::QueryParam(id) => f.debug_tuple("QueryParam").field(id).finish(),
+            Self::UserAgent(id) => f.debug_tuple("UserAgent").field(id).finish(),
+            Self::Anonymous => f.write_str("Anonymous"),
+        }
+    }
 }
 
 impl ClientId {
@@ -147,10 +165,20 @@ impl ClientSession {
 }
 
 /// Client ID extractor for authentication across different transports
-#[derive(Debug)]
+///
+/// `Debug` is implemented manually so the contents of `auth_tokens` are
+/// never written to logs — only the count is exposed.
 pub struct ClientIdExtractor {
     /// Authentication tokens mapping token -> `client_id`
     auth_tokens: Arc<dashmap::DashMap<String, String>>,
+}
+
+impl std::fmt::Debug for ClientIdExtractor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClientIdExtractor")
+            .field("auth_tokens_count", &self.auth_tokens.len())
+            .finish()
+    }
 }
 
 impl ClientIdExtractor {

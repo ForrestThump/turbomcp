@@ -19,9 +19,45 @@
 mod line;
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
+use dashmap::DashMap;
 use serde_json::Value;
+use tokio_util::sync::CancellationToken;
 use turbomcp_types::ProtocolVersion;
+
+/// RAII guard that removes a pending-handler entry from the per-connection
+/// cancellation registry when dropped.
+///
+/// The line / channel / websocket transports each maintain a
+/// `DashMap<request_id, CancellationToken>` so that an inbound
+/// `notifications/cancelled` can signal the matching in-flight handler.
+/// The handler's spawned task removes its own entry on the success path,
+/// but `tokio::spawn` catches panics — without a Drop-based cleanup, a
+/// panicking handler would leak its registry entry for the connection's
+/// lifetime. This guard runs cleanup on all paths (success, error, panic,
+/// future drop).
+pub(crate) struct PendingHandlerGuard {
+    handlers: Arc<DashMap<String, CancellationToken>>,
+    key: Option<String>,
+}
+
+impl PendingHandlerGuard {
+    pub(crate) fn new(
+        handlers: Arc<DashMap<String, CancellationToken>>,
+        key: Option<String>,
+    ) -> Self {
+        Self { handlers, key }
+    }
+}
+
+impl Drop for PendingHandlerGuard {
+    fn drop(&mut self) {
+        if let Some(key) = self.key.take() {
+            self.handlers.remove(&key);
+        }
+    }
+}
 
 /// MCP session lifecycle state for per-connection/session version tracking.
 ///

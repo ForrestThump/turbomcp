@@ -32,6 +32,16 @@ use super::retry::RetryConfig;
 pub struct TurboTransport {
     /// Underlying transport
     inner: Arc<Mutex<Box<dyn Transport>>>,
+    /// Cached transport type (immutable for the lifetime of this wrapper).
+    /// Pre-3.2.0 the `transport_type()` accessor fell back to `try_lock` and
+    /// returned `Stdio` on contention — a fabricated value masquerading as
+    /// truth in metrics. We snapshot the value at construction so the
+    /// accessor is lock-free and accurate.
+    cached_transport_type: TransportType,
+    /// Cached endpoint (immutable for the lifetime of this wrapper). Same
+    /// rationale as `cached_transport_type` — the previous `try_lock`-based
+    /// accessor returned `None` on contention.
+    cached_endpoint: Option<String>,
     /// Retry configuration
     retry_config: RetryConfig,
     /// Circuit breaker
@@ -60,8 +70,15 @@ impl TurboTransport {
             Duration::from_secs(300),
         )));
 
+        // Snapshot type/endpoint up front — the inner transport is `Box<dyn>`
+        // so we can call its sync accessors before wrapping it in the Mutex.
+        let cached_transport_type = transport.transport_type();
+        let cached_endpoint = transport.endpoint();
+
         Self {
             inner: Arc::new(Mutex::new(transport)),
+            cached_transport_type,
+            cached_endpoint,
             retry_config,
             circuit_breaker,
             health_checker,
@@ -162,11 +179,14 @@ impl TurboTransport {
         let health_checker = self.health_checker.clone();
         let metrics = self.metrics.clone();
         let transport = self.inner.clone();
-        // Use a fixed interval for health monitoring
-        let _interval = Duration::from_secs(30);
+        // Honor the configured interval rather than a hardcoded value.
+        let interval = {
+            let checker = self.health_checker.lock().await;
+            checker.config().interval
+        };
 
         tokio::spawn(async move {
-            let mut interval_timer = tokio::time::interval(Duration::from_secs(30));
+            let mut interval_timer = tokio::time::interval(interval);
 
             loop {
                 interval_timer.tick().await;
@@ -229,13 +249,10 @@ impl TurboTransport {
 
 impl Transport for TurboTransport {
     fn transport_type(&self) -> TransportType {
-        // Delegate to the inner transport - no need to cache since this is a cheap operation
-        if let Ok(inner) = self.inner.try_lock() {
-            inner.transport_type()
-        } else {
-            // If we can't get the lock, return a reasonable default
-            TransportType::Stdio // Fallback to a valid variant
-        }
+        // Lock-free: returned from the construction-time snapshot. Previously
+        // this fell back to `try_lock` + `Stdio` on contention which produced
+        // wrong metrics under load.
+        self.cached_transport_type
     }
 
     fn capabilities(&self) -> &crate::core::TransportCapabilities {
@@ -279,12 +296,26 @@ impl Transport for TurboTransport {
         message: TransportMessage,
     ) -> Pin<Box<dyn Future<Output = TransportResult<()>> + Send + '_>> {
         Box::pin(async move {
-            // Check for duplicate messages
+            // SECURITY/CORRECTNESS: This is **not** an idempotency guarantee.
+            //
+            // We track recently observed message IDs purely to drop accidental
+            // sender-side duplicates (e.g. an upstream layer fanning out the
+            // same payload). Dropping is silent and treated as success because
+            // the dedup window is best-effort and the caller has *already*
+            // expressed intent to send this id once.
+            //
+            // Callers that need at-least-once redelivery semantics MUST mint a
+            // fresh `MessageId` per attempt — reusing the previous id will be
+            // suppressed here.
             {
                 let mut dedup = self.dedup_cache.write().await;
                 if dedup.is_duplicate(&message.id.to_string()) {
                     self.metrics.record_duplicate_filtered();
-                    return Ok(()); // Silently drop duplicate
+                    tracing::debug!(
+                        message_id = %message.id,
+                        "Suppressed duplicate send (sender-side dedup window hit)"
+                    );
+                    return Ok(());
                 }
             }
 
@@ -326,14 +357,10 @@ impl Transport for TurboTransport {
     }
 
     fn endpoint(&self) -> Option<String> {
-        // Try to get endpoint from inner transport without blocking
-        if let Ok(inner) = self.inner.try_lock() {
-            inner.endpoint()
-        } else {
-            // If we can't get the lock, return None - this is acceptable
-            // as endpoint() is used for informational purposes
-            None
-        }
+        // Lock-free: returned from the construction-time snapshot. Previously
+        // this fell back to `try_lock` + `None` on contention which silently
+        // hid the endpoint when callers needed it most (high traffic / debug).
+        self.cached_endpoint.clone()
     }
 
     fn configure(

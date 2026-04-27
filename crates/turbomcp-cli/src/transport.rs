@@ -334,6 +334,16 @@ impl UnifiedClient {
 pub async fn create_client(conn: &Connection) -> CliResult<UnifiedClient> {
     let transport_kind = determine_transport(conn);
 
+    // The --auth / MCP_AUTH bearer token is only consumed by the HTTP transport.
+    // Warn (without echoing the token) when the user supplies it for a transport
+    // that has no notion of authentication so they don't assume it was sent.
+    if conn.auth.is_some() && !matches!(transport_kind, TransportKind::Http | TransportKind::Ws) {
+        eprintln!(
+            "Warning: --auth is currently only honored by the HTTP transport; ignoring for {:?}.",
+            transport_kind
+        );
+    }
+
     match transport_kind {
         #[cfg(feature = "stdio")]
         TransportKind::Stdio => {
@@ -445,16 +455,18 @@ fn create_stdio_transport(conn: &Connection) -> CliResult<ChildProcessTransport>
     // Use --command if provided, otherwise use --url
     let command_str = conn.command.as_deref().unwrap_or(&conn.url);
 
-    // Parse command and arguments
-    let parts: Vec<&str> = command_str.split_whitespace().collect();
+    // Honor shell quoting/escaping so paths with spaces and `bash -c "..."`
+    // wrappers parse correctly. `split_whitespace` would fragment them.
+    let parts = shell_words::split(command_str)
+        .map_err(|e| CliError::InvalidArguments(format!("Invalid --command quoting: {e}")))?;
     if parts.is_empty() {
         return Err(CliError::InvalidArguments(
             "No command specified for STDIO transport".to_string(),
         ));
     }
 
-    let command = parts[0].to_string();
-    let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+    let command = parts[0].clone();
+    let args: Vec<String> = parts[1..].to_vec();
 
     // Create config
     let config = ChildProcessConfig {
@@ -525,6 +537,7 @@ async fn create_http_transport(conn: &Connection) -> CliResult<StreamableHttpCli
         base_url,
         endpoint_path: "/mcp".to_string(),
         timeout: Duration::from_secs(conn.timeout),
+        auth_token: conn.auth.clone(),
         ..Default::default()
     };
 

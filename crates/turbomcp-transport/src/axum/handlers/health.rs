@@ -1,5 +1,10 @@
 //! Health check handler for service monitoring
 
+// Internal references back through `crate::axum::*` resolve to types whose
+// definitions are `#[deprecated]` in this subtree. The deprecation is for
+// external consumers; in-tree code stays clean until the subtree is removed.
+#![allow(deprecated)]
+
 use axum::{Json, extract::State};
 
 use crate::axum::service::McpAppState;

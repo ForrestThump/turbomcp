@@ -7,6 +7,13 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use turbomcp_protocol::types::*;
 
+/// Helper: build a `HashMap<String, Value>` from a single key/value pair.
+fn meta_one(key: &str, value: Value) -> HashMap<String, Value> {
+    let mut m = HashMap::new();
+    m.insert(key.to_string(), value);
+    m
+}
+
 #[cfg(test)]
 mod mcp_compliance_tests {
     use super::*;
@@ -26,7 +33,7 @@ mod mcp_compliance_tests {
             },
             capabilities: ServerCapabilities::default(),
             instructions: None,
-            _meta: Some(json!({"test": "value"})),
+            meta: Some(meta_one("test", json!("value"))),
         };
         let serialized = serde_json::to_string(&init_result).unwrap();
         let parsed: Value = serde_json::from_str(&serialized).unwrap();
@@ -47,7 +54,7 @@ mod mcp_compliance_tests {
             content: vec![],
             is_error: Some(false),
             structured_content: Some(json!({"structured": "data"})),
-            _meta: Some(json!({"call_meta": "test"})),
+            meta: Some(meta_one("call_meta", json!("test"))),
             task_id: None,
         };
         let serialized = serde_json::to_string(&call_result).unwrap();
@@ -69,7 +76,7 @@ mod mcp_compliance_tests {
         let prompt_result = GetPromptResult {
             description: None,
             messages: vec![],
-            _meta: Some(json!({"prompt_meta": "test"})),
+            meta: Some(meta_one("prompt_meta", json!("test"))),
         };
         let serialized = serde_json::to_string(&prompt_result).unwrap();
         let parsed: Value = serde_json::from_str(&serialized).unwrap();
@@ -132,7 +139,7 @@ mod mcp_compliance_tests {
                 description: None,
                 ..Default::default()
             },
-            _meta: Some(json!({"init_meta": "test"})),
+            meta: Some(meta_one("init_meta", json!("test"))),
         };
         let serialized = serde_json::to_string(&init_request).unwrap();
         let parsed: Value = serde_json::from_str(&serialized).unwrap();
@@ -214,7 +221,7 @@ mod mcp_compliance_tests {
             },
             capabilities: ServerCapabilities::default(),
             instructions: None,
-            _meta: None,
+            meta: None,
         };
         let serialized = serde_json::to_string(&init_result).unwrap();
         let parsed: Value = serde_json::from_str(&serialized).unwrap();
@@ -230,7 +237,7 @@ mod mcp_compliance_tests {
             "capabilities": {}
         });
         let deserialized: InitializeResult = serde_json::from_value(json_without_meta).unwrap();
-        assert!(deserialized._meta.is_none());
+        assert!(deserialized.meta.is_none());
     }
 
     /// Test CallToolResult structuredContent field compliance
@@ -247,7 +254,7 @@ mod mcp_compliance_tests {
                     "title": "Test Chart"
                 }
             })),
-            _meta: None,
+            meta: None,
             task_id: None,
         };
         let serialized = serde_json::to_string(&call_result).unwrap();
@@ -263,7 +270,7 @@ mod mcp_compliance_tests {
             content: vec![],
             is_error: Some(false),
             structured_content: None,
-            _meta: None,
+            meta: None,
             task_id: None,
         };
         let serialized = serde_json::to_string(&call_result_no_structured).unwrap();
@@ -350,7 +357,7 @@ mod mcp_compliance_tests {
     #[test]
     fn test_meta_field_edge_cases() {
         // Test with complex nested _meta
-        let complex_meta = json!({
+        let complex_meta: HashMap<String, Value> = serde_json::from_value(json!({
             "tracing": {
                 "spanId": "span-123",
                 "traceId": "trace-456"
@@ -366,34 +373,35 @@ mod mcp_compliance_tests {
                     "level": 3
                 }
             }
-        });
+        }))
+        .unwrap();
 
         let call_result = CallToolResult {
             content: vec![],
             is_error: Some(false),
             structured_content: None,
-            _meta: Some(complex_meta.clone()),
+            meta: Some(complex_meta.clone()),
             task_id: None,
         };
 
         let serialized = serde_json::to_string(&call_result).unwrap();
         let deserialized: CallToolResult = serde_json::from_str(&serialized).unwrap();
 
-        assert_eq!(deserialized._meta, Some(complex_meta));
+        assert_eq!(deserialized.meta, Some(complex_meta));
 
         // Test with empty object _meta
-        let empty_meta = json!({});
+        let empty_meta: HashMap<String, Value> = HashMap::new();
         let call_result_empty = CallToolResult {
             content: vec![],
             is_error: Some(false),
             structured_content: None,
-            _meta: Some(empty_meta.clone()),
+            meta: Some(empty_meta.clone()),
             task_id: None,
         };
 
         let serialized = serde_json::to_string(&call_result_empty).unwrap();
         let deserialized: CallToolResult = serde_json::from_str(&serialized).unwrap();
 
-        assert_eq!(deserialized._meta, Some(empty_meta));
+        assert_eq!(deserialized.meta, Some(empty_meta));
     }
 }

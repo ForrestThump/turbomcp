@@ -2,6 +2,12 @@
 //!
 //! Runs the proxy server to bridge MCP servers across transports.
 
+// In-tree consumer of the deprecated `turbomcp_transport::axum` subtree. The
+// proxy's HTTP frontend will migrate to `turbomcp_server::transport::http` in
+// the same release window that removes this subtree; until then, suppress the
+// deprecation warning here so CI stays clean.
+#![allow(deprecated)]
+
 use axum::Router;
 use clap::Args;
 use secrecy::SecretString;
@@ -120,6 +126,16 @@ pub struct ServeCommand {
     /// IMPORTANT: Always enable this when binding to 0.0.0.0
     #[arg(long)]
     pub require_auth: bool,
+
+    /// Browser origin permitted to reach the HTTP frontend
+    ///
+    /// Specify once per allowed origin (e.g. `--allowed-origin https://app.example.com`).
+    /// When empty (the default), any browser-issued request carrying an `Origin`
+    /// header is rejected with 403; server-to-server clients without `Origin`
+    /// continue to work. When set, a `CorsLayer` advertising the allowlist is
+    /// installed in addition to the strict request-time check.
+    #[arg(long = "allowed-origin", value_name = "ORIGIN")]
+    pub allowed_origins: Vec<String>,
 }
 
 impl ServeCommand {
@@ -260,7 +276,21 @@ impl ServeCommand {
             ..Default::default()
         };
 
-        let app = Router::new().turbo_mcp_routes_with_config(proxy_service, config);
+        // Layer the proxy's defensive origin/CORS guards on top of the axum
+        // subtree's MCP routes. The guards reject browser-issued requests
+        // that aren't on `--allowed-origin`; without explicit config the
+        // proxy refuses any browser traffic, mirroring the spec's
+        // recommended posture for localhost-bound MCP servers.
+        let allowlist = crate::runtime::OriginAllowlist::new(self.allowed_origins.clone());
+        let mut app = Router::new()
+            .turbo_mcp_routes_with_config(proxy_service, config)
+            .layer(axum::middleware::from_fn_with_state(
+                allowlist.clone(),
+                crate::runtime::origin_guard,
+            ));
+        if let Some(cors) = crate::runtime::build_cors_layer(&allowlist) {
+            app = app.layer(cors);
+        }
 
         // Parse bind address
         let addr: std::net::SocketAddr = self
@@ -362,6 +392,7 @@ impl ServeCommand {
 
                 BackendTransport::Http {
                     url: url.clone(),
+                    endpoint_path: self.backend.endpoint_path.clone(),
                     auth_token: None,
                 }
             }
@@ -424,6 +455,7 @@ mod tests {
     fn test_backend_config_creation() {
         let cmd = ServeCommand {
             backend: BackendArgs {
+                endpoint_path: None,
                 backend: Some(BackendType::Stdio),
                 cmd: Some("python".to_string()),
                 args: vec!["server.py".to_string()],
@@ -447,6 +479,7 @@ mod tests {
             jwt_issuer: vec![],
             api_key_header: "x-api-key".to_string(),
             require_auth: false,
+            allowed_origins: Vec::new(),
         };
 
         let config = cmd.create_backend_config();
@@ -461,6 +494,7 @@ mod tests {
     fn test_tcp_backend_config() {
         let cmd = ServeCommand {
             backend: BackendArgs {
+                endpoint_path: None,
                 backend: Some(BackendType::Tcp),
                 cmd: None,
                 args: vec![],
@@ -484,6 +518,7 @@ mod tests {
             jwt_issuer: vec![],
             api_key_header: "x-api-key".to_string(),
             require_auth: false,
+            allowed_origins: Vec::new(),
         };
 
         let config = cmd.create_backend_config();
@@ -495,6 +530,7 @@ mod tests {
     fn test_unix_backend_config() {
         let cmd = ServeCommand {
             backend: BackendArgs {
+                endpoint_path: None,
                 backend: Some(BackendType::Unix),
                 cmd: None,
                 args: vec![],
@@ -517,6 +553,7 @@ mod tests {
             jwt_issuer: vec![],
             api_key_header: "x-api-key".to_string(),
             require_auth: false,
+            allowed_origins: Vec::new(),
         };
 
         let config = cmd.create_backend_config();

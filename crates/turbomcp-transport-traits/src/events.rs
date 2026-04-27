@@ -1,5 +1,8 @@
 //! Transport event types.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use tokio::sync::mpsc;
 use turbomcp_protocol::MessageId;
 
@@ -64,6 +67,9 @@ pub enum TransportEvent {
 #[derive(Debug, Clone)]
 pub struct TransportEventEmitter {
     sender: mpsc::Sender<TransportEvent>,
+    /// Counter incremented every time an event is dropped because the channel is full.
+    /// Observers can read it via [`Self::dropped_events`] to detect lossy emission.
+    dropped: Arc<AtomicU64>,
 }
 
 impl TransportEventEmitter {
@@ -71,13 +77,28 @@ impl TransportEventEmitter {
     #[must_use]
     pub fn new() -> (Self, mpsc::Receiver<TransportEvent>) {
         let (sender, receiver) = mpsc::channel(500);
-        (Self { sender }, receiver)
+        (
+            Self {
+                sender,
+                dropped: Arc::new(AtomicU64::new(0)),
+            },
+            receiver,
+        )
     }
 
-    /// Emits an event, dropping it if the channel is full to avoid blocking.
+    /// Emits an event, dropping it (and incrementing the dropped-events counter)
+    /// if the channel is full to avoid blocking.
     pub fn emit(&self, event: TransportEvent) {
-        // Use try_send for non-blocking event emission.
-        let _ = self.sender.try_send(event);
+        if self.sender.try_send(event).is_err() {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Returns the number of events dropped due to a full channel since this
+    /// emitter was created. Use to surface backpressure loss in observability tooling.
+    #[must_use]
+    pub fn dropped_events(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
     }
 
     /// Emits a `Connected` event.

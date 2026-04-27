@@ -296,6 +296,7 @@ impl SchemaCommand {
 
                 BackendTransport::Http {
                     url: url.clone(),
+                    endpoint_path: None,
                     auth_token: None,
                 }
             }

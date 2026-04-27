@@ -136,6 +136,11 @@ where
     ///
     /// Extracts credentials, validates them, and then delegates to the
     /// underlying server. Returns HTTP 401 if authentication fails.
+    ///
+    /// When no credential is supplied, the request is allowed through only
+    /// if its JSON-RPC method appears in `skip_auth_methods` (default:
+    /// `initialize`, `notifications/initialized`, `ping`). Any other method
+    /// is rejected with HTTP 401 + `WWW-Authenticate: Bearer`.
     pub async fn handle(&self, req: Request) -> worker::Result<Response> {
         // SECURITY: Extract Origin header early for CORS responses.
         // We echo this back instead of using wildcard "*".
@@ -166,9 +171,25 @@ where
                     return self.auth_error_response(&e, origin_ref);
                 }
             }
+        } else {
+            // No credentials: only allow methods on the skip list.
+            // Worker bodies are one-shot, so clone the request to peek at
+            // the JSON-RPC method without consuming the original.
+            let method_name = match req.clone() {
+                Ok(mut peeker) => match peeker.text().await {
+                    Ok(body) => parse_jsonrpc_method(&body),
+                    Err(_) => None,
+                },
+                Err(_) => None,
+            };
+            let allowed = method_name
+                .as_deref()
+                .map(|m| self.skip_auth_methods.iter().any(|s| s == m))
+                .unwrap_or(false);
+            if !allowed {
+                return self.unauthenticated_method_response(method_name.as_deref(), origin_ref);
+            }
         }
-        // If no credentials, delegate to server (might be an unauthenticated method)
-        // The server will handle method-level authorization
 
         // Delegate to the underlying server
         let response = self.server.handle(req).await;
@@ -177,6 +198,37 @@ where
         *self.current_principal.borrow_mut() = None;
 
         response
+    }
+
+    /// Build the 401 response for an unauthenticated call to a protected method.
+    fn unauthenticated_method_response(
+        &self,
+        method: Option<&str>,
+        request_origin: Option<&str>,
+    ) -> worker::Result<Response> {
+        let headers = worker::Headers::new();
+        let origin = request_origin.unwrap_or("*");
+        let _ = headers.set("Access-Control-Allow-Origin", origin);
+        if request_origin.is_some() {
+            let _ = headers.set("Vary", "Origin");
+        }
+        let _ = headers.set("Content-Type", "application/json");
+        let _ = headers.set("WWW-Authenticate", "Bearer");
+
+        let detail = match method {
+            Some(m) => format!("Authentication required for method '{m}'"),
+            None => "Authentication required".to_string(),
+        };
+        let response = JsonRpcResponse::error(
+            None,
+            error_codes::INTERNAL_ERROR - 5, // -32008 for authentication errors
+            detail,
+        );
+
+        let json = serde_json::to_string(&response)
+            .unwrap_or_else(|_| r#"{"error":"Authentication required"}"#.to_string());
+
+        Response::error(json, 401).map(|r| r.with_headers(headers))
     }
 
     /// Create an authentication error response.
@@ -208,6 +260,17 @@ where
 
         Response::error(json, 401).map(|r| r.with_headers(headers))
     }
+}
+
+/// Best-effort extraction of the JSON-RPC `method` field from a request body.
+///
+/// Returns `None` for invalid JSON, missing field, non-string method, or batch
+/// requests (MCP 2025-11-25 deprecates batch). Callers treat `None` as
+/// "cannot determine method — reject for safety" when no credentials are
+/// present.
+fn parse_jsonrpc_method(body: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    value.get("method")?.as_str().map(str::to_owned)
 }
 
 /// Extension trait for adding authentication to [`McpServer`].

@@ -44,6 +44,7 @@ impl<T: turbomcp_transport::Transport + 'static> super::super::core::Client<T> {
     ///             Ok(vec![Root {
     ///                 uri: format!("file://{}", self.project_dir).into(),
     ///                 name: Some("My Project".to_string()),
+    ///                 _meta: None,
     ///             }])
     ///         })
     ///     }

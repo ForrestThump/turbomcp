@@ -10,6 +10,9 @@
 //! All tests maintain the original test coverage while being organized
 //! by functionality for better maintainability.
 
+// See `axum/mod.rs` — internal subtree references silenced.
+#![allow(deprecated)]
+
 #[cfg(test)]
 pub mod config;
 #[cfg(test)]

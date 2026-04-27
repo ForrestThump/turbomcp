@@ -38,11 +38,18 @@ fn encode_json_map(
 ) -> std::collections::HashMap<String, Vec<u8>> {
     map.into_iter()
         .map(|(key, value)| {
-            (
-                key,
-                serde_json::to_vec(&value)
-                    .expect("serializing serde_json::Value for gRPC capabilities should succeed"),
-            )
+            // serde_json::to_vec on a serde_json::Value is infallible in practice
+            // (non-finite floats are the only realistic failure, and Value cannot
+            // hold them). On the off chance it fails, fall back to "null" so the
+            // gRPC capability map stays decodable rather than panicking the hot path.
+            let bytes = serde_json::to_vec(&value).unwrap_or_else(|err| {
+                tracing::warn!(
+                    error = %err,
+                    "encode_json_map: serializing Value failed; substituting null"
+                );
+                b"null".to_vec()
+            });
+            (key, bytes)
         })
         .collect()
 }
@@ -159,7 +166,7 @@ impl TryFrom<proto::InitializeRequest> for InitializeRequest {
                 .client_info
                 .map(Into::into)
                 .ok_or_else(|| GrpcError::invalid_request("Missing client_info"))?,
-            _meta: None,
+            meta: None,
         })
     }
 }
@@ -187,7 +194,7 @@ impl TryFrom<proto::InitializeResult> for InitializeResult {
                 .map(Into::into)
                 .ok_or_else(|| GrpcError::invalid_request("Missing server_info"))?,
             instructions: res.instructions,
-            _meta: None,
+            meta: None,
         })
     }
 }
@@ -727,7 +734,7 @@ impl TryFrom<proto::GetPromptResult> for GetPromptResult {
         Ok(Self {
             description: result.description,
             messages: messages?,
-            _meta: None,
+            meta: None,
         })
     }
 }
@@ -871,7 +878,7 @@ impl TryFrom<proto::CallToolResult> for CallToolResult {
             content: content?,
             is_error: result.is_error,
             structured_content: None,
-            _meta: None,
+            meta: None,
             task_id: None,
         })
     }

@@ -170,23 +170,26 @@ impl<'a> Next<'a> {
         }
     }
 
-    /// List tools from the next middleware or handler.
+    /// Forward `list_tools` directly to the wrapped handler.
+    ///
+    /// **Caveat — list hooks do not currently chain.** The `on_list_tools`
+    /// hook on `McpMiddleware` is `async` (returns a boxed `Future<Vec<Tool>>`)
+    /// while this method is sync, so re-entering the middleware chain from
+    /// here would require making `Next::list_tools` async. For now we honor
+    /// the single override invoked by [`MiddlewareStack`] and skip any deeper
+    /// hooks. See `MiddlewareStack::list_tools` for the entry point.
     pub fn list_tools(self) -> Vec<Tool> {
-        if self.index < self.middlewares.len() {
-            // Can't easily make this recursive async, so just call handler directly
-            // In a full implementation, we'd use a different pattern
-            self.handler.dyn_list_tools()
-        } else {
-            self.handler.dyn_list_tools()
-        }
+        self.handler.dyn_list_tools()
     }
 
-    /// List resources from the next middleware or handler.
+    /// Forward `list_resources` directly to the wrapped handler. See
+    /// [`Self::list_tools`] for the chaining caveat.
     pub fn list_resources(self) -> Vec<Resource> {
         self.handler.dyn_list_resources()
     }
 
-    /// List prompts from the next middleware or handler.
+    /// Forward `list_prompts` directly to the wrapped handler. See
+    /// [`Self::list_tools`] for the chaining caveat.
     pub fn list_prompts(self) -> Vec<Prompt> {
         self.handler.dyn_list_prompts()
     }

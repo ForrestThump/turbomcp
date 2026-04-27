@@ -293,6 +293,7 @@ fn test_elicitation_schema_object_valid() {
             format: Some("email".to_string()),
             min_length: None,
             max_length: None,
+            default: None,
             enum_values: None,
             enum_names: None,
         },
@@ -342,6 +343,7 @@ fn test_enum_names_length_match() {
         format: None,
         min_length: None,
         max_length: None,
+        default: None,
         enum_values: Some(vec!["a".to_string(), "b".to_string(), "c".to_string()]),
         enum_names: Some(vec![
             "Option A".to_string(),
@@ -378,6 +380,7 @@ fn test_enum_names_length_mismatch() {
         format: None,
         min_length: None,
         max_length: None,
+        default: None,
         enum_values: Some(vec!["a".to_string(), "b".to_string(), "c".to_string()]),
         enum_names: Some(vec!["Option A".to_string()]), // Only 1!
     };
@@ -419,13 +422,14 @@ fn test_string_format_validation_email() {
 
 #[test]
 fn test_string_format_validation_uri() {
-    // Valid URIs
+    // Valid absolute URIs (per JSON Schema `format: "uri"`)
     assert!(ProtocolValidator::validate_string_format("https://example.com", "uri").is_ok());
     assert!(ProtocolValidator::validate_string_format("http://localhost:8080", "uri").is_ok());
-    assert!(ProtocolValidator::validate_string_format("/path/to/resource", "uri").is_ok());
+    assert!(ProtocolValidator::validate_string_format("file:///etc/hosts", "uri").is_ok());
 
-    // Invalid URIs
+    // Invalid URIs — bare paths are URI-references, not full URIs
     assert!(ProtocolValidator::validate_string_format("not a uri", "uri").is_err());
+    assert!(ProtocolValidator::validate_string_format("/path/to/resource", "uri").is_err());
 }
 
 #[test]
@@ -436,8 +440,12 @@ fn test_string_format_validation_date() {
 
     // Invalid dates
     assert!(ProtocolValidator::validate_string_format("10/07/2025", "date").is_err());
-    assert!(ProtocolValidator::validate_string_format("2025-1-7", "date").is_err());
-    assert!(ProtocolValidator::validate_string_format("2025-13-01", "date").is_ok()); // Doesn't validate month/day ranges
+    // Chrono validates month/day ranges, so "2025-13-01" is now rejected.
+    // Single-digit months/days (`2025-1-7`) are still accepted because
+    // `%Y-%m-%d` is lenient about width — RFC 3339 strictness can be added
+    // by switching to `%Y-%0m-%0d` if a stricter shape becomes a hard
+    // requirement. This is currently used as wire validation only.
+    assert!(ProtocolValidator::validate_string_format("2025-13-01", "date").is_err());
     assert!(ProtocolValidator::validate_string_format("not-a-date", "date").is_err());
 }
 
@@ -472,6 +480,7 @@ fn test_unknown_format_warning() {
         format: Some("unknown-format".to_string()),
         min_length: None,
         max_length: None,
+        default: None,
         enum_values: None,
         enum_names: None,
     };
@@ -509,6 +518,7 @@ fn test_full_mcp_compliance_scenario() {
             format: Some("email".to_string()),
             min_length: Some(5),
             max_length: Some(100),
+            default: None,
             enum_values: None,
             enum_names: None,
         },
@@ -523,6 +533,7 @@ fn test_full_mcp_compliance_scenario() {
             format: None,
             min_length: None,
             max_length: None,
+            default: None,
             enum_values: Some(vec![
                 "low".to_string(),
                 "medium".to_string(),

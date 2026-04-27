@@ -1,8 +1,6 @@
-//! Comprehensive tests
-use super::*;
-
 //! Comprehensive tests for protocol types
 
+use super::*;
 use serde_json::json;
 use std::collections::HashMap;
 use crate::types::*;

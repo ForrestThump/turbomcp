@@ -2,6 +2,10 @@
 //!
 //! This module provides dynamic proxying capabilities without code generation.
 //! Ideal for development, testing, and prototyping.
+
+// In-tree consumer of the deprecated `turbomcp_transport::axum` subtree.
+// See `cli/commands/serve.rs` for the migration plan.
+#![allow(deprecated)]
 //!
 //! # Security Features
 //!
@@ -49,6 +53,9 @@ use crate::error::{ProxyError, ProxyResult};
 use crate::proxy::{AtomicMetrics, BackendConnector, BackendTransport, ProxyService};
 use ipnetwork::IpNetwork;
 
+mod security;
+pub use security::{OriginAllowlist, build_cors_layer, origin_guard};
+
 /// Maximum request size in bytes (10 MB)
 pub const MAX_REQUEST_SIZE: usize = 10 * 1024 * 1024;
 
@@ -82,6 +89,9 @@ pub struct RuntimeProxyBuilder {
     timeout_ms: u64,
     enable_metrics: bool,
     validation_config: BackendValidationConfig,
+    /// Browser origins allowed to reach the HTTP/WebSocket frontend. Empty by
+    /// default → any request carrying an `Origin` header is rejected with 403.
+    allowed_origins: Vec<String>,
 }
 
 impl RuntimeProxyBuilder {
@@ -96,7 +106,35 @@ impl RuntimeProxyBuilder {
             timeout_ms: DEFAULT_TIMEOUT_MS,
             enable_metrics: true,
             validation_config: BackendValidationConfig::default(),
+            allowed_origins: Vec::new(),
         }
+    }
+
+    /// Configure the list of browser origins permitted to reach the HTTP /
+    /// WebSocket frontend.
+    ///
+    /// Each entry is matched verbatim against the request's `Origin` header
+    /// (e.g. `"https://app.example.com"`). When empty (the default), any
+    /// request carrying an `Origin` header is rejected with 403 — server-to-
+    /// server clients without `Origin` are unaffected. Non-`null` matches in
+    /// the allowlist also enable a `CorsLayer` that emits the corresponding
+    /// preflight responses; an empty list installs no CORS layer.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use turbomcp_proxy::runtime::RuntimeProxyBuilder;
+    /// let builder = RuntimeProxyBuilder::new()
+    ///     .with_allowed_origins(vec!["https://app.example.com".to_string()]);
+    /// ```
+    #[must_use]
+    pub fn with_allowed_origins<I, S>(mut self, origins: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.allowed_origins = origins.into_iter().map(Into::into).collect();
+        self
     }
 
     /// Configure a STDIO backend (subprocess)
@@ -163,6 +201,26 @@ impl RuntimeProxyBuilder {
     pub fn with_http_backend(mut self, url: impl Into<String>, auth_token: Option<String>) -> Self {
         self.backend_config = Some(BackendConfig::Http {
             url: url.into(),
+            endpoint_path: None,
+            auth_token,
+        });
+        self
+    }
+
+    /// Configure an HTTP backend with an explicit MCP endpoint path.
+    ///
+    /// Use this when the upstream MCP server mounts at a path other than
+    /// the default `/mcp` (e.g. `"/api/mcp"`).
+    #[must_use]
+    pub fn with_http_backend_path(
+        mut self,
+        url: impl Into<String>,
+        endpoint_path: impl Into<String>,
+        auth_token: Option<String>,
+    ) -> Self {
+        self.backend_config = Some(BackendConfig::Http {
+            url: url.into(),
+            endpoint_path: Some(endpoint_path.into()),
             auth_token,
         });
         self
@@ -433,9 +491,16 @@ impl RuntimeProxyBuilder {
                 args: args.clone(),
                 working_dir: working_dir.clone(),
             },
-            BackendConfig::Http { url, auth_token } => BackendTransport::Http {
+            BackendConfig::Http {
+                url,
+                endpoint_path,
+                auth_token,
+            } => BackendTransport::Http {
                 url: url.clone(),
-                auth_token: auth_token.clone(),
+                endpoint_path: endpoint_path.clone(),
+                // Wrap in SecretString as the value crosses into the internal
+                // backend layer; from here on it stays redacted in Debug output.
+                auth_token: auth_token.clone().map(secrecy::SecretString::from),
             },
             BackendConfig::Tcp { host, port } => BackendTransport::Tcp {
                 host: host.clone(),
@@ -470,6 +535,7 @@ impl RuntimeProxyBuilder {
             request_size_limit: self.request_size_limit,
             timeout_ms: self.timeout_ms,
             metrics,
+            origin_allowlist: OriginAllowlist::new(self.allowed_origins),
         })
     }
 
@@ -836,9 +902,19 @@ impl Default for RuntimeProxyBuilder {
     }
 }
 
-/// Check if host is localhost
+/// Check if a host string refers to a loopback address.
+///
+/// Accepts both bracketed (`"[::1]"`) and unbracketed (`"::1"`) IPv6 forms;
+/// callers obtained their host string from various sources (raw config,
+/// `Url::host_str()` which strips brackets, etc.) and asking each to
+/// normalize first was inviting drift. Internally we compare against the
+/// bracket-stripped form so `"[::1]"` and `"::1"` route identically.
 fn is_localhost(host: &str) -> bool {
-    matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]")
+    let normalized = host
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(host);
+    matches!(normalized, "localhost" | "127.0.0.1" | "::1")
 }
 
 /// Runtime proxy instance
@@ -863,6 +939,9 @@ pub struct RuntimeProxy {
 
     /// Metrics collector
     metrics: Option<Arc<AtomicMetrics>>,
+
+    /// Browser origins permitted to reach the HTTP/WebSocket frontend.
+    origin_allowlist: OriginAllowlist,
 }
 
 impl RuntimeProxy {
@@ -915,7 +994,7 @@ impl RuntimeProxy {
 
     /// Run HTTP frontend using Axum and `ProxyService`
     async fn run_http(&mut self, bind: &str) -> ProxyResult<()> {
-        use axum::{Router, http::StatusCode};
+        use axum::{Router, http::StatusCode, middleware};
         use std::time::Duration;
         use tower_http::limit::RequestBodyLimitLayer;
         use tower_http::timeout::TimeoutLayer;
@@ -938,15 +1017,24 @@ impl RuntimeProxy {
 
         // 3. Create Axum router with MCP routes and security layers
         // Note: Security layers applied in both STDIO and HTTP frontends:
+        //   - origin_guard / cors: Reject browser-origin requests not on allowlist
         //   - request_size_limit: Prevents memory exhaustion DoS
         //   - timeout_ms: Prevents hanging requests (STDIO uses tokio::time::timeout, HTTP uses Tower layer)
-        let app = Router::new()
+        let allowlist = self.origin_allowlist.clone();
+        let mut app = Router::new()
             .turbo_mcp_routes(service)
+            .layer(middleware::from_fn_with_state(
+                allowlist.clone(),
+                origin_guard,
+            ))
             .layer(RequestBodyLimitLayer::new(self.request_size_limit))
             .layer(TimeoutLayer::with_status_code(
                 StatusCode::REQUEST_TIMEOUT,
                 Duration::from_millis(self.timeout_ms),
             ));
+        if let Some(cors) = build_cors_layer(&allowlist) {
+            app = app.layer(cors);
+        }
 
         // 4. Parse bind address
         let listener = tokio::net::TcpListener::bind(bind).await.map_err(|e| {
@@ -965,7 +1053,7 @@ impl RuntimeProxy {
 
     /// Run WebSocket frontend using Axum and `ProxyService`
     async fn run_websocket(&mut self, bind: &str) -> ProxyResult<()> {
-        use axum::{Router, http::StatusCode};
+        use axum::{Router, http::StatusCode, middleware};
         use std::time::Duration;
         use tower_http::limit::RequestBodyLimitLayer;
         use tower_http::timeout::TimeoutLayer;
@@ -989,15 +1077,24 @@ impl RuntimeProxy {
         // 3. Create Axum router with MCP routes (WebSocket support included via AxumMcpExt)
         // Note: turbo_mcp_routes() provides both HTTP/SSE and WebSocket endpoints
         // Security layers applied:
+        //   - origin_guard / cors: Reject browser-origin requests not on allowlist
         //   - request_size_limit: Prevents memory exhaustion DoS
         //   - timeout_ms: Prevents hanging WebSocket connections
-        let app = Router::new()
+        let allowlist = self.origin_allowlist.clone();
+        let mut app = Router::new()
             .turbo_mcp_routes(service)
+            .layer(middleware::from_fn_with_state(
+                allowlist.clone(),
+                origin_guard,
+            ))
             .layer(RequestBodyLimitLayer::new(self.request_size_limit))
             .layer(TimeoutLayer::with_status_code(
                 StatusCode::REQUEST_TIMEOUT,
                 Duration::from_millis(self.timeout_ms),
             ));
+        if let Some(cors) = build_cors_layer(&allowlist) {
+            app = app.layer(cors);
+        }
 
         // 4. Parse bind address
         let listener = tokio::net::TcpListener::bind(bind).await.map_err(|e| {
@@ -1413,6 +1510,7 @@ mod tests {
     async fn test_validate_url_https_required() {
         let config = BackendConfig::Http {
             url: "http://api.example.com".to_string(),
+            endpoint_path: None,
             auth_token: None,
         };
         let validation_config = BackendValidationConfig::default();
@@ -1425,6 +1523,7 @@ mod tests {
     async fn test_validate_url_localhost_http_allowed() {
         let config = BackendConfig::Http {
             url: "http://localhost:3000".to_string(),
+            endpoint_path: None,
             auth_token: None,
         };
         let validation_config = BackendValidationConfig::default();
@@ -1440,6 +1539,7 @@ mod tests {
     async fn test_validate_url_https_allowed() {
         let config = BackendConfig::Http {
             url: "https://8.8.8.8".to_string(),
+            endpoint_path: None,
             auth_token: None,
         };
         let validation_config = BackendValidationConfig::default();

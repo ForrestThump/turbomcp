@@ -3,6 +3,9 @@
 //! Tests for the AxumMcpExt trait and router building functionality,
 //! including state preservation and merging capabilities.
 
+// See `axum/mod.rs` — internal subtree references silenced.
+#![allow(deprecated)]
+
 #[cfg(test)]
 mod tests {
     use super::super::common::TestMcpService;

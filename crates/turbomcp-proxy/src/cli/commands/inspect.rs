@@ -180,6 +180,7 @@ mod tests {
     fn test_backend_validation() {
         let cmd = InspectCommand {
             backend: BackendArgs {
+                endpoint_path: None,
                 backend: Some(crate::cli::args::BackendType::Stdio),
                 cmd: None,
                 args: vec![],
@@ -210,6 +211,7 @@ mod tests {
     async fn test_stdio_backend_creation() {
         let cmd = InspectCommand {
             backend: BackendArgs {
+                endpoint_path: None,
                 backend: Some(crate::cli::args::BackendType::Stdio),
                 cmd: Some("/bin/cat".to_string()),
                 args: vec![],

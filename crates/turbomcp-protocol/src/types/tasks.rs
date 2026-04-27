@@ -642,6 +642,17 @@ pub struct TaskStatusNotification {
     #[serde(rename = "createdAt")]
     pub created_at: String,
 
+    /// Last update timestamp (ISO 8601). Spec field per
+    /// `TaskStatusNotificationParams = NotificationParams & Task`
+    /// (schema.ts:1490) — populated by spec-compliant peers; previously
+    /// silently dropped on deserialize.
+    #[serde(
+        rename = "lastUpdatedAt",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub last_updated_at: Option<String>,
+
     /// Time-to-live in milliseconds
     pub ttl: Option<u64>,
 
@@ -859,6 +870,7 @@ mod tests {
             status: TaskStatus::Completed,
             status_message: Some("Task finished successfully".to_string()),
             created_at: "2025-11-25T10:30:00Z".to_string(),
+            last_updated_at: None,
             ttl: Some(60000),
             poll_interval: None,
             _meta: None,

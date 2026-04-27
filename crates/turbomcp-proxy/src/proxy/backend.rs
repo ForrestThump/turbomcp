@@ -3,6 +3,7 @@
 //! Manages connection to the backend MCP server using turbomcp-client.
 //! Supports multiple backend transport types (STDIO, HTTP, WebSocket).
 
+use secrecy::{ExposeSecret, SecretString};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::future::Future;
@@ -25,8 +26,9 @@ use turbomcp_transport::{
 
 use crate::error::{ProxyError, ProxyResult};
 use crate::introspection::{
-    PromptSpec, PromptsCapability, ResourceSpec, ResourcesCapability, ServerCapabilities,
-    ServerInfo, ServerSpec, ToolInputSchema, ToolSpec, ToolsCapability,
+    EmptyCapability, LoggingCapability, PromptSpec, PromptsCapability, ResourceSpec,
+    ResourcesCapability, ServerCapabilities, ServerInfo, ServerSpec, ToolInputSchema, ToolSpec,
+    ToolsCapability,
 };
 
 /// Type alias for async result futures used in `ProxyClient` trait (v3.0: `McpError` not boxed)
@@ -133,8 +135,13 @@ pub enum BackendTransport {
     Http {
         /// Base URL
         url: String,
-        /// Optional authentication token
-        auth_token: Option<String>,
+        /// Optional path on the upstream MCP server where requests are `POST`ed.
+        /// Defaults to `/mcp` when `None`. Servers that mount MCP at a custom
+        /// location (e.g. `/api/mcp`) must set this to be reachable.
+        endpoint_path: Option<String>,
+        /// Optional authentication token, wrapped in [`SecretString`] so it is
+        /// redacted from `Debug` output and zeroed on drop.
+        auth_token: Option<SecretString>,
     },
     /// TCP bidirectional communication
     Tcp {
@@ -154,6 +161,19 @@ pub enum BackendTransport {
         /// WebSocket URL
         url: String,
     },
+}
+
+/// Logging-safe discriminant for [`BackendTransport`]. Avoids leaking the
+/// inner fields (notably `Http.auth_token`) into structured log output.
+fn backend_transport_kind(t: &BackendTransport) -> &'static str {
+    match t {
+        BackendTransport::Stdio { .. } => "stdio",
+        BackendTransport::Http { .. } => "http",
+        BackendTransport::Tcp { .. } => "tcp",
+        #[cfg(unix)]
+        BackendTransport::Unix { .. } => "unix",
+        BackendTransport::WebSocket { .. } => "websocket",
+    }
 }
 
 /// Backend configuration
@@ -184,6 +204,14 @@ pub struct BackendConnector {
 
     /// Cached server spec (from introspection)
     spec: Arc<tokio::sync::Mutex<Option<ServerSpec>>>,
+
+    /// Real `InitializeResult` captured during connect.
+    ///
+    /// Stored so `introspect_via_client` can return the upstream's actual
+    /// server info and capabilities instead of synthesizing a hardcoded
+    /// surface (audit CRIT — proxy was lying to clients about what the
+    /// upstream supports).
+    init_result: Arc<turbomcp_client::InitializeResult>,
 }
 
 impl std::fmt::Debug for BackendConnector {
@@ -215,10 +243,19 @@ impl BackendConnector {
     /// Panics if "127.0.0.1:0" cannot be parsed as a `SocketAddr` (should never happen as it's a valid address).
     #[allow(clippy::too_many_lines)]
     pub async fn new(config: BackendConfig) -> ProxyResult<Self> {
-        info!("Creating backend connector: {:?}", config.transport);
+        // Don't log `config.transport` directly: `BackendTransport::Http`
+        // wraps an `Option<SecretString>` whose Debug redacts the bearer, but
+        // historic versions of this struct logged the bearer at INFO level.
+        // Log only the discriminant so credential leaks remain impossible
+        // even if the type drifts back to a printable inner type.
+        info!(
+            transport_kind = backend_transport_kind(&config.transport),
+            "Creating backend connector"
+        );
 
-        // Create client based on transport type
-        let client: Arc<dyn ProxyClient> = match &config.transport {
+        // Create client based on transport type. Each arm yields both the
+        // type-erased proxy client and the upstream's real `InitializeResult`.
+        let (client, init_result): (Arc<dyn ProxyClient>, _) = match &config.transport {
             BackendTransport::Stdio {
                 command,
                 args,
@@ -243,21 +280,30 @@ impl BackendConnector {
 
                 // Create and initialize client
                 let client = Client::new(transport);
-                let _init_result = client.initialize().await.map_err(|e| {
+                let init_result = client.initialize().await.map_err(|e| {
                     ProxyError::backend(format!("Failed to initialize backend: {e}"))
                 })?;
 
-                Arc::new(ConcreteProxyClient {
+                let proxy_client: Arc<dyn ProxyClient> = Arc::new(ConcreteProxyClient {
                     client: Arc::new(client),
-                })
+                });
+                (proxy_client, init_result)
             }
 
-            BackendTransport::Http { url, auth_token } => {
+            BackendTransport::Http {
+                url,
+                endpoint_path,
+                auth_token,
+            } => {
+                // Expose the secret only at this single egress point — the
+                // value flows directly into the HTTP transport's bearer header.
+                // Anywhere else (Debug, logs, deserialized config) it stays
+                // wrapped in SecretString.
                 let http_config = StreamableHttpClientConfig {
                     base_url: url.clone(),
-                    endpoint_path: "/mcp".to_string(),
+                    endpoint_path: endpoint_path.clone().unwrap_or_else(|| "/mcp".to_string()),
                     timeout: std::time::Duration::from_secs(30),
-                    auth_token: auth_token.clone(),
+                    auth_token: auth_token.as_ref().map(|s| s.expose_secret().to_string()),
                     ..Default::default()
                 };
 
@@ -274,13 +320,14 @@ impl BackendConnector {
 
                 // Create and initialize client
                 let client = Client::new(transport);
-                let _init_result = client.initialize().await.map_err(|e| {
+                let init_result = client.initialize().await.map_err(|e| {
                     ProxyError::backend(format!("Failed to initialize backend: {e}"))
                 })?;
 
-                Arc::new(ConcreteProxyClient {
+                let proxy_client: Arc<dyn ProxyClient> = Arc::new(ConcreteProxyClient {
                     client: Arc::new(client),
-                })
+                });
+                (proxy_client, init_result)
             }
 
             BackendTransport::Tcp { host, port } => {
@@ -288,12 +335,8 @@ impl BackendConnector {
                     .parse::<SocketAddr>()
                     .map_err(|e| ProxyError::backend(format!("Invalid TCP address: {e}")))?;
 
-                let transport = TcpTransport::new_client(
-                    "127.0.0.1:0"
-                        .parse()
-                        .unwrap_or_else(|_| "127.0.0.1:0".parse().unwrap()),
-                    addr,
-                );
+                let transport =
+                    TcpTransport::new_client(SocketAddr::from(([127, 0, 0, 1], 0)), addr);
 
                 // Connect the transport
                 transport.connect().await.map_err(|e| {
@@ -304,13 +347,14 @@ impl BackendConnector {
 
                 // Create and initialize client
                 let client = Client::new(transport);
-                let _init_result = client.initialize().await.map_err(|e| {
+                let init_result = client.initialize().await.map_err(|e| {
                     ProxyError::backend(format!("Failed to initialize backend: {e}"))
                 })?;
 
-                Arc::new(ConcreteProxyClient {
+                let proxy_client: Arc<dyn ProxyClient> = Arc::new(ConcreteProxyClient {
                     client: Arc::new(client),
-                })
+                });
+                (proxy_client, init_result)
             }
 
             #[cfg(unix)]
@@ -328,13 +372,14 @@ impl BackendConnector {
 
                 // Create and initialize client
                 let client = Client::new(transport);
-                let _init_result = client.initialize().await.map_err(|e| {
+                let init_result = client.initialize().await.map_err(|e| {
                     ProxyError::backend(format!("Failed to initialize backend: {e}"))
                 })?;
 
-                Arc::new(ConcreteProxyClient {
+                let proxy_client: Arc<dyn ProxyClient> = Arc::new(ConcreteProxyClient {
                     client: Arc::new(client),
-                })
+                });
+                (proxy_client, init_result)
             }
 
             BackendTransport::WebSocket { url } => {
@@ -353,13 +398,14 @@ impl BackendConnector {
 
                 // Create and initialize client
                 let client = Client::new(transport);
-                let _init_result = client.initialize().await.map_err(|e| {
+                let init_result = client.initialize().await.map_err(|e| {
                     ProxyError::backend(format!("Failed to initialize backend: {e}"))
                 })?;
 
-                Arc::new(ConcreteProxyClient {
+                let proxy_client: Arc<dyn ProxyClient> = Arc::new(ConcreteProxyClient {
                     client: Arc::new(client),
-                })
+                });
+                (proxy_client, init_result)
             }
         };
 
@@ -369,6 +415,7 @@ impl BackendConnector {
             client,
             config: Arc::new(config),
             spec: Arc::new(tokio::sync::Mutex::new(None)),
+            init_result: Arc::new(init_result),
         })
     }
 
@@ -399,7 +446,14 @@ impl BackendConnector {
         Ok(spec)
     }
 
-    /// Introspect via client methods
+    /// Introspect via client methods.
+    ///
+    /// Uses the real `InitializeResult` captured during connect so the proxy
+    /// advertises the upstream's actual capabilities and server info — not a
+    /// hardcoded guess (audit CRIT). Tool/resource/prompt list calls remain so
+    /// the spec exposes a static enumeration; for liveness against
+    /// `notifications/{tools,resources,prompts}/list_changed`, see the proxy
+    /// audit's MED on cache invalidation.
     async fn introspect_via_client(&self) -> ProxyResult<ServerSpec> {
         // List tools
         let tools = self
@@ -422,11 +476,20 @@ impl BackendConnector {
             .await
             .map_err(|e| ProxyError::backend(format!("Failed to list prompts: {e}")))?;
 
-        // Build ServerSpec
+        // Use the real InitializeResult captured at connect time.
+        let server_info = ServerInfo {
+            name: self.init_result.server_info.name.clone(),
+            version: self.init_result.server_info.version.clone(),
+            title: self.init_result.server_info.title.clone(),
+        };
+
         Ok(ServerSpec {
-            server_info: Self::create_server_info(),
+            server_info,
+            // The client crate's `InitializeResult` doesn't keep `protocol_version`;
+            // echo our compile-time constant. Spec-strict negotiation happens during
+            // the upstream `Client::initialize` itself.
             protocol_version: PROTOCOL_VERSION.to_string(),
-            capabilities: Self::create_capabilities(),
+            capabilities: Self::convert_capabilities(&self.init_result.server_capabilities),
             tools: Self::convert_tools(tools),
             resources: Self::convert_resources(resources),
             prompts: Self::convert_prompts(prompts),
@@ -435,25 +498,26 @@ impl BackendConnector {
         })
     }
 
-    fn create_server_info() -> ServerInfo {
-        ServerInfo {
-            name: "backend-server".to_string(),
-            version: "unknown".to_string(),
-            title: None,
-        }
-    }
-
-    fn create_capabilities() -> ServerCapabilities {
+    /// Convert `turbomcp_protocol::types::ServerCapabilities` (from upstream
+    /// `InitializeResult`) into the proxy's `spec::ServerCapabilities` shape.
+    /// Mirrors the policy in `introspection::introspector::extract_capabilities`.
+    fn convert_capabilities(
+        caps: &turbomcp_protocol::types::ServerCapabilities,
+    ) -> ServerCapabilities {
         ServerCapabilities {
-            tools: Some(ToolsCapability { list_changed: None }),
-            resources: Some(ResourcesCapability {
-                subscribe: None,
-                list_changed: None,
+            logging: caps.logging.as_ref().map(|_| LoggingCapability {}),
+            completions: caps.completions.as_ref().map(|_| EmptyCapability {}),
+            prompts: caps.prompts.as_ref().map(|p| PromptsCapability {
+                list_changed: p.list_changed,
             }),
-            prompts: Some(PromptsCapability { list_changed: None }),
-            logging: None,
-            completions: None,
-            experimental: None,
+            resources: caps.resources.as_ref().map(|r| ResourcesCapability {
+                subscribe: r.subscribe,
+                list_changed: r.list_changed,
+            }),
+            tools: caps.tools.as_ref().map(|t| ToolsCapability {
+                list_changed: t.list_changed,
+            }),
+            experimental: caps.experimental.clone(),
         }
     }
 
@@ -554,10 +618,9 @@ impl BackendConnector {
     ) -> ProxyResult<Value> {
         debug!("Calling backend tool: {}", name);
 
-        self.client
-            .call_tool(name, arguments)
-            .await
-            .map_err(|e| ProxyError::backend(format!("Tool call failed: {e}")))
+        self.client.call_tool(name, arguments).await.map_err(|e| {
+            ProxyError::backend_with_code(format!("Tool call failed: {e}"), e.jsonrpc_error_code())
+        })
     }
 
     /// List tools from the backend
@@ -566,10 +629,12 @@ impl BackendConnector {
     ///
     /// Returns `ProxyError` if listing tools fails.
     pub async fn list_tools(&self) -> ProxyResult<Vec<Tool>> {
-        self.client
-            .list_tools()
-            .await
-            .map_err(|e| ProxyError::backend(format!("Failed to list tools: {e}")))
+        self.client.list_tools().await.map_err(|e| {
+            ProxyError::backend_with_code(
+                format!("Failed to list tools: {e}"),
+                e.jsonrpc_error_code(),
+            )
+        })
     }
 
     /// List resources from the backend
@@ -578,10 +643,12 @@ impl BackendConnector {
     ///
     /// Returns `ProxyError` if listing resources fails.
     pub async fn list_resources(&self) -> ProxyResult<Vec<Resource>> {
-        self.client
-            .list_resources()
-            .await
-            .map_err(|e| ProxyError::backend(format!("Failed to list resources: {e}")))
+        self.client.list_resources().await.map_err(|e| {
+            ProxyError::backend_with_code(
+                format!("Failed to list resources: {e}"),
+                e.jsonrpc_error_code(),
+            )
+        })
     }
 
     /// Read a resource from the backend
@@ -590,10 +657,12 @@ impl BackendConnector {
     ///
     /// Returns `ProxyError` if reading the resource fails or the resource is not found.
     pub async fn read_resource(&self, uri: &str) -> ProxyResult<ReadResourceResult> {
-        self.client
-            .read_resource(uri)
-            .await
-            .map_err(|e| ProxyError::backend(format!("Failed to read resource: {e}")))
+        self.client.read_resource(uri).await.map_err(|e| {
+            ProxyError::backend_with_code(
+                format!("Failed to read resource: {e}"),
+                e.jsonrpc_error_code(),
+            )
+        })
     }
 
     /// List prompts from the backend
@@ -602,10 +671,12 @@ impl BackendConnector {
     ///
     /// Returns `ProxyError` if listing prompts fails.
     pub async fn list_prompts(&self) -> ProxyResult<Vec<Prompt>> {
-        self.client
-            .list_prompts()
-            .await
-            .map_err(|e| ProxyError::backend(format!("Failed to list prompts: {e}")))
+        self.client.list_prompts().await.map_err(|e| {
+            ProxyError::backend_with_code(
+                format!("Failed to list prompts: {e}"),
+                e.jsonrpc_error_code(),
+            )
+        })
     }
 
     /// Get a prompt from the backend
@@ -618,10 +689,12 @@ impl BackendConnector {
         name: &str,
         arguments: Option<HashMap<String, Value>>,
     ) -> ProxyResult<turbomcp_protocol::types::GetPromptResult> {
-        self.client
-            .get_prompt(name, arguments)
-            .await
-            .map_err(|e| ProxyError::backend(format!("Failed to get prompt: {e}")))
+        self.client.get_prompt(name, arguments).await.map_err(|e| {
+            ProxyError::backend_with_code(
+                format!("Failed to get prompt: {e}"),
+                e.jsonrpc_error_code(),
+            )
+        })
     }
 }
 

@@ -45,7 +45,7 @@ pub enum TransportError {
         "Connection timed out after {timeout:?} for operation: {operation}. \
          If this is expected, increase the timeout with \
          `TimeoutConfig {{ connect: Duration::from_secs({}) }}`",
-        timeout.as_secs() * 2
+        timeout.as_secs().max(1) * 2
     )]
     ConnectionTimeout {
         /// The operation that timed out
@@ -60,7 +60,7 @@ pub enum TransportError {
          If this is expected, increase the timeout with \
          `TimeoutConfig {{ request: Some(Duration::from_secs({})) }}` \
          or use `TimeoutConfig::patient()` for slow operations",
-        timeout.as_secs() * 2
+        timeout.as_secs().max(1) * 2
     )]
     RequestTimeout {
         /// The operation that timed out
@@ -74,7 +74,7 @@ pub enum TransportError {
         "Total operation timed out after {timeout:?} for operation: {operation}. \
          This includes retries. If this is expected, increase the timeout with \
          `TimeoutConfig {{ total: Some(Duration::from_secs({})) }}`",
-        timeout.as_secs() * 2
+        timeout.as_secs().max(1) * 2
     )]
     TotalTimeout {
         /// The operation that timed out
@@ -88,7 +88,7 @@ pub enum TransportError {
         "Read timed out after {timeout:?} while streaming response for operation: {operation}. \
          If this is expected, increase the timeout with \
          `TimeoutConfig {{ read: Some(Duration::from_secs({})) }}`",
-        timeout.as_secs() * 2
+        timeout.as_secs().max(1) * 2
     )]
     ReadTimeout {
         /// The operation that timed out

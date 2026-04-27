@@ -52,8 +52,18 @@ impl TransportMessage {
     }
 
     /// Returns `true` if the message is compressed.
-    pub const fn is_compressed(&self) -> bool {
-        self.metadata.encoding.is_some()
+    ///
+    /// Compares against a known set of compression encodings (`gzip`, `br`, `deflate`,
+    /// `zstd`, `lz4`). The HTTP-style `identity` encoding (i.e. uncompressed) and any
+    /// other unknown value return `false`.
+    pub fn is_compressed(&self) -> bool {
+        match self.metadata.encoding.as_deref() {
+            Some(enc) => matches!(
+                enc.to_ascii_lowercase().as_str(),
+                "gzip" | "br" | "brotli" | "deflate" | "zstd" | "lz4"
+            ),
+            None => false,
+        }
     }
 
     /// Returns the content type of the message, if specified.
@@ -131,9 +141,12 @@ impl TransportMessageMetadata {
     }
 
     /// Sets the time-to-live for the message.
+    ///
+    /// Saturates at `u64::MAX` for `Duration` values that exceed `u64` milliseconds
+    /// (~584 million years) instead of silently truncating.
     #[must_use]
-    pub const fn with_ttl(mut self, ttl: Duration) -> Self {
-        self.ttl = Some(ttl.as_millis() as u64);
+    pub fn with_ttl(mut self, ttl: Duration) -> Self {
+        self.ttl = Some(u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX));
         self
     }
 

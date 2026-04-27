@@ -669,19 +669,53 @@ impl ResourceTemplate {
 /// full RFC 6570 expansion — it catches typos and missing closing braces.
 pub fn validate_uri_template(s: &str) -> Result<(), &'static str> {
     let mut depth = 0i32;
-    for ch in s.chars() {
+    let mut current_expr_start: Option<usize> = None;
+    let bytes = s.as_bytes();
+    for (i, ch) in s.char_indices() {
         match ch {
             '{' => {
                 depth += 1;
                 if depth > 1 {
                     return Err("URI template: nested '{' not allowed in RFC 6570");
                 }
+                current_expr_start = Some(i + 1);
             }
             '}' => {
                 depth -= 1;
                 if depth < 0 {
                     return Err("URI template: unbalanced '}' (no matching '{')");
                 }
+                if let Some(start) = current_expr_start {
+                    let body = &bytes[start..i];
+                    if body.is_empty() {
+                        return Err("URI template: empty expression `{}`");
+                    }
+                    // Skip leading RFC 6570 operator if present (one of +#./;?&)
+                    let body_start =
+                        if matches!(body[0], b'+' | b'#' | b'.' | b'/' | b';' | b'?' | b'&') {
+                            1
+                        } else {
+                            0
+                        };
+                    let var_bytes = &body[body_start..];
+                    if var_bytes.is_empty() {
+                        return Err("URI template: operator without variable name");
+                    }
+                    let first = var_bytes[0];
+                    if !(first.is_ascii_alphabetic() || first == b'_') {
+                        return Err(
+                            "URI template: variable name must start with a letter or underscore",
+                        );
+                    }
+                    for &b in var_bytes {
+                        if !(b.is_ascii_alphanumeric() || b == b'_' || b == b'.' || b == b',') {
+                            return Err(
+                                "URI template: invalid character in variable name (allowed: ALPHA / DIGIT / '_' / '.' / ',')",
+                            );
+                        }
+                    }
+                }
+                current_expr_start = None;
             }
             _ => {}
         }

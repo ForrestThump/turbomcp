@@ -48,7 +48,6 @@ use worker::{Headers, Request, Response};
 use super::context::RequestContext;
 use super::server::{McpServer, PromptHandlerKind, ResourceHandlerKind, ToolHandlerKind};
 use super::types::{JsonRpcRequest, JsonRpcResponse, error_codes};
-use turbomcp_core::PROTOCOL_VERSION;
 use turbomcp_protocol::types::{ClientCapabilities, InitializeResult};
 use turbomcp_types::Implementation;
 
@@ -227,14 +226,19 @@ impl<'a> McpHandler<'a> {
         self.json_response(&response, origin_ref)
     }
 
-    /// Check if the Content-Type header indicates JSON
+    /// Check if the `Content-Type` header indicates JSON.
+    ///
+    /// Returns `false` when the header is **missing** on a POST: the
+    /// crate-level rustdoc claims POST requests are JSON-only and silently
+    /// accepting requests without a `Content-Type` would let browsers send
+    /// `text/plain` (the default for `fetch()` without an explicit type) and
+    /// have it slip through. GET preflight / capability paths don't reach
+    /// this code path.
     fn is_valid_content_type(&self, req: &Request) -> bool {
-        req.headers()
-            .get("Content-Type")
-            .ok()
-            .flatten()
-            .map(|ct| ct.contains("application/json") || ct.contains("text/json"))
-            .unwrap_or(true) // Allow missing Content-Type for compatibility
+        match req.headers().get("Content-Type").ok().flatten() {
+            Some(ct) => ct.contains("application/json") || ct.contains("text/json"),
+            None => false,
+        }
     }
 
     /// Route a JSON-RPC request to the appropriate handler with context
@@ -276,18 +280,34 @@ impl<'a> McpHandler<'a> {
 
     /// Handle initialize request
     fn handle_initialize(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
-        // Parse initialize params (optional validation)
-        let _params: Option<InitializeParams> = req
+        // Parse initialize params and negotiate protocol version against
+        // the supported set (`ProtocolVersion::STABLE`). On mismatch, return
+        // a JSON-RPC `-32602` error listing the versions we accept rather
+        // than silently accepting and echoing back our latest.
+        let params: Option<InitializeParams> = req
             .params
             .as_ref()
             .and_then(|p| serde_json::from_value(p.clone()).ok());
 
+        let negotiated = match super::version_negotiation::negotiate_str(
+            params.as_ref().map(|p| p.protocol_version.as_str()),
+        ) {
+            Ok(v) => v,
+            Err(supported) => {
+                return JsonRpcResponse::error(
+                    req.id.clone(),
+                    error_codes::INVALID_PARAMS,
+                    format!("Unsupported protocolVersion. Supported versions: {supported}"),
+                );
+            }
+        };
+
         let result = InitializeResult {
-            protocol_version: PROTOCOL_VERSION.into(),
+            protocol_version: negotiated,
             capabilities: self.server.capabilities.clone(),
             server_info: self.server.server_info.clone(),
             instructions: self.server.instructions.clone(),
-            _meta: None,
+            meta: None,
         };
 
         match serde_json::to_value(&result) {
@@ -675,7 +695,7 @@ impl<'a> McpHandler<'a> {
         let _ = headers.set("Access-Control-Allow-Methods", "POST, OPTIONS");
         let _ = headers.set(
             "Access-Control-Allow-Headers",
-            "Content-Type, Authorization, X-Request-ID",
+            "Content-Type, Authorization, X-Request-ID, Mcp-Session-Id, Last-Event-ID",
         );
         let _ = headers.set("Access-Control-Max-Age", "86400");
         headers

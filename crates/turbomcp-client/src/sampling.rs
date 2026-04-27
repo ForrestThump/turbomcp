@@ -69,7 +69,7 @@ pub trait LLMServerClient: Send + Sync + std::fmt::Debug {
     ) -> BoxSamplingFuture<'_, CreateMessageResult>;
 
     /// Get server capabilities/model info
-    fn get_server_info(&self) -> BoxSamplingFuture<'_, ServerInfo>;
+    fn get_server_info(&self) -> BoxSamplingFuture<'_, LlmServerInfo>;
 }
 
 /// Interface for user interaction (human-in-the-loop)
@@ -85,13 +85,23 @@ pub trait UserInteractionHandler: Send + Sync + std::fmt::Debug {
     ) -> BoxSamplingFuture<'_, Option<CreateMessageResult>>;
 }
 
-/// Server information for model selection
+/// LLM-server descriptor used by sampling handlers for model selection.
+///
+/// Renamed from the previous `ServerInfo` to avoid prelude-level shadowing
+/// against the MCP `Implementation` / `InitializeResult.server_info` shape.
+/// `ServerInfo` is kept as a deprecated type alias for one release.
 #[derive(Debug, Clone)]
-pub struct ServerInfo {
+pub struct LlmServerInfo {
     pub name: String,
     pub models: Vec<String>,
     pub capabilities: Vec<String>,
 }
+
+#[deprecated(
+    since = "3.1.2",
+    note = "Renamed to LlmServerInfo to disambiguate from MCP InitializeResult.server_info"
+)]
+pub type ServerInfo = LlmServerInfo;
 
 impl SamplingHandler for DelegatingSamplingHandler {
     fn handle_create_message(
@@ -157,9 +167,35 @@ impl DelegatingSamplingHandler {
     }
 }
 
-/// Default user handler that automatically approves (for development)
+/// **Development-only** user handler that auto-approves every sampling
+/// request and every response without prompting.
+///
+/// MCP specifies that sampling MUST have human-in-the-loop approval
+/// (`schema.ts:2316-2333` security note). This implementation defeats
+/// that — use it for tests, demos, and local CLI tools, never in a
+/// deployed agent that processes untrusted prompts. Logs a warning at
+/// construction time so the choice shows up in operator-visible output.
 #[derive(Debug)]
 pub struct AutoApprovingUserHandler;
+
+impl AutoApprovingUserHandler {
+    /// Construct an auto-approving handler. Emits a `tracing::warn!`
+    /// to make the unsafe-by-default behavior auditable in deployed logs.
+    #[must_use]
+    pub fn new() -> Self {
+        tracing::warn!(
+            "AutoApprovingUserHandler constructed; sampling requests will be \
+             approved without human review. Do not use in production agents."
+        );
+        Self
+    }
+}
+
+impl Default for AutoApprovingUserHandler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl UserInteractionHandler for AutoApprovingUserHandler {
     fn approve_request(&self, _request: &CreateMessageRequest) -> BoxSamplingFuture<'_, bool> {

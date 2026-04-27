@@ -481,12 +481,12 @@ impl core::fmt::Display for ToolChoiceMode {
 /// Result of a sampling request.
 ///
 /// Per spec, extends both `Result` and `SamplingMessage`, so it has
-/// `role`, `content` (as SamplingContentBlock), `model`, and `stopReason`.
+/// `role`, `content` (as `SamplingContentBlock`), `model`, and `stopReason`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CreateMessageResult {
     /// The role of the generated message.
     pub role: Role,
-    /// The sampled content (single block or array per SamplingMessage).
+    /// The sampled content (single block or array per `SamplingMessage`).
     pub content: SamplingContentBlock,
     /// The name of the model that generated the message.
     pub model: String,

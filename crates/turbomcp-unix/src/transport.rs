@@ -531,8 +531,20 @@ impl Transport for UnixTransport {
                 .bytes_sent
                 .fetch_add(message.size() as u64, Ordering::Relaxed);
 
-            // Use unified channel-based approach for both server and client (same as TCP transport)
-            let json_str = String::from_utf8_lossy(&message.payload).to_string();
+            // Use unified channel-based approach for both server and client (same as TCP
+            // transport). **Server mode broadcasts to every connected peer**: the public
+            // `Transport::send` API has no per-client routing, so a server reply fans out
+            // to all clients connected to the same socket. Multi-tenant deployments should
+            // not use the Unix transport's server mode until per-connection send is added.
+            // JSON-RPC requires valid UTF-8; reject non-UTF-8 payloads
+            // explicitly rather than mangling them into U+FFFD.
+            let json_str = std::str::from_utf8(&message.payload)
+                .map_err(|e| {
+                    TransportError::SerializationFailed(format!(
+                        "Unix send rejected non-UTF-8 payload: {e}"
+                    ))
+                })?
+                .to_string();
             let connections = self.connections.lock();
             debug!(
                 "Unix transport send: {} connections registered",
@@ -545,6 +557,14 @@ impl Transport for UnixTransport {
                 return Err(TransportError::ConnectionFailed(
                     "No active Unix socket connections".into(),
                 ));
+            }
+            if connections.len() > 1 {
+                warn!(
+                    connection_count = connections.len(),
+                    "Unix transport: send() broadcasts to all {} connections; use only \
+                     in client mode or single-peer test fixtures (no per-client routing yet)",
+                    connections.len()
+                );
             }
 
             let mut failed_connections = Vec::new();

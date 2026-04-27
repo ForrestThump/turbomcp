@@ -8,14 +8,24 @@ use crate::error::{OpenApiError, Result};
 
 /// Parse an OpenAPI specification from a string.
 ///
-/// Automatically detects JSON or YAML format based on content.
+/// Tries JSON first when the content starts with `{`, but falls back to YAML
+/// on JSON failure — flow-style YAML documents (e.g. `{key: value}`) also
+/// start with `{` and would otherwise be misclassified as malformed JSON.
 pub fn parse_spec(content: &str) -> Result<OpenAPI> {
-    // Try JSON first (faster)
     if content.trim_start().starts_with('{') {
-        return serde_json::from_str(content).map_err(Into::into);
+        match serde_json::from_str::<OpenAPI>(content) {
+            Ok(spec) => return Ok(spec),
+            Err(json_err) => {
+                // Flow-style YAML (`{key: value}`) parses as bad JSON; try
+                // YAML before surfacing the JSON diagnostic.
+                if let Ok(spec) = serde_norway::from_str::<OpenAPI>(content) {
+                    return Ok(spec);
+                }
+                return Err(json_err.into());
+            }
+        }
     }
 
-    // Try YAML
     serde_norway::from_str(content).map_err(Into::into)
 }
 

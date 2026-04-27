@@ -111,9 +111,14 @@ impl ProtocolCodec {
         }
     }
 
-    /// Create a protocol codec with specified type
+    /// Create a protocol codec with specified type.
     ///
-    /// Falls back to JSON if the requested type is not available.
+    /// Falls back to JSON if the requested codec's feature is not enabled, and
+    /// emits a `tracing::warn!`. The returned codec's [`codec_type`](Self::codec_type)
+    /// and [`content_type`](Self::content_type) reflect the *actual* codec
+    /// (i.e. JSON after fallback), not the requested one — callers that need to
+    /// fail loudly when the requested codec is unavailable should use
+    /// [`Self::try_with_type`] instead.
     #[must_use]
     pub fn with_type(codec_type: CodecType) -> Self {
         let (inner, actual_type) = match codec_type {
@@ -144,6 +149,27 @@ impl ProtocolCodec {
             inner,
             codec_type: actual_type,
         }
+    }
+
+    /// Create a protocol codec with the specified type, failing if the requested
+    /// codec's feature is not enabled.
+    ///
+    /// Unlike [`Self::with_type`], this returns an error rather than silently
+    /// substituting JSON. Use this when the codec choice is load-bearing (e.g.
+    /// HTTP content-type negotiation, where falling back to JSON while still
+    /// claiming `application/msgpack` would be a wire-format mismatch).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`McpError::invalid_request`] if `codec_type` requires a feature
+    /// that is not currently enabled (see [`CodecType::is_available`]).
+    pub fn try_with_type(codec_type: CodecType) -> Result<Self> {
+        if !codec_type.is_available() {
+            return Err(McpError::invalid_request(format!(
+                "codec {codec_type:?} is not available; enable the corresponding feature flag"
+            )));
+        }
+        Ok(Self::with_type(codec_type))
     }
 
     /// Create a JSON codec with pretty printing
@@ -292,6 +318,18 @@ mod tests {
         decoder.feed(&bytes);
         let decoded: JsonRpcRequest = decoder.try_decode().unwrap().unwrap();
         assert_eq!(decoded.method, "ping");
+    }
+
+    #[test]
+    fn test_try_with_type_rejects_unavailable() {
+        // Json is always available
+        assert!(ProtocolCodec::try_with_type(CodecType::Json).is_ok());
+
+        #[cfg(not(feature = "wire-simd"))]
+        assert!(ProtocolCodec::try_with_type(CodecType::SimdJson).is_err());
+
+        #[cfg(not(feature = "wire-msgpack"))]
+        assert!(ProtocolCodec::try_with_type(CodecType::MessagePack).is_err());
     }
 
     #[cfg(feature = "wire-simd")]

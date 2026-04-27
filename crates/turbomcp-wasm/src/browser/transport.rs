@@ -54,7 +54,9 @@ impl FetchTransport {
         method: &str,
         params: Option<T>,
     ) -> Result<R, McpError> {
-        let url = format!("{}/{}", self.base_url, method);
+        // JSON-RPC is method-agnostic at the transport layer — the method
+        // belongs in the body, not the URL path.
+        let url = self.base_url.clone();
 
         // Create request body with unique ID
         let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);

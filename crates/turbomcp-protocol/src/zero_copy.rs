@@ -377,10 +377,13 @@ pub mod mmap {
     }
 
     impl MmapMessage {
-        /// Create a message from a memory-mapped file (legacy method without security)
+        /// Create a message from a memory-mapped file.
         ///
-        /// **SECURITY WARNING**: This method bypasses security validation.
-        /// Use `from_file_secure` for production systems.
+        /// **Security note:** this opens the path verbatim and does not validate
+        /// it. Callers handling untrusted paths must run them through
+        /// [`crate::security::validate_path`] (or
+        /// [`crate::security::validate_path_within`]) first. Memory-mapped
+        /// files do not catch SIGBUS on truncation — see `memmap2` docs.
         pub fn from_file(
             id: MessageId,
             path: &Path,
@@ -393,49 +396,6 @@ pub mod mmap {
             let file_size = metadata.len() as usize;
 
             // Validate offset
-            if offset >= file_size {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "Offset exceeds file size",
-                ));
-            }
-
-            // Calculate actual length
-            let actual_length = length.unwrap_or(file_size - offset);
-            let actual_length = actual_length.min(file_size - offset);
-
-            // Create memory map
-            // SAFETY: file handle is valid and opened for reading. memmap2 provides
-            // safe abstractions over POSIX mmap. The resulting mapping is read-only.
-            let mmap = unsafe { MmapOptions::new().map(&file)? };
-
-            Ok(Self {
-                id: Arc::new(id),
-                mmap: Arc::new(mmap),
-                offset,
-                length: actual_length,
-                metadata: MessageMetadata {
-                    created_at: Timestamp::now(),
-                    content_type: ContentType::Json,
-                    size: actual_length,
-                    correlation_id: None,
-                },
-            })
-        }
-
-        /// Internal method for creating memory-mapped files after security validation
-        #[allow(dead_code)] // Used with mmap feature
-        async fn from_file_internal(
-            id: MessageId,
-            path: &Path,
-            offset: usize,
-            length: Option<usize>,
-        ) -> io::Result<Self> {
-            let file = File::open(path)?;
-            let metadata = file.metadata()?;
-            let file_size = metadata.len() as usize;
-
-            // Validate offset (already validated by security layer, but double-check)
             if offset >= file_size {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,

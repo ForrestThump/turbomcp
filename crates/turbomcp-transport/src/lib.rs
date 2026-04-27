@@ -24,15 +24,18 @@
 //!
 //! ```text
 //! turbomcp-transport/
-//! ├── core/           # Core transport traits and error types
-//! ├── robustness/     # Circuit breakers, retry logic, health checks
-//! ├── stdio/          # Standard I/O transport implementation
-//! ├── http/           # HTTP/SSE transport implementation
-//! ├── websocket/      # WebSocket transport implementation
-//! ├── tcp/            # TCP socket transport implementation
-//! ├── unix/           # Unix domain socket implementation
-//! ├── compression/    # Message compression support
-//! └── metrics/        # Transport performance metrics
+//! ├── core            # Core transport traits and error types (re-exports from turbomcp-transport-traits)
+//! ├── resilience/     # Circuit breakers, retry logic, health checks
+//! ├── security/       # Origin validation, rate limiting, session security
+//! ├── stdio           # STDIO transport (re-exports from turbomcp-stdio)
+//! ├── streamable_http # HTTP transport configuration (server impl in turbomcp-server)
+//! ├── streamable_http_client # Streamable HTTP client (re-exports from turbomcp-http)
+//! ├── websocket_bidirectional # WebSocket transport (re-exports from turbomcp-websocket)
+//! ├── tcp             # TCP transport (re-exports from turbomcp-tcp)
+//! ├── unix            # Unix socket transport (re-exports from turbomcp-unix)
+//! ├── child_process   # Child-process stdio transport
+//! ├── compression     # Message compression support
+//! └── metrics         # Transport performance metrics
 //! ```
 //!
 //! ## Usage Examples
@@ -171,6 +174,18 @@ pub mod stdio {
 pub mod tower;
 
 /// Integration with the Axum web framework.
+///
+/// **Deprecated since 3.2.0**: this subtree predates the MCP 2025-11-25 Streamable
+/// HTTP rework and lacks `Mcp-Session-Id` lifecycle, `Last-Event-ID` resumption, and
+/// the unified `/mcp` method-multiplexed endpoint. New code should serve over
+/// `turbomcp_server::transport::http`, which is spec-compliant. The subtree will be
+/// removed in a future major release.
+///
+/// The deprecation attribute lives on each public re-export (`AxumMcpExt`,
+/// `McpAppState`, `McpServerConfig`, `McpService`) below — not on the module
+/// itself, because a module-level `#[deprecated]` cascades into every reference
+/// inside the subtree (including its own tests) and `#![allow(deprecated)]` does
+/// not propagate across file boundaries cleanly.
 #[cfg(feature = "http")]
 pub mod axum;
 
@@ -255,6 +270,9 @@ pub mod security;
 /// Utilities for shared transport instances.
 pub mod shared;
 
+#[cfg(test)]
+mod transport_metrics_metadata;
+
 // Re-export bidirectional transport functionality
 pub use bidirectional::{
     BidirectionalTransportWrapper, ConnectionState, CorrelationContext, MessageDirection,
@@ -281,8 +299,14 @@ pub use stdio::StdioTransport;
 // Re-export Tower integration
 pub use tower::{SessionInfo, SessionManager, TowerTransportAdapter};
 
-// Re-export Axum integration
+// Re-export Axum integration.
+//
+// Each item is `#[deprecated]` at its source definition (in the `axum` subtree),
+// so consumers using either `turbomcp_transport::AxumMcpExt` or
+// `turbomcp_transport::axum::AxumMcpExt` get the migration warning. The
+// `#[allow(deprecated)]` here is just to silence the re-export site itself.
 #[cfg(feature = "http")]
+#[allow(deprecated)]
 pub use axum::{AxumMcpExt, McpAppState, McpServerConfig, McpService};
 
 #[cfg(feature = "websocket")]

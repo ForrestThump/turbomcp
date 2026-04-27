@@ -159,9 +159,12 @@ impl<T: Transport + 'static> ProtocolClient<T> {
             params,
         };
 
-        // Step 1: Register oneshot channel BEFORE sending request
-        // This ensures the dispatcher can route the response when it arrives
-        let response_receiver = self.dispatcher.wait_for_response(request_id.clone());
+        // Step 1: Register oneshot channel BEFORE sending request via the
+        // RAII guard so a mid-flight future drop can't leak the waiter map
+        // entry (cancellation-safety).
+        let (response_receiver, waiter_guard) = self
+            .dispatcher
+            .wait_for_response_guarded(request_id.clone());
 
         // Step 2: Serialize and send request
         let payload = serde_json::to_vec(&request)
@@ -172,19 +175,28 @@ impl<T: Transport + 'static> ProtocolClient<T> {
             payload.into(),
         );
 
-        self.transport.send(message).await.map_err(|e| {
-            self.dispatcher.remove_response_waiter(&request_id);
-            Error::transport(format!("Transport send failed: {e}"))
-        })?;
+        // The guard cleans up the waiter if `send` errors out (drop fires
+        // when we leave this scope).
+        self.transport
+            .send(message)
+            .await
+            .map_err(|e| Error::transport(format!("Transport send failed: {e}")))?;
 
         // Step 3: Wait for response via oneshot channel with request timeout
         // The dispatcher's background task will send the response when it arrives
         let response = if let Some(request_timeout) = self.config.timeouts.request {
             match tokio::time::timeout(request_timeout, response_receiver).await {
                 Ok(Ok(response)) => response,
-                Ok(Err(_)) => return Err(Error::transport("Response channel closed".to_string())),
+                Ok(Err(_)) => {
+                    return Err(Error::transport("Response channel closed".to_string()));
+                }
                 Err(_) => {
-                    self.dispatcher.remove_response_waiter(&request_id);
+                    // Best-effort `notifications/cancelled` so a compliant
+                    // server can stop in-flight work. Failure to send is
+                    // logged and ignored — the local timeout still wins.
+                    let _ = self
+                        .send_cancellation(&request_id, Some("client request timeout"))
+                        .await;
                     let err = turbomcp_transport::TransportError::RequestTimeout {
                         operation: format!("{}()", method),
                         timeout: request_timeout,
@@ -198,6 +210,9 @@ impl<T: Transport + 'static> ProtocolClient<T> {
                 .map_err(|_| Error::transport("Response channel closed".to_string()))?
         };
 
+        // Response arrived — disarm the guard so it doesn't double-remove.
+        waiter_guard.disarm();
+
         // Handle JSON-RPC errors
         if let Some(error) = response.error() {
             return Err(Error::from_rpc_code(error.code, &error.message));
@@ -206,6 +221,37 @@ impl<T: Transport + 'static> ProtocolClient<T> {
         // Deserialize result
         serde_json::from_value(response.result().unwrap_or_default().clone())
             .map_err(|e| Error::internal(format!("Failed to deserialize response: {e}")))
+    }
+
+    /// Send a `notifications/cancelled` notification for the given request id.
+    ///
+    /// Per MCP 2025-11-25 §Cancellation, when a client abandons an in-flight
+    /// request (timeout, future drop, user cancellation) it SHOULD send this
+    /// notification so the server can stop work. The `initialize` request
+    /// MUST NOT be cancelled per spec — callers gate that themselves.
+    pub(super) async fn send_cancellation(
+        &self,
+        request_id: &turbomcp_protocol::MessageId,
+        reason: Option<&str>,
+    ) -> Result<()> {
+        let mut params = serde_json::Map::new();
+        params.insert(
+            "requestId".to_string(),
+            serde_json::to_value(request_id)
+                .map_err(|e| Error::internal(format!("Failed to serialize requestId: {e}")))?,
+        );
+        if let Some(reason) = reason {
+            params.insert(
+                "reason".to_string(),
+                serde_json::Value::String(reason.into()),
+            );
+        }
+        self.dispatcher.remove_response_waiter(request_id);
+        self.notify(
+            "notifications/cancelled",
+            Some(serde_json::Value::Object(params)),
+        )
+        .await
     }
 
     /// Send JSON-RPC notification (no response expected)

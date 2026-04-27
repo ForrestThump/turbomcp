@@ -141,8 +141,18 @@ impl ToolAttrs {
                 let value: syn::LitStr = meta.value()?.parse()?;
                 attrs.version = Some(value.value());
             } else {
-                // Unknown attribute - skip it
-                let _ = meta.value();
+                // Unknown key — surface a clear compile-time error instead of
+                // silently dropping it. A typo like `descriptio = "..."` would
+                // previously parse, leaving the resulting tool with the default
+                // description and no diagnostic.
+                let key = meta
+                    .path
+                    .get_ident()
+                    .map(|i| i.to_string())
+                    .unwrap_or_else(|| "<unknown>".to_string());
+                return Err(meta.error(format!(
+                    "unknown #[tool] attribute key `{key}`; expected one of `description`, `tags`, `version`",
+                )));
             }
             Ok(())
         });
@@ -169,59 +179,93 @@ impl ToolAttrs {
     }
 }
 
-/// Parse a `key = "value"` pattern from token stream.
-/// Fallback for complex attribute syntax when standard parsing fails.
+/// Parse a `key = "value"` pattern from a stringified token stream.
+///
+/// Fallback for complex attribute syntax when standard parsing fails. Walks
+/// the token stream looking for the bare ident `key`, an `=` punct, and a
+/// string literal — this avoids substring matches inside other identifiers
+/// or string values (e.g. a description containing the word `version` would
+/// previously poison the lookup).
 pub fn parse_quoted_value(token_str: &str, key: &str) -> Option<String> {
-    // Try to parse using syn's token stream first
-    if let Ok(tokens) = syn::parse_str::<proc_macro2::TokenStream>(token_str) {
-        for token in tokens {
-            if let proc_macro2::TokenTree::Ident(ident) = &token
-                && ident == key
-            {
-                // Found the key, look for = "value" pattern
-                continue;
-            }
+    let tokens = syn::parse_str::<proc_macro2::TokenStream>(token_str).ok()?;
+    let mut iter = tokens.into_iter().peekable();
+
+    while let Some(token) = iter.next() {
+        let proc_macro2::TokenTree::Ident(ident) = &token else {
+            continue;
+        };
+        if ident != key {
+            continue;
+        }
+        // Expect `=` punct next.
+        let Some(proc_macro2::TokenTree::Punct(p)) = iter.next() else {
+            continue;
+        };
+        if p.as_char() != '=' {
+            continue;
+        }
+        // Expect a string literal next.
+        let Some(proc_macro2::TokenTree::Literal(lit)) = iter.next() else {
+            continue;
+        };
+        // syn parses `Literal` -> `LitStr` to safely unquote and unescape.
+        if let Ok(s) = syn::parse_str::<syn::LitStr>(&lit.to_string()) {
+            return Some(s.value());
         }
     }
 
-    // Fallback to string manipulation if syn parsing doesn't help
-    let key_start = token_str.find(key)?;
-    let after_key = &token_str[key_start + key.len()..];
-    let eq_pos = after_key.find('=')?;
-    let after_eq = &after_key[eq_pos + 1..];
-    let quote_start = after_eq.find('"')?;
-    let after_quote = &after_eq[quote_start + 1..];
-    let quote_end = after_quote.find('"')?;
-    Some(after_quote[..quote_end].to_string())
+    None
 }
 
-/// Parse `tags = ["a", "b", "c"]` pattern from token stream.
-/// Fallback for complex attribute syntax when standard parsing fails.
+/// Parse `tags = ["a", "b", "c"]` pattern from a stringified token stream.
+///
+/// Fallback for complex attribute syntax when standard parsing fails. Walks
+/// tokens to find the `tags` ident, an `=` punct, and a bracketed group, then
+/// extracts the string literals inside. This avoids substring collisions —
+/// for example, a description containing the literal text `tags` or `[`
+/// would previously break the parser.
 pub fn parse_tags_array(token_str: &str) -> Vec<String> {
-    let Some(tags_start) = token_str.find("tags") else {
+    let Ok(tokens) = syn::parse_str::<proc_macro2::TokenStream>(token_str) else {
         return Vec::new();
     };
-    let after_tags = &token_str[tags_start + 4..]; // "tags".len() == 4
-    let Some(bracket_start) = after_tags.find('[') else {
-        return Vec::new();
-    };
-    let after_bracket = &after_tags[bracket_start + 1..];
-    let Some(bracket_end) = after_bracket.find(']') else {
-        return Vec::new();
-    };
+    let mut iter = tokens.into_iter();
 
-    let tags_content = &after_bracket[..bracket_end];
-    tags_content
-        .split(',')
-        .filter_map(|part| {
-            let part = part.trim();
-            if part.starts_with('"') && part.ends_with('"') && part.len() >= 2 {
-                Some(part[1..part.len() - 1].to_string())
-            } else {
-                None
-            }
-        })
-        .collect()
+    while let Some(token) = iter.next() {
+        let proc_macro2::TokenTree::Ident(ident) = &token else {
+            continue;
+        };
+        if ident != "tags" {
+            continue;
+        }
+        let Some(proc_macro2::TokenTree::Punct(p)) = iter.next() else {
+            continue;
+        };
+        if p.as_char() != '=' {
+            continue;
+        }
+        let Some(proc_macro2::TokenTree::Group(group)) = iter.next() else {
+            continue;
+        };
+        if group.delimiter() != proc_macro2::Delimiter::Bracket {
+            continue;
+        }
+
+        return group
+            .stream()
+            .into_iter()
+            .filter_map(|tt| {
+                if let proc_macro2::TokenTree::Literal(lit) = tt {
+                    syn::parse_str::<syn::LitStr>(&lit.to_string())
+                        .ok()
+                        .map(|s| s.value())
+                } else {
+                    None
+                }
+            })
+            .collect();
+    }
+
+    Vec::new()
 }
 
 impl ToolInfo {

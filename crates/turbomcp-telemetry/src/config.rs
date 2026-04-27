@@ -33,7 +33,7 @@ pub struct TelemetryConfig {
     /// Output logs to stderr (required for STDIO transport)
     pub stderr_output: bool,
 
-    /// OpenTelemetry OTLP endpoint (e.g., "http://localhost:4317")
+    /// OpenTelemetry OTLP endpoint (e.g., `<http://localhost:4317>`)
     #[cfg(feature = "opentelemetry")]
     pub otlp_endpoint: Option<String>,
     /// OTLP protocol (grpc or http)
@@ -52,6 +52,13 @@ pub struct TelemetryConfig {
     /// Prometheus metrics endpoint path
     #[cfg(feature = "prometheus")]
     pub prometheus_path: String,
+    /// Prometheus listener bind address (defaults to `127.0.0.1` — loopback only).
+    ///
+    /// Set explicitly to an externally-routable address (e.g. `0.0.0.0`) to expose
+    /// raw runtime metrics on every interface. The exporter has no auth — any
+    /// non-loopback bind is operator-visible and logged at `WARN` level.
+    #[cfg(feature = "prometheus")]
+    pub prometheus_bind_addr: Option<std::net::IpAddr>,
 
     /// Additional resource attributes
     pub resource_attributes: Vec<(String, String)>,
@@ -62,14 +69,19 @@ impl Default for TelemetryConfig {
         Self {
             service_name: "turbomcp-service".to_string(),
             service_version: env!("CARGO_PKG_VERSION").to_string(),
-            log_level: "info,turbomcp=debug".to_string(),
+            // Production-safe default: INFO across the workspace. The previous
+            // default (`info,turbomcp=debug`) silently turned on DEBUG logs in
+            // every deployment that called `TelemetryConfig::default().init()`,
+            // leaking internals and ballooning log volume. `RUST_LOG` still
+            // overrides this via `EnvFilter::try_from_default_env()`.
+            log_level: "info".to_string(),
             json_logs: true,
             stderr_output: true,
 
             #[cfg(feature = "opentelemetry")]
             otlp_endpoint: None,
             #[cfg(feature = "opentelemetry")]
-            otlp_protocol: OtlpProtocol::Grpc,
+            otlp_protocol: OtlpProtocol::Http,
             #[cfg(feature = "opentelemetry")]
             sampling_ratio: 1.0,
             #[cfg(feature = "opentelemetry")]
@@ -79,6 +91,8 @@ impl Default for TelemetryConfig {
             prometheus_port: None,
             #[cfg(feature = "prometheus")]
             prometheus_path: "/metrics".to_string(),
+            #[cfg(feature = "prometheus")]
+            prometheus_bind_addr: None,
 
             resource_attributes: Vec::new(),
         }
@@ -101,13 +115,19 @@ impl TelemetryConfig {
 }
 
 /// OTLP protocol variant
+///
+/// **Note on gRPC support:** the only protocol actually built into this crate is
+/// HTTP/protobuf (`opentelemetry-otlp` feature `http-proto`). Selecting `Grpc`
+/// will log a warning at init and still export over HTTP — gRPC support requires
+/// a `grpc-tonic` cargo feature that is not currently enabled. Default is `Http`
+/// so the configured protocol matches what the exporter actually does.
 #[cfg(feature = "opentelemetry")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OtlpProtocol {
-    /// gRPC protocol (port 4317)
-    #[default]
+    /// gRPC protocol (port 4317) — currently not built in; falls back to HTTP with a warning.
     Grpc,
     /// HTTP/protobuf protocol (port 4318)
+    #[default]
     Http,
 }
 
@@ -133,6 +153,8 @@ pub struct TelemetryConfigBuilder {
     prometheus_port: Option<u16>,
     #[cfg(feature = "prometheus")]
     prometheus_path: Option<String>,
+    #[cfg(feature = "prometheus")]
+    prometheus_bind_addr: Option<std::net::IpAddr>,
 
     resource_attributes: Vec<(String, String)>,
 }
@@ -229,6 +251,20 @@ impl TelemetryConfigBuilder {
         self
     }
 
+    /// Set the Prometheus listener bind address.
+    ///
+    /// Defaults to `127.0.0.1` when unset. Pass an externally-routable address
+    /// only when you intend to expose unauthenticated runtime metrics on that
+    /// interface; a `WARN` log is emitted at init when the bound address is not
+    /// loopback.
+    #[cfg(feature = "prometheus")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "prometheus")))]
+    #[must_use]
+    pub fn prometheus_bind_addr(mut self, addr: std::net::IpAddr) -> Self {
+        self.prometheus_bind_addr = Some(addr);
+        self
+    }
+
     /// Add a resource attribute
     #[must_use]
     pub fn resource_attribute(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
@@ -267,6 +303,8 @@ impl TelemetryConfigBuilder {
             prometheus_port: self.prometheus_port.or(defaults.prometheus_port),
             #[cfg(feature = "prometheus")]
             prometheus_path: self.prometheus_path.unwrap_or(defaults.prometheus_path),
+            #[cfg(feature = "prometheus")]
+            prometheus_bind_addr: self.prometheus_bind_addr.or(defaults.prometheus_bind_addr),
 
             resource_attributes: if self.resource_attributes.is_empty() {
                 defaults.resource_attributes

@@ -17,13 +17,16 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use dashmap::DashMap;
 use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 use turbomcp_core::error::{ErrorKind, McpError, McpResult};
 use turbomcp_core::handler::McpHandler;
 use turbomcp_types::ProtocolVersion;
 
-use crate::context::{McpSession, RequestContext, SessionFuture};
+use crate::context::{Cancellable, McpSession, RequestContext, SessionFuture};
 use crate::router;
+use crate::transport::line::jsonrpc_id_key;
 use crate::transport::{MAX_MESSAGE_SIZE, SessionState};
 
 use turbomcp_transport::{
@@ -263,6 +266,10 @@ async fn run_server_loop<H: McpHandler>(
     // Channel for completed handler responses
     let (response_tx, mut response_rx) = mpsc::channel::<router::JsonRpcOutgoing>(32);
 
+    // In-flight handler cancellation tokens, keyed by JSON-RPC id; signalled
+    // by `notifications/cancelled` per MCP 2025-11-25.
+    let pending_handlers: Arc<DashMap<String, CancellationToken>> = Arc::new(DashMap::new());
+
     // Server-to-client pending request tracking
     let mut pending_requests =
         HashMap::<serde_json::Value, oneshot::Sender<McpResult<serde_json::Value>>>::new();
@@ -354,9 +361,29 @@ async fn run_server_loop<H: McpHandler>(
                                 if response.should_send() {
                                     send_response_msg(&outgoing, &response).await?;
                                 }
-                            } else if request.method == "notifications/initialized"
-                                || request.method == "notifications/cancelled"
-                            {
+                            } else if request.method == "notifications/cancelled" {
+                                if let Some(req_id) = request
+                                    .params
+                                    .as_ref()
+                                    .and_then(|p| p.get("requestId"))
+                                {
+                                    let key = jsonrpc_id_key(req_id);
+                                    if let Some((_, token)) = pending_handlers.remove(&key) {
+                                        let reason = request
+                                            .params
+                                            .as_ref()
+                                            .and_then(|p| p.get("reason"))
+                                            .and_then(|r| r.as_str())
+                                            .unwrap_or("client requested cancellation");
+                                        tracing::debug!(
+                                            request_id = %key,
+                                            reason = %reason,
+                                            "Cancelling in-flight handler",
+                                        );
+                                        token.cancel();
+                                    }
+                                }
+                            } else if request.method == "notifications/initialized" {
                                 let h = handler.clone();
                                 let session = session_handle.clone();
                                 let resp_tx = response_tx.clone();
@@ -403,12 +430,30 @@ async fn run_server_loop<H: McpHandler>(
                                     }
                                 };
 
+                                // Spawn the handler with a per-request cancellation
+                                // token so `notifications/cancelled` can signal it.
                                 let h = handler.clone();
                                 let session = session_handle.clone();
                                 let resp_tx = response_tx.clone();
-                                let ctx = RequestContext::channel().with_session(session);
+                                let token = CancellationToken::new();
+                                let cancel_key = request.id.as_ref().map(jsonrpc_id_key);
+                                if let Some(ref key) = cancel_key {
+                                    pending_handlers.insert(key.clone(), token.clone());
+                                }
+                                let ctx = RequestContext::channel()
+                                    .with_session(session)
+                                    .with_cancellation_token(
+                                        Arc::new(token) as Arc<dyn Cancellable>,
+                                    );
+                                let guard = super::PendingHandlerGuard::new(
+                                    Arc::clone(&pending_handlers),
+                                    cancel_key,
+                                );
 
                                 tokio::spawn(async move {
+                                    // RAII cleanup runs on every exit path,
+                                    // including handler panic.
+                                    let _guard = guard;
                                     let response = router::route_request_versioned(
                                         &h, request, &ctx, &version,
                                     )
@@ -518,11 +563,19 @@ async fn send_response_msg(
 }
 
 /// Serialize and send a JSON-RPC error over the channel.
+///
+/// Per JSON-RPC 2.0 §5.1, error responses to messages whose id could not be
+/// determined (parse errors, oversized input) MUST use `id: null` on the
+/// wire. The shared `JsonRpcOutgoing` type currently skips serializing `id`
+/// when `None`, so we normalize to `Some(Value::Null)` here to keep the
+/// transport boundary spec-correct regardless of how the underlying type
+/// evolves.
 async fn send_error_msg(
     tx: &mpsc::Sender<TransportMessage>,
     id: Option<serde_json::Value>,
     error: McpError,
 ) -> McpResult<()> {
+    let id = Some(id.unwrap_or(serde_json::Value::Null));
     let response = router::JsonRpcOutgoing::error(id, error);
     send_response_msg(tx, &response).await
 }

@@ -37,6 +37,9 @@ tracing = { workspace = true }
 # URL handling
 url = "2.5"
 
+# Per-instance jitter source (avoids deterministic backoff across clients)
+fastrand = { workspace = true }
+
 [dev-dependencies]
 tokio-test = { workspace = true }
 

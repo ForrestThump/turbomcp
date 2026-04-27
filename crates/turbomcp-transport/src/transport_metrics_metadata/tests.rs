@@ -1,14 +1,11 @@
-//! Tests
-use super::*;
-
-//! Comprehensive test for TransportMetrics metadata field implementation
+//! Comprehensive tests for the `TransportMetrics::metadata` field.
 //!
-//! This test validates the new metadata field that allows transport-specific
+//! These tests validate the metadata field that allows transport-specific
 //! custom metrics to be stored without breaking the core metrics API.
 
+use crate::core::{AtomicMetrics, TransportMetrics};
 use serde_json::json;
 use std::collections::HashMap;
-use crate::core::{AtomicMetrics, TransportMetrics};
 
 #[test]
 fn test_transport_metrics_metadata_field() {

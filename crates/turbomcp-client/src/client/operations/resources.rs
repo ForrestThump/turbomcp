@@ -244,7 +244,7 @@ impl<T: turbomcp_transport::Transport + 'static> super::super::core::Client<T> {
         };
         self.inner
             .protocol
-            .request("resources/templates", params)
+            .request("resources/templates/list", params)
             .await
     }
 }

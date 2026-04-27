@@ -65,9 +65,15 @@ type SessionStateMap = dashmap::DashMap<String, Arc<RwLock<HashMap<String, Value
 
 /// Session state storage (keyed by session_id).
 ///
-/// **Warning**: This is a process-level singleton. Entries must be manually
-/// cleaned up via [`cleanup_session_state`] or [`SessionStateGuard`] to
-/// prevent unbounded memory growth.
+/// **⚠️  UNBOUNDED — multi-tenant servers MUST use [`SessionStateGuard`].**
+///
+/// This is a process-level singleton with no LRU/TTL bounds. Without
+/// [`SessionStateGuard`] or explicit [`cleanup_session_state`] calls, every
+/// distinct session id becomes a permanent memory entry. A long-running server
+/// that creates many short-lived sessions (e.g., per-request session ids on a
+/// public HTTP transport) will grow the map without bound until OOM. The
+/// `dashmap` crate has no built-in cap, so a custom LRU layer (`moka`,
+/// hand-rolled) is the only mitigation if `SessionStateGuard` cannot be used.
 ///
 /// # Multi-Server Considerations
 ///
@@ -245,6 +251,9 @@ pub trait RichContextExt {
 
     /// Report progress on a long-running operation.
     ///
+    /// Per MCP 2025-11-25 (`schema.ts:1551-1561`), progress and total are JSON
+    /// numbers; floats are permitted to express fractional progress.
+    ///
     /// # Arguments
     ///
     /// * `current` - Current progress value
@@ -255,25 +264,25 @@ pub trait RichContextExt {
     ///
     /// ```rust,ignore
     /// for i in 0..100 {
-    ///     ctx.report_progress(i, 100, Some(&format!("Processing item {}", i))).await?;
+    ///     ctx.report_progress(i as f64, 100.0, Some(&format!("Processing item {}", i))).await?;
     /// }
     /// ```
     fn report_progress(
         &self,
-        current: u64,
-        total: u64,
+        current: f64,
+        total: f64,
         message: Option<&str>,
     ) -> impl std::future::Future<Output = Result<(), McpError>> + MaybeSend;
 
-    /// Report progress with custom progress token.
+    /// Report progress with a custom [`ProgressToken`](crate::types::ProgressToken).
     ///
-    /// Use this when you need to track multiple concurrent operations
-    /// with different progress tokens.
+    /// Use this when you need to track multiple concurrent operations with
+    /// different progress tokens (per spec, `string | number`).
     fn report_progress_with_token(
         &self,
-        token: impl Into<String> + MaybeSend,
-        current: u64,
-        total: Option<u64>,
+        token: impl Into<crate::types::ProgressToken> + MaybeSend,
+        current: f64,
+        total: Option<f64>,
         message: Option<&str>,
     ) -> impl std::future::Future<Output = Result<(), McpError>> + MaybeSend;
 }
@@ -391,20 +400,20 @@ impl RichContextExt for RequestContext {
 
     async fn report_progress(
         &self,
-        current: u64,
-        total: u64,
+        current: f64,
+        total: f64,
         message: Option<&str>,
     ) -> Result<(), McpError> {
         // Use request_id as the progress token by default
-        self.report_progress_with_token(&self.request_id, current, Some(total), message)
+        self.report_progress_with_token(self.request_id.as_str(), current, Some(total), message)
             .await
     }
 
     async fn report_progress_with_token(
         &self,
-        token: impl Into<String> + MaybeSend,
-        current: u64,
-        total: Option<u64>,
+        token: impl Into<crate::types::ProgressToken> + MaybeSend,
+        current: f64,
+        total: Option<f64>,
         message: Option<&str>,
     ) -> Result<(), McpError> {
         if !self.has_session() {
@@ -623,10 +632,14 @@ mod tests {
         let ctx = RequestContext::new().with_session_id("progress-test");
 
         // These should all succeed (no-op) without server_to_client
-        assert!(ctx.report_progress(50, 100, Some("halfway")).await.is_ok());
-        assert!(ctx.report_progress(100, 100, None).await.is_ok());
         assert!(
-            ctx.report_progress_with_token("custom-token", 25, Some(100), Some("processing"))
+            ctx.report_progress(50.0, 100.0, Some("halfway"))
+                .await
+                .is_ok()
+        );
+        assert!(ctx.report_progress(100.0, 100.0, None).await.is_ok());
+        assert!(
+            ctx.report_progress_with_token("custom-token", 25.0, Some(100.0), Some("processing"))
                 .await
                 .is_ok()
         );

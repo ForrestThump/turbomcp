@@ -3,6 +3,10 @@
 //! This handler provides full MCP bidirectional support, enabling
 //! both client→server and server→client requests over WebSocket.
 
+// See `mod.rs` — internal subtree references silenced; deprecation fires for
+// external consumers via the source-level `#[deprecated]` attributes.
+#![allow(deprecated)]
+
 use std::collections::HashMap;
 use std::sync::Arc;
 

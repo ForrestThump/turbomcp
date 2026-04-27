@@ -11,6 +11,10 @@
 //! - Concurrent: Tests validate behavior under concurrent load
 
 #![cfg(feature = "websocket")]
+// In-tree test exercises the deprecated `with_compression` / `with_tls_config`
+// builder methods to prove the no-op fields still thread through for source
+// compatibility. The deprecation message is for external consumers.
+#![allow(deprecated)]
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -807,6 +811,9 @@ async fn test_websocket_keep_alive_maintains_connection() {
 
 #[tokio::test]
 async fn test_websocket_compression_enabled() {
+    // `with_compression(true)` is a documented no-op: permessage-deflate is
+    // not implemented in tungstenite 0.29, so capabilities ALWAYS advertise
+    // no compression to avoid a false promise. Test reflects that.
     let config =
         WebSocketBidirectionalConfig::client("ws://example.com".to_string()).with_compression(true);
 
@@ -815,13 +822,8 @@ async fn test_websocket_compression_enabled() {
         .expect("Failed to create transport");
 
     let capabilities = transport.capabilities();
-    assert!(capabilities.supports_compression);
-    assert!(!capabilities.compression_algorithms.is_empty());
-    assert!(
-        capabilities
-            .compression_algorithms
-            .contains(&"deflate".to_string())
-    );
+    assert!(!capabilities.supports_compression);
+    assert!(capabilities.compression_algorithms.is_empty());
 }
 
 #[tokio::test]

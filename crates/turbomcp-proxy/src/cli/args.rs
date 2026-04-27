@@ -29,6 +29,12 @@ pub struct BackendArgs {
     #[arg(long, value_name = "URL", group = "backend-type")]
     pub http: Option<String>,
 
+    /// MCP endpoint path on the upstream HTTP backend (defaults to `/mcp`).
+    /// Use this when the upstream server mounts MCP at a custom path
+    /// (e.g. `--backend-path /api/mcp`).
+    #[arg(long = "backend-path", value_name = "PATH", requires = "http")]
+    pub endpoint_path: Option<String>,
+
     /// TCP backend address (host:port)
     #[arg(long, value_name = "ADDR", group = "backend-type")]
     pub tcp: Option<String>,
@@ -147,6 +153,7 @@ mod tests {
         websocket: Option<String>,
     ) -> BackendArgs {
         BackendArgs {
+            endpoint_path: None,
             backend,
             cmd,
             args: vec![],
@@ -181,6 +188,7 @@ mod tests {
     #[test]
     fn test_backend_type_detection_unix() {
         let args = BackendArgs {
+            endpoint_path: None,
             backend: None,
             cmd: None,
             args: vec![],
@@ -224,6 +232,7 @@ mod tests {
     #[test]
     fn test_backend_validation_unix() {
         let args = BackendArgs {
+            endpoint_path: None,
             backend: Some(BackendType::Unix),
             cmd: None,
             args: vec![],

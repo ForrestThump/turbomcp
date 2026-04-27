@@ -23,6 +23,41 @@ use crate::marker::MaybeSend;
 /// reasonable memory usage for session storage backends.
 pub const MAX_SESSION_ID_LEN: usize = 256;
 
+/// Best-effort `SystemTime::now()` → Unix milliseconds, with a fallback of `0`
+/// and a stderr warning on clock-before-epoch failure.
+///
+/// `SystemTime` is non-monotonic and can fail on machines with no RTC (clock
+/// reads as 1970-01-01) or on a host with the wall clock set far backwards.
+/// The fallback to `0` makes any session that uses this timestamp look
+/// instantly expired — the warning is so the operator can investigate.
+#[cfg(feature = "std")]
+fn now_millis_warn() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(d) => d.as_millis() as u64,
+        Err(e) => {
+            eprintln!(
+                "warning: SystemTime before UNIX_EPOCH ({e}); session/event \
+                 timestamp falling back to 0 — sessions may appear expired"
+            );
+            0
+        }
+    }
+}
+
+/// Validate that every byte of `s` is in the MCP 2025-11-25 transport spec's
+/// required visible-ASCII range (`0x21..=0x7E`).
+///
+/// The spec text:
+/// > The session ID **MUST** only contain visible ASCII characters
+/// > (ranging from 0x21 to 0x7E).
+///
+/// This rejects empty strings, NULs, line breaks, spaces (0x20), DEL (0x7F),
+/// and arbitrary UTF-8.
+fn is_valid_session_id_charset(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| (0x21..=0x7E).contains(&b))
+}
+
 /// Unique identifier for an MCP session.
 ///
 /// Session IDs are used to:
@@ -82,8 +117,12 @@ impl SessionId {
     ///
     /// # Panics
     ///
-    /// Panics if the session ID exceeds `MAX_SESSION_ID_LEN` (256 characters).
-    /// Use `try_from_string` for non-panicking validation.
+    /// Panics if the session ID violates the spec — exceeds
+    /// `MAX_SESSION_ID_LEN` (256 chars) or contains bytes outside the
+    /// MCP 2025-11-25 transport spec's required visible-ASCII range
+    /// (`0x21..=0x7E`).
+    ///
+    /// Use [`Self::try_from_string`] for non-panicking validation.
     pub fn from_string(s: impl Into<String>) -> Self {
         let string = s.into();
         assert!(
@@ -92,15 +131,21 @@ impl SessionId {
             string.len(),
             MAX_SESSION_ID_LEN
         );
+        assert!(
+            is_valid_session_id_charset(&string),
+            "Session ID contains bytes outside the spec's 0x21..=0x7E range \
+             (visible ASCII only); see MCP 2025-11-25 transports §Session Management"
+        );
         Self(string)
     }
 
     /// Try to create a session ID from a string with validation.
     ///
-    /// Returns `None` if the session ID exceeds `MAX_SESSION_ID_LEN` (256 characters).
+    /// Returns `None` if the string exceeds `MAX_SESSION_ID_LEN` (256 chars)
+    /// or contains bytes outside the spec's `0x21..=0x7E` (visible ASCII) range.
     pub fn try_from_string(s: impl Into<String>) -> Option<Self> {
         let string = s.into();
-        if string.len() <= MAX_SESSION_ID_LEN {
+        if string.len() <= MAX_SESSION_ID_LEN && is_valid_session_id_charset(&string) {
             Some(Self(string))
         } else {
             None
@@ -125,12 +170,17 @@ impl fmt::Display for SessionId {
 }
 
 impl From<String> for SessionId {
+    /// **Panic-on-invalid input.** Prefer [`TryFrom<String>`] (or
+    /// [`SessionId::try_from_string`]) for any path that handles
+    /// untrusted input — a 257-char `Mcp-Session-Id` header would crash
+    /// the worker if routed through this conversion.
     fn from(s: String) -> Self {
         Self::from_string(s)
     }
 }
 
 impl From<&str> for SessionId {
+    /// See note on [`From<String>`] — panics on spec-invalid input.
     fn from(s: &str) -> Self {
         Self::from_string(s)
     }
@@ -186,20 +236,19 @@ pub struct Session {
 
 impl Session {
     /// Create a new session with the given ID.
+    ///
+    /// Uses `SystemTime::now()` for `created_at` / `last_activity`. If the
+    /// system clock is set before the Unix epoch (rare, but possible on
+    /// embedded boards or VMs without an RTC) the timestamps fall back to
+    /// `0` and a `tracing::warn!` is emitted; the resulting session would
+    /// otherwise be reported as instantly expired.
     #[cfg(feature = "std")]
     pub fn new(id: SessionId) -> Self {
-        use std::time::{SystemTime, UNIX_EPOCH};
-
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-
         Self {
             id,
             state: SessionState::Pending,
-            created_at: now,
-            last_activity: now,
+            created_at: now_millis_warn(),
+            last_activity: now_millis_warn(),
             client_info: None,
             protocol_version: None,
             last_event_id: None,
@@ -242,14 +291,22 @@ impl Session {
     }
 
     /// Update the last activity timestamp.
+    ///
+    /// On `SystemTime::now()` failure (clock before epoch), keeps the
+    /// previous `last_activity` value and emits a `tracing::warn!` rather
+    /// than silently rolling back to `0`.
     #[cfg(feature = "std")]
     pub fn touch(&mut self) {
         use std::time::{SystemTime, UNIX_EPOCH};
-
-        self.last_activity = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(self.last_activity);
+        match SystemTime::now().duration_since(UNIX_EPOCH) {
+            Ok(d) => self.last_activity = d.as_millis() as u64,
+            Err(e) => {
+                eprintln!(
+                    "warning: SystemTime before UNIX_EPOCH ({e}); \
+                     keeping previous last_activity"
+                );
+            }
+        }
     }
 
     /// Update the last activity timestamp with explicit value.
@@ -283,21 +340,15 @@ pub struct StoredEvent {
 }
 
 impl StoredEvent {
-    /// Create a new stored event.
+    /// Create a new stored event. See [`Session::new`] for the
+    /// `SystemTime`-failure semantics (`timestamp = 0` plus a warning).
     #[cfg(feature = "std")]
     pub fn new(id: impl Into<String>, data: impl Into<String>) -> Self {
-        use std::time::{SystemTime, UNIX_EPOCH};
-
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-
         Self {
             id: id.into(),
             event_type: None,
             data: data.into(),
-            timestamp,
+            timestamp: now_millis_warn(),
         }
     }
 

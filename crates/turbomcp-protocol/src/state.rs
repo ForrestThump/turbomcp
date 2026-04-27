@@ -1,11 +1,15 @@
 //! State management utilities for MCP servers
 
 use crate::{Error, ErrorKind, Result};
+use parking_lot::RwLock;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
-/// Thread-safe state manager for MCP servers
+/// Thread-safe state manager for MCP servers.
+///
+/// Uses `parking_lot::RwLock` for poison-free locking — a panic in a writer
+/// no longer silently disables `set` / `clear` for every subsequent caller.
 #[derive(Debug, Clone)]
 pub struct StateManager {
     /// Internal state storage
@@ -23,76 +27,61 @@ impl StateManager {
 
     /// Set a value in the state
     pub fn set(&self, key: String, value: Value) {
-        if let Ok(mut state) = self.state.write() {
-            state.insert(key, value);
-        }
+        self.state.write().insert(key, value);
     }
 
     /// Get a value from the state
     #[must_use]
     pub fn get(&self, key: &str) -> Option<Value> {
-        self.state.read().ok()?.get(key).cloned()
+        self.state.read().get(key).cloned()
     }
 
     /// Remove a value from the state
     #[must_use]
     pub fn remove(&self, key: &str) -> Option<Value> {
-        self.state.write().ok()?.remove(key)
+        self.state.write().remove(key)
     }
 
     /// Check if a key exists in the state
     #[must_use]
     pub fn contains(&self, key: &str) -> bool {
-        self.state.read().is_ok_and(|state| state.contains_key(key))
+        self.state.read().contains_key(key)
     }
 
     /// Get the number of entries in the state
     #[must_use]
     pub fn size(&self) -> usize {
-        self.state.read().map_or(0, |state| state.len())
+        self.state.read().len()
     }
 
     /// List all keys in the state
     #[must_use]
     pub fn list_keys(&self) -> Vec<String> {
-        self.state
-            .read()
-            .map_or_else(|_| Vec::new(), |state| state.keys().cloned().collect())
+        self.state.read().keys().cloned().collect()
     }
 
     /// Clear all entries from the state
     pub fn clear(&self) {
-        if let Ok(mut state) = self.state.write() {
-            state.clear();
-        }
+        self.state.write().clear();
     }
 
     /// Export the state as JSON
     #[must_use]
     pub fn export(&self) -> Value {
-        self.state.read().map_or_else(
-            |_| Value::Object(serde_json::Map::new()),
-            |state| Value::Object(state.iter().map(|(k, v)| (k.clone(), v.clone())).collect()),
-        )
+        let state = self.state.read();
+        Value::Object(state.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
     }
 
     /// Import state from JSON
     pub fn import(&self, data: Value) -> Result<()> {
         match data {
-            Value::Object(obj) => self.state.write().map_or_else(
-                |_| {
-                    Err(Error::new(
-                        ErrorKind::Internal,
-                        "Failed to acquire write lock",
-                    ))
-                },
-                |mut state| {
-                    for (key, value) in obj {
-                        state.insert(key, value);
-                    }
-                    Ok(())
-                },
-            ),
+            Value::Object(obj) => {
+                let mut state = self.state.write();
+                for (key, value) in obj {
+                    state.insert(key, value);
+                }
+                Ok(())
+            }
             _ => Err(Error::new(
                 ErrorKind::Configuration,
                 "Import data must be a JSON object",

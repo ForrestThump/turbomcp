@@ -7,6 +7,61 @@
 use super::errors::SecurityError;
 use crate::security::SecurityHeaders;
 use std::collections::HashSet;
+use std::net::Ipv4Addr;
+use url::{Host, Url};
+
+/// Canonicalize an origin string into the comparable triple
+/// `(scheme, host, effective_port)`.
+///
+/// - Schemes are lowercased.
+/// - Hostnames are converted via the URL parser, which already handles
+///   Punycode/IDN canonicalization and case folding (`Example.com` →
+///   `example.com`).
+/// - Ports are filled in from the scheme's default if absent (`https://h` →
+///   port 443) so `https://example.com` matches `https://example.com:443`.
+///
+/// Returns `None` for inputs that don't parse as a URL or aren't true origins
+/// (no host, or path/query/fragment present — RFC 6454 origins are bare).
+pub(crate) fn canonicalize_origin(input: &str) -> Option<(String, String, u16)> {
+    let url = Url::parse(input.trim()).ok()?;
+    // Reject origins that carry path / query / fragment / userinfo —
+    // `Url::parse("http://localhost.evil.com")` is the kind of input the old
+    // `starts_with` check accepted. We want only `<scheme>://<host>[:port]`.
+    if url.path() != "/" && !url.path().is_empty() {
+        return None;
+    }
+    if url.query().is_some() || url.fragment().is_some() || !url.username().is_empty() {
+        return None;
+    }
+    let scheme = url.scheme().to_ascii_lowercase();
+    let host = match url.host()? {
+        Host::Domain(d) => d.to_ascii_lowercase(),
+        Host::Ipv4(ip) => ip.to_string(),
+        Host::Ipv6(ip) => format!("[{}]", ip),
+    };
+    let port = url.port_or_known_default()?;
+    Some((scheme, host, port))
+}
+
+/// True iff a *parsed* origin refers to a loopback host on http/https.
+fn is_loopback_origin_parsed(scheme: &str, host: &str) -> bool {
+    if scheme != "http" && scheme != "https" {
+        return false;
+    }
+    if host == "localhost" {
+        return true;
+    }
+    if let Ok(v4) = host.parse::<Ipv4Addr>() {
+        return v4.is_loopback();
+    }
+    if host.starts_with('[')
+        && host.ends_with(']')
+        && let Ok(v6) = host[1..host.len() - 1].parse::<std::net::Ipv6Addr>()
+    {
+        return v6.is_loopback();
+    }
+    false
+}
 
 /// Origin validation configuration.
 ///
@@ -47,6 +102,25 @@ impl OriginConfig {
     /// Create a new origin configuration
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Production-safe constructor: requires an explicit allowlist and disables
+    /// the localhost fallback. Use this instead of [`Self::default`] / [`Self::new`]
+    /// when building servers that face the public internet.
+    pub fn production(allowed_origins: impl IntoIterator<Item = String>) -> Self {
+        Self {
+            allowed_origins: allowed_origins.into_iter().collect(),
+            allow_localhost: false,
+            allow_any: false,
+        }
+    }
+
+    /// Returns `true` when this config has no real allowlist and is therefore
+    /// only safe for local development. Servers that observe `is_dev_permissive`
+    /// at startup should refuse to bind to a non-loopback address (or at least
+    /// log a `WARN`).
+    pub fn is_dev_permissive(&self) -> bool {
+        !self.allow_any && self.allow_localhost && self.allowed_origins.is_empty()
     }
 
     /// Add an allowed origin
@@ -102,28 +176,28 @@ pub fn validate_origin(
     // Check if Origin header exists (case-insensitive per HTTP spec)
     match get_header_case_insensitive(headers, "Origin") {
         Some(origin) => {
-            // Origin present → validate it
+            // Parse + canonicalize the inbound origin. Anything that doesn't
+            // round-trip through the URL parser as a bare origin is rejected
+            // outright — that catches `http://localhost.evil.com`,
+            // `http://localhost@evil.com`, paths, queries, and userinfo.
+            let canonical = canonicalize_origin(origin).ok_or_else(|| {
+                SecurityError::InvalidOrigin(format!("Origin '{}' is not a valid origin", origin))
+            })?;
 
-            // Allow explicitly configured origins
-            if config.allowed_origins.contains(origin) {
+            // Match against the configured allowlist using canonical form so
+            // `https://Example.com` and `https://example.com:443` collide.
+            if config
+                .allowed_origins
+                .iter()
+                .filter_map(|entry| canonicalize_origin(entry))
+                .any(|c| c == canonical)
+            {
                 return Ok(());
             }
 
-            // Allow localhost origins for development
-            if config.allow_localhost {
-                let localhost_patterns = [
-                    "http://localhost",
-                    "https://localhost",
-                    "http://127.0.0.1",
-                    "https://127.0.0.1",
-                ];
-
-                if localhost_patterns
-                    .iter()
-                    .any(|&pattern| origin.starts_with(pattern))
-                {
-                    return Ok(());
-                }
+            // Allow localhost origins for development.
+            if config.allow_localhost && is_loopback_origin_parsed(&canonical.0, &canonical.1) {
+                return Ok(());
             }
 
             Err(SecurityError::InvalidOrigin(format!(
@@ -241,5 +315,82 @@ mod tests {
         let client_ip = "192.168.1.100".parse().unwrap();
 
         assert!(validate_origin(&config, &headers, client_ip).is_ok());
+    }
+
+    #[test]
+    fn test_validate_origin_rejects_localhost_lookalike_subdomain() {
+        // `starts_with` would accept this; the URL parser sees the actual host.
+        let config = OriginConfig {
+            allow_localhost: true,
+            ..Default::default()
+        };
+        let mut headers = HashMap::new();
+        headers.insert(
+            "Origin".to_string(),
+            "http://localhost.evil.com".to_string(),
+        );
+        let client_ip = "192.168.1.100".parse().unwrap();
+        assert!(validate_origin(&config, &headers, client_ip).is_err());
+    }
+
+    #[test]
+    fn test_validate_origin_rejects_userinfo_smuggle() {
+        // `http://localhost@evil.com` has host `evil.com`; userinfo is stripped.
+        // Our canonicalizer rejects any origin with userinfo outright.
+        let config = OriginConfig {
+            allow_localhost: true,
+            ..Default::default()
+        };
+        let mut headers = HashMap::new();
+        headers.insert(
+            "Origin".to_string(),
+            "http://localhost@evil.com".to_string(),
+        );
+        let client_ip = "192.168.1.100".parse().unwrap();
+        assert!(validate_origin(&config, &headers, client_ip).is_err());
+    }
+
+    #[test]
+    fn test_validate_origin_canonicalizes_case_and_default_port() {
+        let mut allowed = HashSet::new();
+        allowed.insert("https://example.com".to_string());
+        let config = OriginConfig {
+            allowed_origins: allowed,
+            allow_localhost: false,
+            allow_any: false,
+        };
+        let client_ip = "192.168.1.100".parse().unwrap();
+
+        // Mixed case host + explicit default port should both match.
+        for incoming in ["https://Example.com", "https://example.com:443"] {
+            let mut headers = HashMap::new();
+            headers.insert("Origin".to_string(), incoming.to_string());
+            assert!(
+                validate_origin(&config, &headers, client_ip).is_ok(),
+                "expected {incoming} to be canonicalized to https://example.com"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_origin_rejects_path_or_query() {
+        // RFC 6454 Origins are bare; anything with a path/query is suspect.
+        let config = OriginConfig {
+            allow_localhost: true,
+            ..Default::default()
+        };
+        let client_ip = "127.0.0.1".parse().unwrap();
+        for sneaky in [
+            "http://localhost/admin",
+            "http://localhost:3000/x",
+            "http://localhost?x=1",
+        ] {
+            let mut headers = HashMap::new();
+            headers.insert("Origin".to_string(), sneaky.to_string());
+            assert!(
+                validate_origin(&config, &headers, client_ip).is_err(),
+                "expected origin '{sneaky}' to be rejected"
+            );
+        }
     }
 }

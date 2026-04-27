@@ -78,6 +78,7 @@ impl ElicitationSchema {
             format: None,
             min_length: None,
             max_length: None,
+            default: None,
             enum_values: None,
             enum_names: None,
         };
@@ -103,6 +104,7 @@ impl ElicitationSchema {
             description,
             minimum,
             maximum,
+            default: None,
         };
         self.properties.insert(name.clone(), property);
         if required && let Some(required_fields) = self.required.as_mut() {
@@ -165,6 +167,9 @@ pub enum PrimitiveSchemaDefinition {
         /// Maximum string length.
         #[serde(rename = "maxLength", skip_serializing_if = "Option::is_none")]
         max_length: Option<u32>,
+        /// Default value (MCP 2025-11-25 spec).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        default: Option<String>,
         /// Legacy enum values (prefer [`EnumSchema::UntitledSingleSelect`]).
         #[serde(rename = "enum", skip_serializing_if = "Option::is_none")]
         enum_values: Option<Vec<String>>,
@@ -188,6 +193,9 @@ pub enum PrimitiveSchemaDefinition {
         /// Maximum value.
         #[serde(skip_serializing_if = "Option::is_none")]
         maximum: Option<f64>,
+        /// Default value (MCP 2025-11-25 spec).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        default: Option<f64>,
     },
     /// Integer-valued field.
     #[serde(rename = "integer")]
@@ -204,6 +212,9 @@ pub enum PrimitiveSchemaDefinition {
         /// Maximum value.
         #[serde(skip_serializing_if = "Option::is_none")]
         maximum: Option<i64>,
+        /// Default value (MCP 2025-11-25 spec).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        default: Option<i64>,
     },
     /// Boolean-valued field.
     #[serde(rename = "boolean")]
@@ -436,6 +447,7 @@ mod tests {
             format: Some("email".into()),
             min_length: Some(1),
             max_length: Some(80),
+            default: None,
             enum_values: None,
             enum_names: None,
         };

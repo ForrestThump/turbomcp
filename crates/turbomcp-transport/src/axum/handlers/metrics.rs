@@ -1,5 +1,9 @@
 //! Metrics handler for monitoring and observability
 
+// See `mod.rs` — internal subtree references silenced; deprecation fires for
+// external consumers via the source-level `#[deprecated]` attributes.
+#![allow(deprecated)]
+
 use axum::{Json, extract::State};
 
 use crate::axum::service::McpAppState;

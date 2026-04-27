@@ -387,8 +387,18 @@ pub async fn authentication_middleware(
                 };
 
                 if !is_active {
-                    let token_hint = &token[..token.len().min(8)];
-                    tracing::warn!(token_prefix = %token_hint, "Token revoked per introspection");
+                    // Log a SHA-256 prefix of the token rather than its raw
+                    // first bytes — bearer tokens with structured prefixes
+                    // (`sk-…`, version markers) leak useful entropy when the
+                    // raw prefix lands in log sinks.
+                    use sha2::{Digest, Sha256};
+                    let digest = Sha256::digest(token.as_bytes());
+                    let token_hash: String =
+                        digest.iter().take(4).map(|b| format!("{b:02x}")).collect();
+                    tracing::warn!(
+                        token_sha256_prefix = %token_hash,
+                        "Token revoked per introspection"
+                    );
                     return AuthError::unauthorized(metadata_uri, scope.as_deref()).into_response();
                 }
             }

@@ -177,17 +177,18 @@ pub struct WebSocketBidirectionalTransport {
 impl WebSocketBidirectionalTransport {
     /// Create transport capabilities for WebSocket bidirectional transport
     pub fn create_capabilities(config: &WebSocketBidirectionalConfig) -> TransportCapabilities {
+        // permessage-deflate is not implemented on this transport: tokio-tungstenite
+        // / tungstenite 0.29 do not support it, and the on-the-wire compressors
+        // listed below were never negotiated with the peer. Always advertise no
+        // compression support so peers don't get a false promise. The
+        // `enable_compression` config field is now a documented no-op (#[deprecated]).
         TransportCapabilities {
             max_message_size: Some(config.max_message_size),
-            supports_compression: config.enable_compression,
+            supports_compression: false,
             supports_streaming: true,
             supports_bidirectional: true,
             supports_multiplexing: true,
-            compression_algorithms: if config.enable_compression {
-                vec!["deflate".to_string(), "gzip".to_string()]
-            } else {
-                Vec::new()
-            },
+            compression_algorithms: Vec::new(),
             custom: {
                 let mut custom = std::collections::HashMap::new();
                 custom.insert("elicitation".to_string(), json!(true));
@@ -413,6 +414,7 @@ mod tests {
     #[test]
     fn test_create_capabilities() {
         let config = WebSocketBidirectionalConfig {
+            #[allow(deprecated)]
             enable_compression: true,
             max_message_size: 1024 * 1024,
             max_concurrent_elicitations: 5,
@@ -421,12 +423,15 @@ mod tests {
 
         let capabilities = WebSocketBidirectionalTransport::create_capabilities(&config);
 
-        assert!(capabilities.supports_compression);
+        // Compression is intentionally always advertised as off — see
+        // `create_capabilities`. tungstenite 0.29 does not implement
+        // permessage-deflate, so honoring the request would mislead the peer.
+        assert!(!capabilities.supports_compression);
         assert!(capabilities.supports_bidirectional);
         assert!(capabilities.supports_streaming);
         assert!(capabilities.supports_multiplexing);
         assert_eq!(capabilities.max_message_size, Some(1024 * 1024));
-        assert!(!capabilities.compression_algorithms.is_empty());
+        assert!(capabilities.compression_algorithms.is_empty());
         assert!(capabilities.custom.contains_key("elicitation"));
     }
 }

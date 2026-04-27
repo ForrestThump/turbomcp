@@ -85,6 +85,13 @@ pub enum ProxyError {
         message: String,
         /// Name of the operation that failed (e.g., `list_tools`, `call_tool`)
         operation: Option<String>,
+        /// Original JSON-RPC error code from the upstream MCP server, if known.
+        /// Set when the underlying error came back over the wire (e.g. through
+        /// `turbomcp-client`); unset for transport-only failures. Used by the
+        /// proxy service to preserve `-32601` / `-32602` / user-rejected `-1`
+        /// etc. when forwarding the error back to the frontend instead of
+        /// flattening every backend error to `-32603 Internal error`.
+        upstream_jsonrpc_code: Option<i32>,
     },
 
     /// Schema validation error
@@ -222,6 +229,20 @@ impl ProxyError {
         Self::Backend {
             message: message.into(),
             operation: None,
+            upstream_jsonrpc_code: None,
+        }
+    }
+
+    /// Create a backend operation error preserving the upstream JSON-RPC code.
+    /// Use this when the failure originated as a JSON-RPC error from the
+    /// upstream MCP server (typed `McpError` from `turbomcp-client`); the
+    /// proxy service will mirror the code back to the frontend instead of
+    /// flattening every backend error to `-32603 Internal error`.
+    pub fn backend_with_code(message: impl Into<String>, code: i32) -> Self {
+        Self::Backend {
+            message: message.into(),
+            operation: None,
+            upstream_jsonrpc_code: Some(code),
         }
     }
 
@@ -233,6 +254,22 @@ impl ProxyError {
         Self::Backend {
             message: message.into(),
             operation: Some(operation.into()),
+            upstream_jsonrpc_code: None,
+        }
+    }
+
+    /// Returns the original upstream JSON-RPC error code if this error came
+    /// from a backend MCP server, falling back to `None` for purely local
+    /// failures. Callers building `JsonRpcError` responses should use this in
+    /// preference to defaulting to `-32603 Internal error`.
+    #[must_use]
+    pub fn upstream_jsonrpc_code(&self) -> Option<i32> {
+        match self {
+            Self::Backend {
+                upstream_jsonrpc_code,
+                ..
+            } => *upstream_jsonrpc_code,
+            _ => None,
         }
     }
 
@@ -430,13 +467,29 @@ impl From<ProxyError> for turbomcp_protocol::McpError {
                 };
                 turbomcp_protocol::McpError::transport(msg)
             }
-            ProxyError::Backend { message, operation } => {
+            ProxyError::Backend {
+                message,
+                operation,
+                upstream_jsonrpc_code,
+            } => {
                 let msg = if let Some(op) = operation {
                     format!("{message} (operation: {op})")
                 } else {
                     message
                 };
-                turbomcp_protocol::McpError::internal(msg)
+                // Preserve the original upstream JSON-RPC error code where
+                // possible — pre-3.2.0 every backend error mapped to
+                // `-32603 Internal error` and frontend retry logic that keys
+                // off codes (e.g. `-32601 Method not found` → don't retry,
+                // `-32603` → maybe retry) made the wrong choice.
+                if let Some(code) = upstream_jsonrpc_code {
+                    turbomcp_protocol::McpError::new(
+                        turbomcp_protocol::ErrorKind::from_i32(code),
+                        msg,
+                    )
+                } else {
+                    turbomcp_protocol::McpError::internal(msg)
+                }
             }
             ProxyError::SchemaValidation { message, .. } => {
                 turbomcp_protocol::McpError::invalid_params(message)

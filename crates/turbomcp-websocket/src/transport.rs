@@ -8,7 +8,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 use tokio_tungstenite::tungstenite::Message;
-use tracing::{debug, error, info, trace};
+use tracing::trace;
 
 use super::types::WebSocketBidirectionalTransport;
 use turbomcp_transport_traits::{
@@ -47,25 +47,20 @@ impl Transport for WebSocketBidirectionalTransport {
                     TransportError::SendFailed(format!("Failed to serialize: {}", e))
                 })?;
 
-                info!("🚀 [CLIENT SEND] Attempting to send message");
-                info!("   Session: {}", self.session_id);
-                info!("   Payload length: {} bytes", text.len());
-                debug!(
-                    "   Payload preview: {}",
-                    if text.len() > 200 {
-                        format!("{}...", &text[..200])
-                    } else {
-                        text.clone()
-                    }
+                // Log at trace level — payload can be large and these used to log
+                // payload previews at info, which both spams operator logs and
+                // risks leaking secrets/PII embedded in JSON-RPC params.
+                trace!(
+                    session = %self.session_id,
+                    bytes = text.len(),
+                    "websocket send"
                 );
 
                 // Send message and flush (SinkExt::send = feed + flush)
                 writer.send(Message::Text(text.into())).await.map_err(|e| {
-                    error!("❌ [CLIENT SEND] WebSocket send failed: {}", e);
                     TransportError::SendFailed(format!("WebSocket send failed: {}", e))
                 })?;
 
-                info!("✅ [CLIENT SEND] Message sent and flushed to TCP socket successfully");
                 self.metrics.write().await.messages_sent += 1;
                 trace!(
                     "Sent and flushed message {} in session {}",
@@ -73,7 +68,6 @@ impl Transport for WebSocketBidirectionalTransport {
                 );
                 Ok(())
             } else {
-                error!("❌ [CLIENT SEND] Writer is None - WebSocket not connected");
                 Err(TransportError::SendFailed(
                     "WebSocket not connected".to_string(),
                 ))
@@ -351,6 +345,7 @@ pub struct TransportStatus {
 }
 
 #[cfg(test)]
+#[allow(deprecated)] // tests construct configs with the deprecated `enable_compression` field
 mod tests {
     use super::*;
     use crate::config::WebSocketBidirectionalConfig;
@@ -378,7 +373,11 @@ mod tests {
         let capabilities = transport.capabilities();
         assert!(capabilities.supports_bidirectional);
         assert!(capabilities.supports_streaming);
-        assert!(capabilities.supports_compression);
+        // Compression is intentionally always advertised as off — see
+        // `create_capabilities`. Asking for it via the deprecated
+        // `enable_compression` field cannot flip the bit on, because the
+        // underlying tungstenite stack does not implement permessage-deflate.
+        assert!(!capabilities.supports_compression);
         assert_eq!(capabilities.max_message_size, Some(1024));
     }
 
