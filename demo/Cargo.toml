@@ -9,7 +9,7 @@ publish = false
 [dependencies]
 # TurboMCP SDK with v3 macros
 # NOTE: Using path dependencies for demo. For production, use versioned dependencies:
-#   turbomcp = { version = "3.0.7", features = [...] }
+#   turbomcp = { version = "3.1.2", features = [...] }
 turbomcp = { path = "../crates/turbomcp" }
 
 # Async runtime

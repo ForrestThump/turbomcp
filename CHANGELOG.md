@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.1.3] - 2026-04-28
+
+Patch release: follow-on exhaustive audit of lower-to-upper layers, focusing on
+JSON-RPC correctness, stream framing robustness, deprecated transport surface
+removal, and active documentation/scaffold alignment.
+
+### Security
+
+- **JSON-RPC version validation is now strict on inbound core routing** — requests
+  whose `jsonrpc` member is missing or not exactly `"2.0"` are rejected before
+  handler dispatch.
+- **OpenAPI URL fetches validate before network access** — URL inputs are parsed
+  and SSRF-checked before the HTTP request is built, with a bounded request
+  timeout.
+- **Server/proxy HTTP and WebSocket frontends enforce configured limits and
+  origin checks** — HTTP request bodies honor `ServerConfig.max_message_size`,
+  WebSocket upgrade paths validate `Origin`, and proxy browser frontends retain
+  auth/origin enforcement after migrating off deprecated adapters.
+
+### Changed
+
+- **Proxy frontends migrated to supported server transports** — runtime and CLI
+  serving paths now use `turbomcp-server` HTTP/WebSocket plumbing instead of the
+  removed `turbomcp-transport::axum` compatibility layer.
+- **CLI scaffolds and active docs now target current public APIs** — generated
+  examples use the current crate version and supported resource/tool patterns,
+  and active README/migration guidance no longer points new users at deprecated
+  surfaces.
+
+### Removed
+
+- **Deprecated `turbomcp-transport::axum` subtree deleted** — callers should use
+  `turbomcp_server::transport::http`, `McpServerExt::run_http`, or
+  `McpServerExt::into_axum_router`.
+- **Deprecated transport and client shims removed** — `StreamingTransport`,
+  `TransportType::Grpc` / `TransportType::Quic`, no-op WebSocket compression/TLS
+  builders, the no-op gRPC TLS client config field, and
+  `turbomcp-client::sampling::ServerInfo` are gone.
+
+### Fixed
+
+- **SSE and streaming decoders handle edge framing cases** — CRLF events,
+  whitespace-only lines, trailing newlines, empty `data:` events, sticky
+  overflow states, and `last_event_id` propagation now behave consistently.
+- **JSON-RPC error classification and capping tightened** — `standard_kind()`
+  only reports the five JSON-RPC standard errors, while error `data` capping now
+  recurses through arrays as well as objects.
+- **Spec optional fields are represented accurately** — cancellation
+  notifications accept missing `requestId`, resource subscribe/unsubscribe/update
+  notifications include optional `_meta`, and client logging no longer assumes a
+  cancellation id is always present.
+- **Validation utilities avoid duplicate work and retry edge cases** —
+  validation dispatch no longer runs duplicate checks for the same value, and
+  `retry_with_backoff(max_attempts = 0)` now performs the initial attempt.
+
 ## [3.1.2] - 2026-04-27
 
 Patch release: MCP 2025-11-25 spec-compliance gaps closed (cancellation routing,
@@ -97,14 +152,6 @@ swaps several hand-rolled subsystems for battle-tested crates (`governor`,
 - **`turbomcp-protocol::error_utils` deleted** — the module was a `Result<T, String>` shim from the v1 era with zero non-self consumers; every modern call site uses the unified `McpError`.
 - **`turbomcp-proxy::config::ProxyConfig` and `IdMappingStrategy`** — both had zero non-self consumers and misled API readers into thinking the proxy honored `session_timeout` / `max_sessions` / `request_timeout` knobs.
 - **`turbomcp-types`: inert `schema = ["dep:schemars"]` feature and unused `schemars` workspace dep removed** — `alloc` and `experimental-tasks` features documented as currently-decorative.
-
-### Deprecated
-
-- **`turbomcp-transport::axum` subtree** — `crates/turbomcp-transport/src/axum/`. `AxumMcpExt`, `McpAppState`, `McpServerConfig`, and `McpService` are `#[deprecated(since = "3.1.2")]` at their source definitions, so any path that resolves to them emits a migration warning. The subtree predates the MCP 2025-11-25 Streamable HTTP rework and lacks `Mcp-Session-Id` lifecycle, `Last-Event-ID` resumption, and the unified `/mcp` method-multiplexed endpoint that `turbomcp-server::transport::http` already implements.
-
-  **Migration**: serve over `turbomcp_server::transport::http` instead. For server crates, prefer the `#[server]` macro's transport selection (`Transport::http("0.0.0.0:8080")` requires the `http` feature). The deprecated subtree continues to compile until removal in a future major release.
-- **WebSocket `enable_compression` and `tls_config` fields** — `with_compression` / `with_tls_config` builders are `#[deprecated(since = "3.1.2")]`. tungstenite 0.29 does not implement RFC 7692 permessage-deflate; `tls_config`'s per-cert fields were never consulted (TLS still works via tokio-tungstenite's default rustls connector).
-- **`turbomcp-client::sampling::ServerInfo`** — use `LlmServerInfo`. Pre-3.1.2 the prelude shadowed the MCP `Implementation`/`InitializeResult.server_info` shape.
 
 ### Fixed
 

@@ -168,7 +168,7 @@ error type. See the top-level MIGRATION.md for the full error variant mapping.
 ```toml
 # Cargo.toml
 [dependencies]
-turbomcp-client = "3.0"
+turbomcp-client = "3.1.2"
 ```
 
 ---

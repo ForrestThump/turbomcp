@@ -16,16 +16,18 @@ Telemetry features include:
 
 ```toml
 [dependencies]
-turbomcp-telemetry = "3.0"
+turbomcp-telemetry = "3.1.2"
 ```
 
 ## Feature Flags
 
 | Feature | Description | Default |
 |---------|-------------|---------|
-| `opentelemetry` | Full OpenTelemetry with OTLP export | Yes |
+| `tracing-json` | JSON tracing output | Yes |
+| `tracing-pretty` | Pretty tracing output | No |
+| `opentelemetry` | Full OpenTelemetry with OTLP export | No |
 | `prometheus` | Standalone Prometheus metrics | No |
-| `tower` | Tower middleware for instrumentation | Yes |
+| `tower` | Tower middleware for instrumentation | No |
 | `full` | All features | No |
 
 ## Quick Start

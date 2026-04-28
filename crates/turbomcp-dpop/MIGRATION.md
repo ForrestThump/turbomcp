@@ -11,10 +11,10 @@ see the [top-level MIGRATION.md](../../MIGRATION.md).
 
 ```toml
 [dependencies]
-turbomcp-dpop = "3.0"
+turbomcp-dpop = "3.1.2"
 
 # Or via the umbrella crate with auth feature:
-turbomcp = { version = "3.0", features = ["auth", "dpop"] }
+turbomcp = { version = "3.1.2", features = ["auth", "dpop"] }
 ```
 
 ### RSA algorithm removal

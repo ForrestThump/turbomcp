@@ -26,7 +26,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-turbomcp = "3.0.2"
+turbomcp = "3.1.2"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -48,7 +48,7 @@ TurboMCP v3 has a modular architecture with optional features for different use 
 ### Minimal (STDIO only)
 
 ```toml
-turbomcp = "3.0.2"
+turbomcp = "3.1.2"
 ```
 
 - Just STDIO transport
@@ -58,10 +58,10 @@ turbomcp = "3.0.2"
 ### Full Stack (All Transports + Auth)
 
 ```toml
-turbomcp = { version = "3.0.2", features = ["full"] }
+turbomcp = { version = "3.1.2", features = ["full", "auth"] }
 ```
 
-- All transports (STDIO, HTTP, WebSocket, TCP, Unix, gRPC)
+- All facade transports (STDIO, Streamable HTTP, WebSocket, TCP, Unix)
 - OAuth 2.1 authentication
 - OpenTelemetry observability
 - All built-in injectables
@@ -72,46 +72,48 @@ turbomcp = { version = "3.0.2", features = ["full"] }
 **For HTTP servers:**
 
 ```toml
-turbomcp = { version = "3.0.2", features = ["http", "websocket"] }
+turbomcp = { version = "3.1.2", features = ["http", "websocket"] }
 tokio = { version = "1", features = ["full"] }
 ```
 
-**For gRPC transport (v3):**
+**For gRPC transport:**
 
 ```toml
-turbomcp = { version = "3.0.2", features = ["grpc"] }
+turbomcp-grpc = "3.1.2"
 tokio = { version = "1", features = ["full"] }
 ```
 
 **For OAuth authentication:**
 
 ```toml
-turbomcp = { version = "3.0.2", features = ["http", "auth"] }
+turbomcp = { version = "3.1.2", features = ["http", "auth"] }
 ```
 
 **For DPoP token binding:**
 
 ```toml
-turbomcp = { version = "3.0.2", features = ["http", "auth", "dpop"] }
+turbomcp = { version = "3.1.2", features = ["http", "auth", "dpop"] }
 ```
 
 **For performance-critical applications:**
 
 ```toml
-turbomcp = { version = "3.0.2", features = ["full", "simd"] }
+turbomcp = { version = "3.1.2", features = ["full"] }
 ```
+
+SIMD JSON support is provided by lower-level protocol codecs; there is no `simd` feature on the `turbomcp` facade crate.
 
 **For OpenTelemetry observability (v3):**
 
 ```toml
-turbomcp = { version = "3.0.2", features = ["http", "telemetry"] }
+turbomcp = { version = "3.1.2", features = ["http", "telemetry"] }
 ```
 
 **For WASM/browser clients (v3):**
 
 ```toml
 # In a separate crate targeting wasm32
-turbomcp-wasm = "3.0"
+turbomcp-wasm = "3.1.2"
 ```
 
 ## Feature Reference
@@ -121,11 +123,13 @@ turbomcp-wasm = "3.0"
 | Feature | Use Case | Crate |
 |---------|----------|-------|
 | `stdio` | Standard I/O transport (default) | turbomcp-stdio |
-| `http` | HTTP + Server-Sent Events | turbomcp-http |
+| `http` | Streamable HTTP + Server-Sent Events | turbomcp-http / turbomcp-server |
 | `websocket` | WebSocket support | turbomcp-websocket |
 | `tcp` | TCP networking | turbomcp-tcp |
 | `unix` | Unix socket support | turbomcp-unix |
-| `grpc` | gRPC transport (v3) | turbomcp-grpc |
+| `channel` | In-process testing transport | turbomcp-server |
+
+gRPC is available through the separate `turbomcp-grpc` crate, not a facade feature.
 
 ### Security Features
 
@@ -134,12 +138,6 @@ turbomcp-wasm = "3.0"
 | `auth` | OAuth 2.1 authentication | oauth2, jsonwebtoken |
 | `dpop` | DPoP token binding (RFC 9449) | ring, zeroize |
 | `redis-storage` | Redis-based DPoP nonce tracking | redis |
-
-### Performance Features
-
-| Feature | Use Case | Extra Dependencies |
-|---------|----------|-------------------|
-| `simd` | SIMD-accelerated JSON | simd-json, sonic-rs |
 
 ### Observability Features (v3)
 
@@ -151,9 +149,10 @@ turbomcp-wasm = "3.0"
 
 | Feature | Description |
 |---------|-------------|
-| `full` | All features enabled |
-| `network` | STDIO + TCP transports |
-| `server-only` | TCP + Unix (no STDIO) |
+| `full` | All server transports plus telemetry |
+| `full-stack` | `full` plus all client transports |
+| `all-transports` | Server transports including `channel`, without telemetry |
+| `minimal` | STDIO only |
 
 ## v3 Feature Simplification
 
@@ -171,7 +170,7 @@ Only experimental features require feature flags:
 
 ```toml
 # Experimental tasks API
-turbomcp = { version = "3.0.2", features = ["experimental-tasks"] }
+turbomcp = { version = "3.1.2", features = ["experimental-tasks"] }
 ```
 
 ## Using Individual Crates
@@ -181,25 +180,25 @@ For fine-grained control, you can depend on individual crates:
 ```toml
 [dependencies]
 # Core types (no_std compatible)
-turbomcp-core = "3.0"
+turbomcp-core = "3.1.2"
 
 # Protocol implementation
-turbomcp-protocol = "3.0"
+turbomcp-protocol = "3.1.2"
 
 # Just HTTP transport
-turbomcp-http = "3.0"
+turbomcp-http = "3.1.2"
 
 # Just gRPC transport
-turbomcp-grpc = "3.0"
+turbomcp-grpc = "3.1.2"
 
 # Wire codec abstraction
-turbomcp-wire = "3.0"
+turbomcp-wire = "3.1.2"
 
 # OpenTelemetry integration
-turbomcp-telemetry = "3.0"
+turbomcp-telemetry = "3.1.2"
 
 # WASM bindings (for browser targets)
-turbomcp-wasm = "3.0"
+turbomcp-wasm = "3.1.2"
 ```
 
 ## Verify Installation
@@ -213,7 +212,7 @@ cargo build
 You should see output like:
 
 ```
-   Compiling turbomcp v3.0.0
+   Compiling turbomcp v3.1.2
     Finished `dev` [unoptimized + debuginfo] target(s) in 12.34s
 ```
 
@@ -233,7 +232,7 @@ Make sure you have tokio in your dependencies:
 ```toml
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-turbomcp = "3.0.2"
+turbomcp = "3.1.2"
 ```
 
 ### `error: extern crate 'turbomcp' is unused`
@@ -246,10 +245,10 @@ TurboMCP has many optional features. If you only need STDIO, don't enable unnece
 
 ```toml
 # Fast compilation, minimal features
-turbomcp = "3.0.2"  # Just STDIO
+turbomcp = "3.1.2"  # Just STDIO
 
 # Slow compilation, all features
-turbomcp = { version = "3.0.2", features = ["full"] }
+turbomcp = { version = "3.1.2", features = ["full"] }
 ```
 
 ### `error: failed to resolve: use of undeclared crate or module 'McpResult'`

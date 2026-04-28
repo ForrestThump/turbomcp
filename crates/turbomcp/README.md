@@ -53,7 +53,7 @@ Rust SDK for the Model Context Protocol (MCP) with comprehensive specification s
 
 ### Multi-Transport Support
 - STDIO - Command-line integration with protocol compliance
-- **HTTP/SSE** - HTTP streaming with session management and TLS support
+- **Streamable HTTP** - MCP HTTP transport with session management and SSE support
 - **WebSocket** - Real-time bidirectional communication with connection lifecycle management
 - **TCP** - Direct socket connections with connection pooling
 - **Unix Sockets** - Local inter-process communication with file permissions
@@ -361,20 +361,20 @@ rather than calling an `authenticated_user()` helper. See the
 
 ### Security Configuration
 
-Configure comprehensive security features:
+Configure HTTP origin policy through the spec-compliant server builder:
 
 ```rust
-use turbomcp_transport::{AxumMcpExt, McpServerConfig};
+use turbomcp_server::{McpServerExt, ServerConfig};
 
-let config = McpServerConfig::production()
-    .with_cors_origins(vec!["https://app.example.com".to_string()])
-    .with_custom_csp("default-src 'self'; connect-src 'self' wss:")
-    .with_rate_limit(120, 20)  // 120 req/min, 20 burst
-    .with_jwt_auth("your-secret-key".to_string());
+let config = ServerConfig::builder()
+    .allow_origin("https://app.example.com")
+    .max_message_size(10 * 1024 * 1024)
+    .build();
 
-let app = Router::new()
-    .route("/api/status", get(status_handler))
-    .merge(Router::<()>::turbo_mcp_routes_for_merge(mcp_service, config));
+let app = MyServer::new()
+    .builder()
+    .with_config(config)
+    .into_axum_router();
 ```
 
 ## Transport Configuration
@@ -391,7 +391,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-### HTTP/SSE Transport
+### Streamable HTTP Transport
 
 For web applications and browser integration:
 
@@ -823,7 +823,7 @@ cargo run --example test_client
 When using `default-features = false`, you must explicitly enable at least one transport feature to have a functional MCP server. The available transport features are:
 
 - `stdio` - STDIO transport (included in default features)
-- `http` - HTTP/SSE transport
+- `http` - Streamable HTTP transport
 - `websocket` - WebSocket transport
 - `tcp` - TCP transport
 - `unix` - Unix socket transport

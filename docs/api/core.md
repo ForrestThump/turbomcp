@@ -18,10 +18,10 @@ turbomcp-core (no_std)
 ```toml
 [dependencies]
 # With std (default)
-turbomcp-core = "3.0"
+turbomcp-core = "3.1.2"
 
 # For no_std environments
-turbomcp-core = { version = "3.0", default-features = false }
+turbomcp-core = { version = "3.1.2", default-features = false }
 ```
 
 ## Feature Flags

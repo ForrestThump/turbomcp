@@ -51,10 +51,10 @@
 //! async fn fetch(req: Request, _env: Env, _ctx: Context) -> Result<Response> {
 //!     let server = McpServer::builder("my-mcp-server", "1.0.0")
 //!         .description("My MCP server running on Cloudflare Workers")
-//!         .with_tool("hello", "Say hello to someone", |args: HelloArgs| async move {
+//!         .tool("hello", "Say hello to someone", |args: HelloArgs| async move {
 //!             Ok(ToolResult::text(format!("Hello, {}!", args.name)))
 //!         })
-//!         .with_tool("add", "Add two numbers", |args: AddArgs| async move {
+//!         .tool("add", "Add two numbers", |args: AddArgs| async move {
 //!             Ok(ToolResult::text(format!("{}", args.a + args.b)))
 //!         })
 //!         .build();
@@ -68,7 +68,7 @@
 //! ```toml
 //! # Cargo.toml
 //! [dependencies]
-//! turbomcp-wasm = { version = "3.1", default-features = false, features = ["wasm-server"] }
+//! turbomcp-wasm = { version = "3.1.2", default-features = false, features = ["wasm-server"] }
 //! worker = "0.8"
 //! serde = { version = "1.0", features = ["derive"] }
 //! schemars = "1.2"  # For automatic JSON schema generation
@@ -135,10 +135,10 @@
 //!
 //! ```toml
 //! [dependencies]
-//! turbomcp-wasm = { version = "3.0", default-features = false, features = ["macros"] }
-//! worker = "0.7"
+//! turbomcp-wasm = { version = "3.1.2", default-features = false, features = ["macros"] }
+//! worker = "0.8"
 //! serde = { version = "1.0", features = ["derive"] }
-//! schemars = "1.0"
+//! schemars = "1.2"
 //! ```
 //!
 //! # WASI Usage (Client)

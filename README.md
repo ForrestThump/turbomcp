@@ -86,7 +86,7 @@ TurboMCP uses feature flags for progressive enhancement. The default is `stdio` 
 | Feature | Description |
 |---------|-------------|
 | `stdio` | Standard I/O transport (default) |
-| `http` | HTTP/SSE with Axum integration |
+| `http` | Streamable HTTP transport |
 | `websocket` | WebSocket bidirectional transport |
 | `tcp` | Raw TCP socket transport |
 | `unix` | Unix domain socket transport |
@@ -185,7 +185,7 @@ MyServer.builder()
 
 Available `run_*` methods (when features are enabled):
 - `run_stdio()` — STDIO transport
-- `run_http(addr)` — HTTP/SSE with Axum
+- `run_http(addr)` — Streamable HTTP
 - `run_tcp(addr)` — Raw TCP
 - `run_unix(path)` — Unix domain socket
 
@@ -296,7 +296,7 @@ See the [Examples Guide](./crates/turbomcp/examples/README.md) for learning path
 | Transport | Feature | Use Case |
 |-----------|---------|----------|
 | STDIO | `stdio` (default) | Claude Desktop, CLI tools |
-| HTTP/SSE | `http` | Web applications, REST APIs |
+| Streamable HTTP | `http` | Web applications, REST APIs |
 | WebSocket | `websocket` | Real-time bidirectional |
 | TCP | `tcp` | High-throughput clusters |
 | Unix Socket | `unix` | Container IPC |

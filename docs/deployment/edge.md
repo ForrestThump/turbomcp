@@ -126,11 +126,11 @@ edition = "2024"
 crate-type = ["cdylib"]
 
 [dependencies]
-turbomcp-wasm = { version = "3.0", default-features = false, features = ["wasm-server"] }
-worker = "0.7"
+turbomcp-wasm = { version = "3.1.2", default-features = false, features = ["wasm-server"] }
+worker = "0.8"
 serde = { version = "1.0", features = ["derive"] }
-schemars = "1.0"
-getrandom = { version = "0.3", features = ["wasm_js"] }
+schemars = "1.2"
+getrandom = { version = "0.4", features = ["wasm_js"] }
 ```
 
 **src/lib.rs:**
@@ -158,15 +158,15 @@ async fn fetch(req: Request, _env: Env, _ctx: Context) -> Result<Response> {
         .instructions("Use the hello and add tools to get started")
 
         // Register tools with automatic schema generation
-        .with_tool("hello", "Say hello to someone", |args: HelloArgs| async move {
+        .tool("hello", "Say hello to someone", |args: HelloArgs| async move {
             Ok(ToolResult::text(format!("Hello, {}!", args.name)))
         })
-        .with_tool("add", "Add two numbers", |args: AddArgs| async move {
+        .tool("add", "Add two numbers", |args: AddArgs| async move {
             Ok(ToolResult::text(format!("{}", args.a + args.b)))
         })
 
         // Static resource
-        .with_resource(
+        .resource(
             "config://settings",
             "Server Settings",
             "Current server configuration",

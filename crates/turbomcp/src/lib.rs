@@ -91,15 +91,15 @@
 //!
 //! ```toml
 //! # Minimal (STDIO only, recommended for CLI tools)
-//! turbomcp = { version = "3.0", default-features = false, features = ["minimal"] }
+//! turbomcp = { version = "3.1.2", default-features = false, features = ["minimal"] }
 //!
 //! # Full (all transports)
-//! turbomcp = { version = "3.0", features = ["full"] }
+//! turbomcp = { version = "3.1.2", features = ["full"] }
 //! ```
 //!
 //! Available features:
 //! - `stdio` - Standard I/O transport (default, works with Claude Desktop)
-//! - `http` - HTTP/SSE transport
+//! - `http` - Streamable HTTP transport
 //! - `websocket` - WebSocket bidirectional transport
 //! - `tcp` - Raw TCP socket transport
 //! - `unix` - Unix domain socket transport

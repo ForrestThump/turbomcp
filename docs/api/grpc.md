@@ -16,7 +16,7 @@ gRPC transport offers:
 
 ```toml
 [dependencies]
-turbomcp-grpc = "3.0"
+turbomcp-grpc = "3.1.2"
 tokio = { version = "1", features = ["full"] }
 ```
 

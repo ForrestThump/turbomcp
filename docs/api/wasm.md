@@ -591,19 +591,19 @@ The `wasm-server` feature provides server-side MCP implementation for edge platf
 === "Builder API"
     ```toml
     [dependencies]
-    turbomcp-wasm = { version = "3.0", default-features = false, features = ["wasm-server"] }
-    worker = "0.7"
+    turbomcp-wasm = { version = "3.1.2", default-features = false, features = ["wasm-server"] }
+    worker = "0.8"
     serde = { version = "1.0", features = ["derive"] }
-    schemars = "1.0"
+    schemars = "1.2"
     ```
 
 === "Macros (Zero-Boilerplate)"
     ```toml
     [dependencies]
-    turbomcp-wasm = { version = "3.0", default-features = false, features = ["macros"] }
-    worker = "0.7"
+    turbomcp-wasm = { version = "3.1.2", default-features = false, features = ["macros"] }
+    worker = "0.8"
     serde = { version = "1.0", features = ["derive"] }
-    schemars = "1.0"
+    schemars = "1.2"
     ```
 
 ### Prelude Module

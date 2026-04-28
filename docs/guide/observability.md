@@ -142,9 +142,9 @@ TurboMCP v3 provides first-class OpenTelemetry support via `turbomcp-telemetry`:
 
 ```toml
 [dependencies]
-turbomcp = { version = "3.0", features = ["telemetry"] }
+turbomcp = { version = "3.1.2", features = ["telemetry"] }
 # Or use the crate directly
-turbomcp-telemetry = "3.0"
+turbomcp-telemetry = "3.1.2"
 ```
 
 ### Configuration
@@ -500,4 +500,3 @@ Logging and tracing have minimal performance impact:
 - **[Advanced Patterns](advanced-patterns.md)** - Complex observability setups
 - **[Deployment](../deployment/production.md)** - Production monitoring setup
 - **[Examples](../examples/basic.md)** - Real-world observability examples
-

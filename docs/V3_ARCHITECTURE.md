@@ -222,7 +222,7 @@ The `#[server]` macro generates:
 
 1. **JSON-RPC router** - route requests to McpHandler methods
 2. **STDIO transport** - read/write JSON-RPC over stdin/stdout
-3. **HTTP transport** - Axum-based HTTP/SSE server
+3. **HTTP transport** - Streamable HTTP server
 4. **WebSocket transport** - bidirectional support
 
 ### Phase 4: Integration
