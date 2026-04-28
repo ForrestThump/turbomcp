@@ -37,10 +37,6 @@ tower-layer = "0.3"
 futures-util = "0.3"
 parking_lot = "0.12"
 
-# Legacy Tower integration (deprecated, kept for compatibility)
-pin-project-lite = { version = "0.2", optional = true }
-http = { version = "1.4", optional = true }
-
 [dev-dependencies]
 bytes = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -57,6 +53,3 @@ unix = ["turbomcp-transport/unix"]
 
 # Experimental features (pass-through to turbomcp-protocol)
 experimental-tasks = ["turbomcp-protocol/experimental-tasks"]
-
-# Legacy Tower adapter (deprecated - middleware module is always available)
-tower = ["dep:pin-project-lite", "dep:http"]

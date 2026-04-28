@@ -6,7 +6,7 @@
 //! ## Overview
 //!
 //! This crate defines:
-//! - **Traits**: [`Transport`], [`BidirectionalTransport`], [`StreamingTransport`], [`TransportFactory`]
+//! - **Traits**: [`Transport`], [`BidirectionalTransport`], [`TransportFactory`]
 //! - **Types**: [`TransportType`], [`TransportState`], [`TransportCapabilities`], [`TransportMessage`]
 //! - **Errors**: [`TransportError`], [`TransportResult`]
 //! - **Config**: [`LimitsConfig`], [`TimeoutConfig`], [`TlsConfig`]
@@ -55,7 +55,7 @@ pub use error::{TransportError, TransportResult};
 pub use events::{TransportEvent, TransportEventEmitter};
 pub use message::{TransportMessage, TransportMessageMetadata};
 pub use metrics::{AtomicMetrics, TransportMetrics};
-pub use traits::{BidirectionalTransport, StreamingTransport, Transport, TransportFactory};
+pub use traits::{BidirectionalTransport, Transport, TransportFactory};
 pub use types::{TransportCapabilities, TransportConfig, TransportState, TransportType};
 
 // Re-export validation functions

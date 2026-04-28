@@ -4,9 +4,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
-use futures::{Sink, Stream};
-
-use crate::error::{TransportError, TransportResult};
+use crate::error::TransportResult;
 use crate::message::TransportMessage;
 use crate::metrics::TransportMetrics;
 use crate::types::{TransportCapabilities, TransportConfig, TransportState, TransportType};
@@ -90,25 +88,6 @@ pub trait BidirectionalTransport: Transport {
         &self,
         correlation_id: &str,
     ) -> Pin<Box<dyn Future<Output = TransportResult<()>> + Send + '_>>;
-}
-
-/// A trait for transports that support streaming data.
-pub trait StreamingTransport: Transport {
-    /// The type of the stream used for sending messages.
-    type SendStream: Stream<Item = TransportResult<TransportMessage>> + Send + Unpin;
-
-    /// The type of the sink used for receiving messages.
-    type ReceiveStream: Sink<TransportMessage, Error = TransportError> + Send + Unpin;
-
-    /// Returns a stream for sending messages.
-    fn send_stream(
-        &self,
-    ) -> Pin<Box<dyn Future<Output = TransportResult<Self::SendStream>> + Send + '_>>;
-
-    /// Returns a sink for receiving messages.
-    fn receive_stream(
-        &self,
-    ) -> Pin<Box<dyn Future<Output = TransportResult<Self::ReceiveStream>> + Send + '_>>;
 }
 
 /// A factory for creating instances of a specific transport type.

@@ -345,7 +345,6 @@ pub struct TransportStatus {
 }
 
 #[cfg(test)]
-#[allow(deprecated)] // tests construct configs with the deprecated `enable_compression` field
 mod tests {
     use super::*;
     use crate::config::WebSocketBidirectionalConfig;
@@ -364,7 +363,6 @@ mod tests {
     #[tokio::test]
     async fn test_transport_capabilities() {
         let config = WebSocketBidirectionalConfig {
-            enable_compression: true,
             max_message_size: 1024,
             ..Default::default()
         };
@@ -373,9 +371,7 @@ mod tests {
         let capabilities = transport.capabilities();
         assert!(capabilities.supports_bidirectional);
         assert!(capabilities.supports_streaming);
-        // Compression is intentionally always advertised as off — see
-        // `create_capabilities`. Asking for it via the deprecated
-        // `enable_compression` field cannot flip the bit on, because the
+        // Compression is intentionally always advertised as off because the
         // underlying tungstenite stack does not implement permessage-deflate.
         assert!(!capabilities.supports_compression);
         assert_eq!(capabilities.max_message_size, Some(1024));

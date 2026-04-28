@@ -2,7 +2,7 @@
 //!
 //! This test suite provides complete coverage of WebSocket transport functionality,
 //! including connection lifecycle, bidirectional communication, error handling,
-//! keep-alive, compression, TLS, concurrent connections, and performance under load.
+//! keep-alive, secure URLs, concurrent connections, and performance under load.
 //!
 //! **Test Standards:**
 //! - NO MOCKS: All tests use real WebSocket servers
@@ -11,11 +11,6 @@
 //! - Concurrent: Tests validate behavior under concurrent load
 
 #![cfg(feature = "websocket")]
-// In-tree test exercises the deprecated `with_compression` / `with_tls_config`
-// builder methods to prove the no-op fields still thread through for source
-// compatibility. The deprecation message is for external consumers.
-#![allow(deprecated)]
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,7 +27,7 @@ use turbomcp_transport::core::{
     Transport, TransportMessage, TransportMessageMetadata, TransportState,
 };
 use turbomcp_transport::websocket_bidirectional::{
-    ReconnectConfig, TlsConfig, WebSocketBidirectionalConfig, WebSocketBidirectionalTransport,
+    ReconnectConfig, WebSocketBidirectionalConfig, WebSocketBidirectionalTransport,
 };
 use uuid::Uuid;
 
@@ -805,17 +800,9 @@ async fn test_websocket_keep_alive_maintains_connection() {
     server.stop().await;
 }
 
-// ============================================================================
-// Compression Tests
-// ============================================================================
-
 #[tokio::test]
-async fn test_websocket_compression_enabled() {
-    // `with_compression(true)` is a documented no-op: permessage-deflate is
-    // not implemented in tungstenite 0.29, so capabilities ALWAYS advertise
-    // no compression to avoid a false promise. Test reflects that.
-    let config =
-        WebSocketBidirectionalConfig::client("ws://example.com".to_string()).with_compression(true);
+async fn test_websocket_does_not_advertise_compression() {
+    let config = WebSocketBidirectionalConfig::client("ws://example.com".to_string());
 
     let transport = WebSocketBidirectionalTransport::new(config)
         .await
@@ -827,53 +814,17 @@ async fn test_websocket_compression_enabled() {
 }
 
 #[tokio::test]
-async fn test_websocket_compression_disabled() {
-    let config = WebSocketBidirectionalConfig::client("ws://example.com".to_string())
-        .with_compression(false);
+async fn test_websocket_wss_url_configures_secure_endpoint() {
+    let config = WebSocketBidirectionalConfig::client("wss://example.com".to_string());
 
     let transport = WebSocketBidirectionalTransport::new(config)
         .await
         .expect("Failed to create transport");
 
-    let capabilities = transport.capabilities();
-    assert!(!capabilities.supports_compression);
-    assert!(capabilities.compression_algorithms.is_empty());
-}
-
-// ============================================================================
-// TLS/WSS Tests
-// ============================================================================
-
-#[tokio::test]
-async fn test_websocket_tls_config() {
-    let tls_config = TlsConfig::with_client_cert("cert.pem".to_string(), "key.pem".to_string());
-
-    let config = WebSocketBidirectionalConfig::client("wss://secure.example.com".to_string())
-        .with_tls_config(tls_config.clone());
-
-    let transport = WebSocketBidirectionalTransport::new(config)
-        .await
-        .expect("Failed to create transport");
-
-    // Verify TLS config is stored
-    assert!(transport.config.lock().tls_config.is_some());
-}
-
-#[tokio::test]
-async fn test_websocket_tls_insecure() {
-    let tls_config = TlsConfig::insecure();
-
-    let config = WebSocketBidirectionalConfig::client("wss://example.com".to_string())
-        .with_tls_config(tls_config);
-
-    let transport = WebSocketBidirectionalTransport::new(config)
-        .await
-        .expect("Failed to create transport");
-
-    // Verify insecure mode
-    let config_guard = transport.config.lock();
-    assert!(config_guard.tls_config.is_some());
-    assert!(config_guard.tls_config.as_ref().unwrap().skip_verify);
+    assert_eq!(
+        transport.config.lock().url.as_deref(),
+        Some("wss://example.com")
+    );
 }
 
 // ============================================================================

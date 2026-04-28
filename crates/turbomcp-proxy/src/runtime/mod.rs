@@ -3,10 +3,6 @@
 //! This module provides dynamic proxying capabilities without code generation.
 //! Ideal for development, testing, and prototyping.
 
-// In-tree consumer of the deprecated `turbomcp_transport::axum` subtree.
-// See `cli/commands/serve.rs` for the migration plan.
-#![allow(deprecated)]
-//!
 //! # Security Features
 //!
 //! - Command injection protection via allowlist
@@ -994,11 +990,11 @@ impl RuntimeProxy {
 
     /// Run HTTP frontend using Axum and `ProxyService`
     async fn run_http(&mut self, bind: &str) -> ProxyResult<()> {
-        use axum::{Router, http::StatusCode, middleware};
+        use axum::{http::StatusCode, middleware};
         use std::time::Duration;
         use tower_http::limit::RequestBodyLimitLayer;
         use tower_http::timeout::TimeoutLayer;
-        use turbomcp_transport::axum::AxumMcpExt;
+        use turbomcp_server::McpServerExt;
 
         debug!("Starting HTTP frontend on {}", bind);
 
@@ -1021,8 +1017,17 @@ impl RuntimeProxy {
         //   - request_size_limit: Prevents memory exhaustion DoS
         //   - timeout_ms: Prevents hanging requests (STDIO uses tokio::time::timeout, HTTP uses Tower layer)
         let allowlist = self.origin_allowlist.clone();
-        let mut app = Router::new()
-            .turbo_mcp_routes(service)
+        let server_config = turbomcp_server::ServerConfig::builder()
+            .max_message_size(self.request_size_limit)
+            // The proxy owns its stricter browser-origin policy in origin_guard:
+            // no Origin is allowed for server-to-server clients, any Origin must
+            // match the explicit allowlist.
+            .allow_any_origin(true)
+            .build();
+        let mut app = service
+            .builder()
+            .with_config(server_config)
+            .into_axum_router()
             .layer(middleware::from_fn_with_state(
                 allowlist.clone(),
                 origin_guard,
@@ -1044,21 +1049,18 @@ impl RuntimeProxy {
         debug!("HTTP frontend listening on {}", bind);
 
         // 5. Start Axum server
-        axum::serve(listener, app)
-            .await
-            .map_err(|e| ProxyError::backend(format!("Axum serve error: {e}")))?;
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .map_err(|e| ProxyError::backend(format!("Axum serve error: {e}")))?;
 
         Ok(())
     }
 
     /// Run WebSocket frontend using Axum and `ProxyService`
     async fn run_websocket(&mut self, bind: &str) -> ProxyResult<()> {
-        use axum::{Router, http::StatusCode, middleware};
-        use std::time::Duration;
-        use tower_http::limit::RequestBodyLimitLayer;
-        use tower_http::timeout::TimeoutLayer;
-        use turbomcp_transport::axum::AxumMcpExt;
-
         debug!("Starting WebSocket frontend on {}", bind);
 
         // 1. Introspect backend to get ServerSpec
@@ -1074,39 +1076,25 @@ impl RuntimeProxy {
         // 2. Create ProxyService (takes ownership, so clone backend)
         let service = ProxyService::new(self.backend.clone(), spec);
 
-        // 3. Create Axum router with MCP routes (WebSocket support included via AxumMcpExt)
-        // Note: turbo_mcp_routes() provides both HTTP/SSE and WebSocket endpoints
-        // Security layers applied:
-        //   - origin_guard / cors: Reject browser-origin requests not on allowlist
-        //   - request_size_limit: Prevents memory exhaustion DoS
-        //   - timeout_ms: Prevents hanging WebSocket connections
-        let allowlist = self.origin_allowlist.clone();
-        let mut app = Router::new()
-            .turbo_mcp_routes(service)
-            .layer(middleware::from_fn_with_state(
-                allowlist.clone(),
-                origin_guard,
-            ))
-            .layer(RequestBodyLimitLayer::new(self.request_size_limit))
-            .layer(TimeoutLayer::with_status_code(
-                StatusCode::REQUEST_TIMEOUT,
-                Duration::from_millis(self.timeout_ms),
-            ));
-        if let Some(cors) = build_cors_layer(&allowlist) {
-            app = app.layer(cors);
+        // 3. Run the supported WebSocket transport. It validates browser
+        // Origin headers during upgrade using the same explicit allowlist.
+        let mut config_builder = turbomcp_server::ServerConfig::builder()
+            .max_message_size(self.request_size_limit)
+            .allow_localhost_origins(false);
+        for origin in self
+            .origin_allowlist
+            .header_values()
+            .filter_map(|origin| origin.to_str().ok())
+        {
+            config_builder = config_builder.allow_origin(origin.to_owned());
         }
-
-        // 4. Parse bind address
-        let listener = tokio::net::TcpListener::bind(bind).await.map_err(|e| {
-            ProxyError::backend_connection(format!("Failed to bind to {bind}: {e}"))
-        })?;
+        let server_config = config_builder.build();
 
         debug!("WebSocket frontend listening on {}", bind);
 
-        // 5. Start Axum server
-        axum::serve(listener, app)
+        turbomcp_server::transport::websocket::run_with_config(&service, bind, &server_config)
             .await
-            .map_err(|e| ProxyError::backend(format!("Axum serve error: {e}")))?;
+            .map_err(|e| ProxyError::backend(format!("WebSocket server error: {e}")))?;
 
         Ok(())
     }

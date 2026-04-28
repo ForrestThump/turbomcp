@@ -1,20 +1,10 @@
-//! `ProxyService` - MCP service that forwards requests to backend servers
-//!
-//! This service implements the `McpService` trait from turbomcp-transport,
-//! enabling it to be used with the Axum integration for HTTP/SSE transport.
+//! `ProxyService` - MCP handler that forwards requests to backend servers.
 
-// In-tree consumer of the deprecated `turbomcp_transport::axum` subtree.
-// See `cli/commands/serve.rs` for the migration plan.
-#![allow(deprecated)]
-
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use serde_json::Value;
 use tracing::{debug, error, trace};
 use turbomcp_protocol::{Error as McpError, Result as McpResult, jsonrpc::JsonRpcRequest};
-use turbomcp_transport::tower::SessionInfo;
 
 use super::BackendConnector;
 use crate::error::ProxyError;
@@ -31,9 +21,9 @@ fn proxy_error_to_mcp(err: ProxyError) -> McpError {
 
 /// Proxy service that forwards MCP requests to a backend server
 ///
-/// This service implements the `McpService` trait, allowing it to be used
-/// with turbomcp-transport's Axum integration for HTTP/SSE transport.
-/// All requests are forwarded to the backend server via turbomcp-client.
+/// This service implements `turbomcp_server::McpHandler` for the supported
+/// server transports. All requests are forwarded to the backend server via
+/// `turbomcp-client`.
 ///
 /// # Performance Note
 ///
@@ -184,25 +174,16 @@ impl ProxyService {
             }
         }
     }
-}
 
-impl turbomcp_transport::axum::McpService for ProxyService {
-    fn process_request(
-        &self,
-        request: Value,
-        _session: &SessionInfo,
-    ) -> Pin<Box<dyn Future<Output = McpResult<Value>> + Send + '_>> {
-        Box::pin(async move {
-            // Parse JSON-RPC request
-            let json_rpc_request: JsonRpcRequest = serde_json::from_value(request)
-                .map_err(|e| McpError::serialization(e.to_string()))?;
+    pub(crate) async fn process_value(&self, request: Value) -> McpResult<Value> {
+        let json_rpc_request: JsonRpcRequest =
+            serde_json::from_value(request).map_err(|e| McpError::serialization(e.to_string()))?;
 
-            // Process the request
-            self.process_jsonrpc(json_rpc_request).await
-        })
+        self.process_jsonrpc(json_rpc_request).await
     }
 
-    fn get_capabilities(&self) -> Value {
+    #[cfg(test)]
+    pub(crate) fn capabilities_value(&self) -> Value {
         // Return backend capabilities from introspection
         serde_json::json!({
             "protocolVersion": self.spec.protocol_version,
@@ -215,11 +196,251 @@ impl turbomcp_transport::axum::McpService for ProxyService {
     }
 }
 
+#[cfg(feature = "runtime")]
+fn spec_tool_to_mcp_tool(spec: &crate::introspection::ToolSpec) -> turbomcp_protocol::types::Tool {
+    use serde_json::{Map, Value};
+    use turbomcp_protocol::types::{Tool, ToolAnnotations, ToolInputSchema, ToolOutputSchema};
+
+    let mut additional = spec.input_schema.additional.clone();
+    let additional_properties = additional.remove("additionalProperties");
+    let properties = spec.input_schema.properties.as_ref().map(|properties| {
+        Value::Object(
+            properties
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect::<Map<_, _>>(),
+        )
+    });
+
+    Tool {
+        name: spec.name.clone(),
+        description: spec.description.clone(),
+        input_schema: ToolInputSchema {
+            schema_type: Some(Value::String(spec.input_schema.schema_type.clone())),
+            properties,
+            required: spec.input_schema.required.clone(),
+            additional_properties,
+            extra_keywords: additional,
+        },
+        title: spec.title.clone(),
+        annotations: spec
+            .annotations
+            .as_ref()
+            .map(|annotations| ToolAnnotations {
+                title: annotations.title.clone(),
+                read_only_hint: annotations.read_only_hint,
+                destructive_hint: annotations.destructive_hint,
+                idempotent_hint: annotations.idempotent_hint,
+                open_world_hint: annotations.open_world_hint,
+            }),
+        output_schema: spec.output_schema.as_ref().map(|schema| {
+            let mut additional = schema.additional.clone();
+            let additional_properties = additional.remove("additionalProperties");
+            let properties = schema.properties.as_ref().map(|properties| {
+                Value::Object(
+                    properties
+                        .iter()
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect::<Map<_, _>>(),
+                )
+            });
+            ToolOutputSchema {
+                schema_type: Some(Value::String(schema.schema_type.clone())),
+                properties,
+                required: schema.required.clone(),
+                additional_properties,
+                extra_keywords: additional,
+            }
+        }),
+        ..Default::default()
+    }
+}
+
+#[cfg(feature = "runtime")]
+fn spec_resource_to_mcp_resource(
+    spec: &crate::introspection::ResourceSpec,
+) -> turbomcp_protocol::types::Resource {
+    turbomcp_protocol::types::Resource {
+        uri: spec.uri.clone(),
+        name: spec.name.clone(),
+        description: spec.description.clone(),
+        title: spec.title.clone(),
+        mime_type: spec.mime_type.clone(),
+        size: spec.size,
+        ..Default::default()
+    }
+}
+
+#[cfg(feature = "runtime")]
+fn spec_prompt_to_mcp_prompt(
+    spec: &crate::introspection::PromptSpec,
+) -> turbomcp_protocol::types::Prompt {
+    use turbomcp_protocol::types::{Prompt, PromptArgument};
+
+    Prompt {
+        name: spec.name.clone(),
+        description: spec.description.clone(),
+        title: spec.title.clone(),
+        arguments: Some(
+            spec.arguments
+                .iter()
+                .map(|arg| PromptArgument {
+                    name: arg.name.clone(),
+                    title: arg.title.clone(),
+                    description: arg.description.clone(),
+                    required: arg.required,
+                })
+                .collect(),
+        ),
+        ..Default::default()
+    }
+}
+
+#[cfg(feature = "runtime")]
+fn server_capabilities_from_spec(
+    spec: &crate::introspection::ServerCapabilities,
+) -> turbomcp_protocol::types::ServerCapabilities {
+    use turbomcp_protocol::types::{
+        CompletionCapabilities, LoggingCapabilities, PromptsCapabilities, ResourcesCapabilities,
+        ServerCapabilities, ToolsCapabilities,
+    };
+
+    ServerCapabilities {
+        tools: spec.tools.as_ref().map(|tools| ToolsCapabilities {
+            list_changed: tools.list_changed,
+        }),
+        resources: spec
+            .resources
+            .as_ref()
+            .map(|resources| ResourcesCapabilities {
+                subscribe: resources.subscribe,
+                list_changed: resources.list_changed,
+            }),
+        prompts: spec.prompts.as_ref().map(|prompts| PromptsCapabilities {
+            list_changed: prompts.list_changed,
+        }),
+        logging: spec.logging.as_ref().map(|_| LoggingCapabilities {}),
+        completions: spec.completions.as_ref().map(|_| CompletionCapabilities {}),
+        experimental: spec.experimental.clone(),
+        ..Default::default()
+    }
+}
+
+#[cfg(feature = "runtime")]
+fn tool_arguments_from_value(
+    args: Value,
+) -> McpResult<Option<std::collections::HashMap<String, Value>>> {
+    match args {
+        Value::Null => Ok(None),
+        Value::Object(map) => Ok(Some(map.into_iter().collect())),
+        _ => Err(McpError::invalid_params(
+            "tools/call arguments must be an object".to_string(),
+        )),
+    }
+}
+
+#[cfg(feature = "runtime")]
+impl turbomcp_server::McpHandler for ProxyService {
+    fn server_info(&self) -> turbomcp_server::prelude::ServerInfo {
+        turbomcp_server::prelude::ServerInfo {
+            name: format!("{}-proxy", self.spec.server_info.name),
+            version: self.spec.server_info.version.clone(),
+            title: self
+                .spec
+                .server_info
+                .title
+                .as_ref()
+                .map(|title| format!("{title} Proxy")),
+            ..Default::default()
+        }
+    }
+
+    fn server_capabilities(&self) -> turbomcp_protocol::types::ServerCapabilities {
+        server_capabilities_from_spec(&self.spec.capabilities)
+    }
+
+    fn list_tools(&self) -> Vec<turbomcp_protocol::types::Tool> {
+        self.spec.tools.iter().map(spec_tool_to_mcp_tool).collect()
+    }
+
+    fn list_resources(&self) -> Vec<turbomcp_protocol::types::Resource> {
+        self.spec
+            .resources
+            .iter()
+            .map(spec_resource_to_mcp_resource)
+            .collect()
+    }
+
+    fn list_prompts(&self) -> Vec<turbomcp_protocol::types::Prompt> {
+        self.spec
+            .prompts
+            .iter()
+            .map(spec_prompt_to_mcp_prompt)
+            .collect()
+    }
+
+    async fn call_tool(
+        &self,
+        name: &str,
+        args: Value,
+        _ctx: &turbomcp_server::RequestContext,
+    ) -> McpResult<turbomcp_server::prelude::ToolResult> {
+        let result = self
+            .backend
+            .call_tool(name, tool_arguments_from_value(args)?)
+            .await
+            .map_err(proxy_error_to_mcp)?;
+
+        serde_json::from_value(result).map_err(|e| McpError::internal(e.to_string()))
+    }
+
+    async fn read_resource(
+        &self,
+        uri: &str,
+        _ctx: &turbomcp_server::RequestContext,
+    ) -> McpResult<turbomcp_server::prelude::ResourceResult> {
+        let result = self
+            .backend
+            .read_resource(uri)
+            .await
+            .map_err(proxy_error_to_mcp)?;
+
+        serde_json::to_value(result)
+            .and_then(serde_json::from_value)
+            .map_err(|e| McpError::internal(e.to_string()))
+    }
+
+    async fn get_prompt(
+        &self,
+        name: &str,
+        args: Option<Value>,
+        _ctx: &turbomcp_server::RequestContext,
+    ) -> McpResult<turbomcp_server::prelude::PromptResult> {
+        let arguments = match args {
+            Some(Value::Object(map)) => Some(map.into_iter().collect()),
+            Some(Value::Null) | None => None,
+            Some(_) => {
+                return Err(McpError::invalid_params(
+                    "prompts/get arguments must be an object".to_string(),
+                ));
+            }
+        };
+        let result = self
+            .backend
+            .get_prompt(name, arguments)
+            .await
+            .map_err(proxy_error_to_mcp)?;
+
+        serde_json::to_value(result)
+            .and_then(serde_json::from_value)
+            .map_err(|e| McpError::internal(e.to_string()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::proxy::{BackendConfig, BackendTransport};
-    use turbomcp_transport::McpService;
 
     async fn create_test_service() -> Option<ProxyService> {
         let config = BackendConfig {
@@ -254,7 +475,7 @@ mod tests {
     async fn test_service_creation() {
         if let Some(service) = create_test_service().await {
             // Verify capabilities
-            let caps = service.get_capabilities();
+            let caps = service.capabilities_value();
             assert!(caps.get("capabilities").is_some());
         }
     }
@@ -270,16 +491,7 @@ mod tests {
                 "params": {}
             });
 
-            let session = SessionInfo {
-                id: "test".to_string(),
-                created_at: std::time::Instant::now(),
-                last_activity: std::time::Instant::now(),
-                remote_addr: Some("test-client".to_string()),
-                user_agent: None,
-                metadata: std::collections::HashMap::new(),
-            };
-
-            let result = service.process_request(request, &session).await;
+            let result = service.process_value(request).await;
             assert!(result.is_ok());
         }
     }

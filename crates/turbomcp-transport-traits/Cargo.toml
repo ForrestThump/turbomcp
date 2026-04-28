@@ -15,7 +15,6 @@ rust-version = "1.89.0"
 [dependencies]
 # Core dependencies
 bytes = { workspace = true }
-futures = { workspace = true }
 tokio = { workspace = true, features = ["sync", "time"] }
 
 # Serialization
@@ -33,6 +32,3 @@ tokio-test = { workspace = true }
 
 [features]
 default = []
-# Future transport types
-grpc = []
-quic = []

@@ -2,17 +2,20 @@
 //!
 //! Runs the proxy server to bridge MCP servers across transports.
 
-// In-tree consumer of the deprecated `turbomcp_transport::axum` subtree. The
-// proxy's HTTP frontend will migrate to `turbomcp_server::transport::http` in
-// the same release window that removes this subtree; until then, suppress the
-// deprecation warning here so CI stays clean.
-#![allow(deprecated)]
+use std::sync::Arc;
 
-use axum::Router;
+use axum::{
+    extract::{Request, State},
+    http::{HeaderMap, HeaderName, StatusCode, header},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
+};
 use clap::Args;
-use secrecy::SecretString;
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
+use secrecy::{ExposeSecret, SecretString};
 use tracing::{info, warn};
-use turbomcp_transport::axum::{AxumMcpExt, McpServerConfig, config::AuthConfig};
+use turbomcp_auth::jwt::{JwtValidator, StandardClaims};
+use turbomcp_server::{McpServerExt, ServerConfig};
 
 use crate::cli::args::BackendArgs;
 use crate::error::{ProxyError, ProxyResult};
@@ -115,14 +118,23 @@ pub struct ServeCommand {
 
     /// API key header name for frontend authentication
     ///
-    /// When used with --require-auth, requests must include this header
-    /// with a valid API key. Common values: "x-api-key", "authorization"
+    /// When used with --require-auth and --api-key, requests must include this
+    /// header with the configured API key. Common values: "x-api-key",
+    /// "authorization".
     #[arg(long, value_name = "HEADER", default_value = "x-api-key")]
     pub api_key_header: String,
 
+    /// API key for frontend authentication
+    ///
+    /// When --require-auth is enabled without JWT configuration, requests must
+    /// provide this value in --api-key-header. May also be set via
+    /// `TURBOMCP_API_KEY`.
+    #[arg(long, env = "TURBOMCP_API_KEY", value_name = "KEY")]
+    pub api_key: Option<String>,
+
     /// Require authentication for all frontend requests
     ///
-    /// When enabled without --jwt-secret or --jwt-jwks-uri, uses API key authentication.
+    /// When enabled without --jwt-secret or --jwt-jwks-uri, requires --api-key.
     /// IMPORTANT: Always enable this when binding to 0.0.0.0
     #[arg(long)]
     pub require_auth: bool,
@@ -136,6 +148,176 @@ pub struct ServeCommand {
     /// installed in addition to the strict request-time check.
     #[arg(long = "allowed-origin", value_name = "ORIGIN")]
     pub allowed_origins: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+enum FrontendAuth {
+    ApiKey {
+        header: HeaderName,
+        expected: SecretString,
+    },
+    Jwt(Arc<FrontendJwtAuth>),
+}
+
+#[derive(Debug)]
+enum FrontendJwtAuth {
+    Symmetric {
+        algorithm: Algorithm,
+        secret: SecretString,
+        audiences: Vec<String>,
+        issuers: Vec<String>,
+    },
+    Jwks(JwtValidator),
+}
+
+async fn frontend_auth_middleware(
+    State(auth): State<FrontendAuth>,
+    request: Request,
+    next: Next,
+) -> Response {
+    match auth.validate(request.headers()).await {
+        Ok(()) => next.run(request).await,
+        Err(reason) => {
+            warn!(reason = %reason, "Rejecting unauthenticated frontend request");
+            unauthorized_response(&auth)
+        }
+    }
+}
+
+impl FrontendAuth {
+    async fn validate(&self, headers: &HeaderMap) -> Result<(), &'static str> {
+        match self {
+            Self::ApiKey { header, expected } => {
+                let provided = headers
+                    .get(header)
+                    .and_then(|value| value.to_str().ok())
+                    .ok_or("missing API key")?;
+                if turbomcp_auth::api_key_validation::validate_api_key(
+                    provided,
+                    expected.expose_secret(),
+                ) {
+                    Ok(())
+                } else {
+                    Err("invalid API key")
+                }
+            }
+            Self::Jwt(jwt) => {
+                let token = bearer_token(headers).ok_or("missing bearer token")?;
+                jwt.validate(token).await
+            }
+        }
+    }
+
+    const fn is_jwt(&self) -> bool {
+        matches!(self, Self::Jwt(_))
+    }
+}
+
+impl FrontendJwtAuth {
+    async fn validate(&self, token: &str) -> Result<(), &'static str> {
+        match self {
+            Self::Symmetric {
+                algorithm,
+                secret,
+                audiences,
+                issuers,
+            } => {
+                let mut validation = Validation::new(*algorithm);
+                validation.validate_nbf = true;
+                validation.leeway = 60;
+                if audiences.is_empty() {
+                    validation.validate_aud = false;
+                } else {
+                    validation.set_audience(audiences);
+                }
+                if !issuers.is_empty() {
+                    validation.set_issuer(issuers);
+                }
+                decode::<StandardClaims>(
+                    token,
+                    &DecodingKey::from_secret(secret.expose_secret().as_bytes()),
+                    &validation,
+                )
+                .map(|_| ())
+                .map_err(|_| "invalid bearer token")
+            }
+            Self::Jwks(validator) => validator
+                .validate_with_refresh(token)
+                .await
+                .map(|_| ())
+                .map_err(|_| "invalid bearer token"),
+        }
+    }
+}
+
+fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+    let (scheme, token) = value.split_once(' ')?;
+    let token = token.trim();
+    (scheme.eq_ignore_ascii_case("bearer") && !token.is_empty()).then_some(token)
+}
+
+fn unauthorized_response(auth: &FrontendAuth) -> Response {
+    let mut response = (
+        StatusCode::UNAUTHORIZED,
+        [(header::CONTENT_TYPE, "application/json")],
+        r#"{"error":"unauthorized"}"#,
+    )
+        .into_response();
+    if auth.is_jwt() {
+        response.headers_mut().insert(
+            header::WWW_AUTHENTICATE,
+            axum::http::HeaderValue::from_static("Bearer"),
+        );
+    }
+    response
+}
+
+fn parse_jwt_algorithm(value: &str) -> ProxyResult<Algorithm> {
+    match value.to_uppercase().as_str() {
+        "HS256" => Ok(Algorithm::HS256),
+        "HS384" => Ok(Algorithm::HS384),
+        "HS512" => Ok(Algorithm::HS512),
+        "RS256" => Ok(Algorithm::RS256),
+        "RS384" => Ok(Algorithm::RS384),
+        "RS512" => Ok(Algorithm::RS512),
+        "ES256" => Ok(Algorithm::ES256),
+        "ES384" => Ok(Algorithm::ES384),
+        other => Err(ProxyError::configuration(format!(
+            "Invalid JWT algorithm: {other}. Valid: HS256, HS384, HS512, RS256, RS384, RS512, ES256, ES384"
+        ))),
+    }
+}
+
+fn is_symmetric_algorithm(algorithm: Algorithm) -> bool {
+    matches!(
+        algorithm,
+        Algorithm::HS256 | Algorithm::HS384 | Algorithm::HS512
+    )
+}
+
+fn normalize_endpoint_path(path: &str) -> ProxyResult<String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err(ProxyError::configuration(
+            "HTTP endpoint path cannot be empty",
+        ));
+    }
+    if trimmed.contains('?') || trimmed.contains('#') || trimmed.contains('*') {
+        return Err(ProxyError::configuration(
+            "HTTP endpoint path must be a plain absolute path",
+        ));
+    }
+
+    let mut normalized = if trimmed.starts_with('/') {
+        trimmed.to_string()
+    } else {
+        format!("/{trimmed}")
+    };
+    while normalized.len() > 1 && normalized.ends_with('/') {
+        normalized.pop();
+    }
+    Ok(normalized)
 }
 
 impl ServeCommand {
@@ -166,6 +348,92 @@ impl ServeCommand {
         }
     }
 
+    fn build_frontend_auth(&self) -> ProxyResult<Option<FrontendAuth>> {
+        let auth_requested = self.require_auth
+            || self.jwt_secret.is_some()
+            || self.jwt_jwks_uri.is_some()
+            || self.api_key.is_some();
+        if !auth_requested {
+            return Ok(None);
+        }
+
+        if self.jwt_secret.is_some() && self.jwt_jwks_uri.is_some() {
+            return Err(ProxyError::configuration(
+                "Use either --jwt-secret or --jwt-jwks-uri, not both",
+            ));
+        }
+
+        if let Some(secret) = &self.jwt_secret {
+            let algorithm = parse_jwt_algorithm(&self.jwt_algorithm)?;
+            if !is_symmetric_algorithm(algorithm) {
+                return Err(ProxyError::configuration(format!(
+                    "--jwt-secret requires HS256, HS384, or HS512; got {algorithm:?}"
+                )));
+            }
+            info!("Enabling JWT authentication for frontend");
+            info!("   Method: Symmetric ({:?})", algorithm);
+            if !self.jwt_audience.is_empty() {
+                info!("   Audience: {}", self.jwt_audience.join(", "));
+            }
+            if !self.jwt_issuer.is_empty() {
+                info!("   Issuer: {}", self.jwt_issuer.join(", "));
+            }
+            return Ok(Some(FrontendAuth::Jwt(Arc::new(
+                FrontendJwtAuth::Symmetric {
+                    algorithm,
+                    secret: SecretString::from(secret.clone()),
+                    audiences: self.jwt_audience.clone(),
+                    issuers: self.jwt_issuer.clone(),
+                },
+            ))));
+        }
+
+        if let Some(jwks_uri) = &self.jwt_jwks_uri {
+            let algorithm = parse_jwt_algorithm(&self.jwt_algorithm)?;
+            if is_symmetric_algorithm(algorithm) {
+                return Err(ProxyError::configuration(format!(
+                    "--jwt-jwks-uri requires an asymmetric algorithm; got {algorithm:?}"
+                )));
+            }
+            if self.jwt_issuer.len() != 1 || self.jwt_audience.len() != 1 {
+                return Err(ProxyError::configuration(
+                    "--jwt-jwks-uri requires exactly one --jwt-issuer and one --jwt-audience",
+                ));
+            }
+            info!("Enabling JWT authentication for frontend");
+            info!("   Method: Asymmetric ({:?}) with JWKS", algorithm);
+            info!("   JWKS URI: {}", jwks_uri);
+            info!("   Audience: {}", self.jwt_audience[0]);
+            info!("   Issuer: {}", self.jwt_issuer[0]);
+
+            let validator = JwtValidator::with_jwks_uri(
+                self.jwt_issuer[0].clone(),
+                self.jwt_audience[0].clone(),
+                jwks_uri.clone(),
+            )
+            .with_algorithms(vec![algorithm]);
+            return Ok(Some(FrontendAuth::Jwt(Arc::new(FrontendJwtAuth::Jwks(
+                validator,
+            )))));
+        }
+
+        let api_key = self.api_key.as_ref().ok_or_else(|| {
+            ProxyError::configuration(
+                "--require-auth without JWT configuration requires --api-key or TURBOMCP_API_KEY",
+            )
+        })?;
+        let header = HeaderName::from_bytes(self.api_key_header.as_bytes())
+            .map_err(|e| ProxyError::configuration(format!("Invalid API key header name: {e}")))?;
+        info!(
+            "Enabling API key authentication (header: {})",
+            self.api_key_header
+        );
+        Ok(Some(FrontendAuth::ApiKey {
+            header,
+            expected: SecretString::from(api_key.clone()),
+        }))
+    }
+
     /// Execute with HTTP frontend
     ///
     /// Exposes a backend MCP server over HTTP/SSE for web clients.
@@ -193,101 +461,52 @@ impl ServeCommand {
         // Create proxy service
         let proxy_service = ProxyService::new(backend, spec);
 
-        // Configure authentication
-        let auth_config = if self.require_auth
-            || self.jwt_secret.is_some()
-            || self.jwt_jwks_uri.is_some()
-        {
-            if self.jwt_secret.is_some() || self.jwt_jwks_uri.is_some() {
-                use turbomcp_transport::axum::config::{JwtAlgorithm, JwtConfig};
-
-                // Parse algorithm
-                let algorithm = match self.jwt_algorithm.to_uppercase().as_str() {
-                    "HS256" => JwtAlgorithm::HS256,
-                    "HS384" => JwtAlgorithm::HS384,
-                    "HS512" => JwtAlgorithm::HS512,
-                    "RS256" => JwtAlgorithm::RS256,
-                    "RS384" => JwtAlgorithm::RS384,
-                    "RS512" => JwtAlgorithm::RS512,
-                    "ES256" => JwtAlgorithm::ES256,
-                    "ES384" => JwtAlgorithm::ES384,
-                    other => {
-                        return Err(ProxyError::configuration(format!(
-                            "Invalid JWT algorithm: {other}. Valid: HS256, HS384, HS512, RS256, RS384, RS512, ES256, ES384"
-                        )));
-                    }
-                };
-
-                // Build JWT config
-                let jwt_config = JwtConfig {
-                    secret: self.jwt_secret.clone(),
-                    jwks_uri: self.jwt_jwks_uri.clone(),
-                    algorithm,
-                    audience: (!self.jwt_audience.is_empty()).then(|| self.jwt_audience.clone()),
-                    issuer: (!self.jwt_issuer.is_empty()).then(|| self.jwt_issuer.clone()),
-                    validate_exp: true,
-                    validate_nbf: true,
-                    leeway: 60,
-                    server_uri: None,
-                    introspection_endpoint: None,
-                    introspection_client_id: None,
-                    introspection_client_secret: None,
-                };
-
-                info!("Enabling JWT authentication for frontend");
-                if let Some(jwks_uri) = &self.jwt_jwks_uri {
-                    info!("   Method: Asymmetric ({:?}) with JWKS", algorithm);
-                    info!("   JWKS URI: {}", jwks_uri);
-                } else {
-                    info!("   Method: Symmetric ({:?})", algorithm);
-                }
-                if let Some(audience) = &jwt_config.audience {
-                    info!("   Audience: {}", audience.join(", "));
-                }
-                if let Some(issuer) = &jwt_config.issuer {
-                    info!("   Issuer: {}", issuer.join(", "));
-                }
-
-                Some(AuthConfig::jwt_with_config(jwt_config))
-            } else {
-                info!(
-                    "Enabling API key authentication (header: {})",
-                    self.api_key_header
-                );
-                Some(AuthConfig::api_key(self.api_key_header.clone()))
-            }
-        } else {
+        let frontend_auth = self.build_frontend_auth()?;
+        if frontend_auth.is_none() {
             // Warn if binding to 0.0.0.0 without auth
             if self.bind.starts_with("0.0.0.0") {
-                warn!("⚠️  Binding to 0.0.0.0 without authentication enabled!");
+                warn!("Binding to 0.0.0.0 without authentication enabled");
                 warn!(
                     "   Consider using --require-auth, --jwt-secret, or --jwt-jwks-uri for production"
                 );
             }
-            None
-        };
+        }
 
-        // Create Axum router with MCP routes and authentication
-        info!("Building HTTP server with Axum MCP integration...");
-        let config = McpServerConfig {
-            enable_compression: true,
-            enable_tracing: true,
-            auth: auth_config,
-            ..Default::default()
-        };
+        let endpoint_path = normalize_endpoint_path(&self.path)?;
 
-        // Layer the proxy's defensive origin/CORS guards on top of the axum
-        // subtree's MCP routes. The guards reject browser-issued requests
-        // that aren't on `--allowed-origin`; without explicit config the
-        // proxy refuses any browser traffic, mirroring the spec's
-        // recommended posture for localhost-bound MCP servers.
+        // Layer the proxy's defensive origin/CORS guards around the supported
+        // Streamable HTTP router. The guards reject browser-issued requests
+        // that aren't on `--allowed-origin`; without explicit config the proxy
+        // refuses any browser traffic, mirroring the spec's recommended posture
+        // for localhost-bound MCP servers.
+        info!("Building HTTP server with turbomcp-server Streamable HTTP integration...");
+        let server_config = ServerConfig::builder()
+            .max_message_size(crate::runtime::MAX_REQUEST_SIZE)
+            // The proxy owns its stricter browser-origin policy in origin_guard:
+            // no Origin is allowed for server-to-server clients, any Origin must
+            // match the explicit allowlist.
+            .allow_any_origin(true)
+            .build();
         let allowlist = crate::runtime::OriginAllowlist::new(self.allowed_origins.clone());
-        let mut app = Router::new()
-            .turbo_mcp_routes_with_config(proxy_service, config)
-            .layer(axum::middleware::from_fn_with_state(
-                allowlist.clone(),
-                crate::runtime::origin_guard,
+        let mcp_router = proxy_service
+            .builder()
+            .with_config(server_config)
+            .into_axum_router();
+        let mut app = if endpoint_path == "/mcp" {
+            mcp_router
+        } else {
+            axum::Router::new().nest(&endpoint_path, mcp_router)
+        }
+        .layer(middleware::from_fn_with_state(
+            allowlist.clone(),
+            crate::runtime::origin_guard,
+        ));
+        if let Some(auth) = frontend_auth {
+            app = app.layer(middleware::from_fn_with_state(
+                auth,
+                frontend_auth_middleware,
             ));
+        }
         if let Some(cors) = crate::runtime::build_cors_layer(&allowlist) {
             app = app.layer(cors);
         }
@@ -298,22 +517,26 @@ impl ServeCommand {
             .parse()
             .map_err(|e| ProxyError::configuration(format!("Invalid bind address: {e}")))?;
 
-        info!("Proxy server listening on http://{}/mcp", addr);
+        info!("Proxy server listening on http://{}{}", addr, endpoint_path);
         info!("Backend: STDIO subprocess");
-        info!("Frontend: HTTP/SSE");
+        info!("Frontend: Streamable HTTP");
         info!("MCP endpoints:");
-        info!("  POST   /mcp          - JSON-RPC");
-        info!("  GET    /mcp/sse      - Server-Sent Events");
-        info!("  GET    /mcp/health   - Health check");
+        info!("  POST   {}      - JSON-RPC", endpoint_path);
+        info!("  GET    {}      - Server-Sent Events", endpoint_path);
+        info!("  DELETE {}      - Terminate session", endpoint_path);
+        info!("  GET    {}/sse  - SSE alias", endpoint_path);
 
         // Run HTTP server using axum::serve
         let listener = tokio::net::TcpListener::bind(&addr)
             .await
             .map_err(|e| ProxyError::backend(format!("Failed to bind to {addr}: {e}")))?;
 
-        axum::serve(listener, app)
-            .await
-            .map_err(|e| ProxyError::backend(format!("HTTP server error: {e}")))?;
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .map_err(|e| ProxyError::backend(format!("HTTP server error: {e}")))?;
 
         Ok(())
     }
@@ -451,6 +674,38 @@ mod tests {
     use super::*;
     use crate::cli::args::BackendType;
 
+    fn base_command() -> ServeCommand {
+        ServeCommand {
+            backend: BackendArgs {
+                endpoint_path: None,
+                backend: Some(BackendType::Stdio),
+                cmd: Some("python".to_string()),
+                args: vec!["server.py".to_string()],
+                working_dir: None,
+                http: None,
+                tcp: None,
+                #[cfg(unix)]
+                unix: None,
+                websocket: None,
+            },
+            frontend: "http".to_string(),
+            bind: "127.0.0.1:3000".to_string(),
+            path: "/mcp".to_string(),
+            client_name: "test-proxy".to_string(),
+            client_version: "1.0.0".to_string(),
+            auth_token: None,
+            jwt_secret: None,
+            jwt_jwks_uri: None,
+            jwt_algorithm: "HS256".to_string(),
+            jwt_audience: vec![],
+            jwt_issuer: vec![],
+            api_key_header: "x-api-key".to_string(),
+            api_key: None,
+            require_auth: false,
+            allowed_origins: Vec::new(),
+        }
+    }
+
     #[test]
     fn test_backend_config_creation() {
         let cmd = ServeCommand {
@@ -478,6 +733,7 @@ mod tests {
             jwt_audience: vec![],
             jwt_issuer: vec![],
             api_key_header: "x-api-key".to_string(),
+            api_key: None,
             require_auth: false,
             allowed_origins: Vec::new(),
         };
@@ -517,12 +773,53 @@ mod tests {
             jwt_audience: vec![],
             jwt_issuer: vec![],
             api_key_header: "x-api-key".to_string(),
+            api_key: None,
             require_auth: false,
             allowed_origins: Vec::new(),
         };
 
         let config = cmd.create_backend_config();
         assert!(config.is_ok());
+    }
+
+    #[test]
+    fn require_auth_without_credentials_errors() {
+        let mut cmd = base_command();
+        cmd.require_auth = true;
+
+        let err = cmd.build_frontend_auth().unwrap_err();
+        assert!(err.to_string().contains("--api-key"));
+    }
+
+    #[test]
+    fn api_key_auth_configures_header() {
+        let mut cmd = base_command();
+        cmd.require_auth = true;
+        cmd.api_key = Some("test_key_abcdefghijklmnopqrstuvwxyz123456".to_string());
+
+        let auth = cmd.build_frontend_auth().unwrap().unwrap();
+        match auth {
+            FrontendAuth::ApiKey { header, .. } => {
+                assert_eq!(header, HeaderName::from_static("x-api-key"));
+            }
+            FrontendAuth::Jwt(_) => panic!("expected API key auth"),
+        }
+    }
+
+    #[test]
+    fn jwt_secret_rejects_asymmetric_algorithm() {
+        let mut cmd = base_command();
+        cmd.jwt_secret = Some("secret".to_string());
+        cmd.jwt_algorithm = "RS256".to_string();
+
+        let err = cmd.build_frontend_auth().unwrap_err();
+        assert!(err.to_string().contains("--jwt-secret requires"));
+    }
+
+    #[test]
+    fn custom_endpoint_path_is_normalized() {
+        assert_eq!(normalize_endpoint_path("api/mcp/").unwrap(), "/api/mcp");
+        assert!(normalize_endpoint_path("/api/mcp?debug=true").is_err());
     }
 
     #[cfg(unix)]
@@ -552,6 +849,7 @@ mod tests {
             jwt_audience: vec![],
             jwt_issuer: vec![],
             api_key_header: "x-api-key".to_string(),
+            api_key: None,
             require_auth: false,
             allowed_origins: Vec::new(),
         };

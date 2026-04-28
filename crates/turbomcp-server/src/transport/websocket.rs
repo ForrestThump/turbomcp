@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::http::{HeaderMap, StatusCode};
 use axum::routing::get;
 use dashmap::DashMap;
 use futures::{SinkExt, StreamExt};
@@ -30,6 +31,9 @@ use crate::config::{ConnectionCounter, RateLimiter, ServerConfig};
 use crate::context::{Cancellable, RequestContext};
 use crate::router::{self, JsonRpcOutgoing};
 use crate::transport::line::jsonrpc_id_key;
+use turbomcp_transport::security::{
+    OriginConfig, SecurityHeaders, extract_client_ip_with_trust, validate_origin,
+};
 
 /// Maximum WebSocket message size (10MB).
 const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
@@ -85,6 +89,7 @@ pub async fn run_with_config<H: McpHandler>(
     let app = Router::new()
         .route("/", get(ws_upgrade_handler::<H>))
         .route("/ws", get(ws_upgrade_handler::<H>))
+        .route("/mcp/ws", get(ws_upgrade_handler::<H>))
         .with_state(state);
 
     let socket_addr: SocketAddr = addr
@@ -139,8 +144,11 @@ struct WebSocketState<H: McpHandler> {
 async fn ws_upgrade_handler<H: McpHandler>(
     ws: WebSocketUpgrade,
     axum::extract::State(state): axum::extract::State<WebSocketState<H>>,
+    headers: HeaderMap,
     axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<SocketAddr>,
 ) -> Result<impl axum::response::IntoResponse, axum::http::StatusCode> {
+    validate_websocket_origin(&headers, addr, state.config.as_ref())?;
+
     // Check connection limit
     let guard = match state.connection_counter.try_acquire_arc() {
         Some(guard) => guard,
@@ -181,6 +189,48 @@ async fn ws_upgrade_handler<H: McpHandler>(
     }))
 }
 
+fn to_security_headers(headers: &HeaderMap) -> SecurityHeaders {
+    headers
+        .iter()
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|value| (name.as_str().to_string(), value.to_string()))
+        })
+        .collect()
+}
+
+fn websocket_origin_config(config: Option<&ServerConfig>) -> OriginConfig {
+    let Some(config) = config else {
+        return OriginConfig::default();
+    };
+
+    OriginConfig {
+        allowed_origins: config.origin_validation.allowed_origins.clone(),
+        allow_localhost: config.origin_validation.allow_localhost,
+        allow_any: config.origin_validation.allow_any,
+    }
+}
+
+fn validate_websocket_origin(
+    headers: &HeaderMap,
+    peer_addr: SocketAddr,
+    config: Option<&ServerConfig>,
+) -> Result<(), StatusCode> {
+    let security_headers = to_security_headers(headers);
+    let trusted = config
+        .map(|config| config.origin_validation.trusted_proxies.as_slice())
+        .unwrap_or(&[]);
+    let client_ip = extract_client_ip_with_trust(&security_headers, peer_addr.ip(), trusted);
+    let origin_config = websocket_origin_config(config);
+
+    validate_origin(&origin_config, &security_headers, client_ip).map_err(|error| {
+        tracing::warn!(%error, "Rejected WebSocket upgrade with invalid origin");
+        StatusCode::FORBIDDEN
+    })
+}
+
 /// Handle a WebSocket connection with per-connection MCP session lifecycle enforcement.
 ///
 /// Each connection starts `Uninitialized`. The client must send `initialize`
@@ -196,6 +246,9 @@ async fn handle_websocket<H: McpHandler>(
     config: Option<ServerConfig>,
 ) {
     let client_id = client_addr.ip().to_string();
+    let max_message_size = config
+        .as_ref()
+        .map_or(MAX_MESSAGE_SIZE, |config| config.max_message_size);
     let (mut sender, mut receiver) = socket.split();
 
     // Per-connection MCP session lifecycle state.
@@ -240,11 +293,11 @@ async fn handle_websocket<H: McpHandler>(
                     None => continue,
                 };
 
-                if text.len() > MAX_MESSAGE_SIZE {
+                if text.len() > max_message_size {
                     tracing::warn!(
                         "WebSocket message exceeds size limit ({} > {})",
                         text.len(),
-                        MAX_MESSAGE_SIZE
+                        max_message_size
                     );
                     continue;
                 }
@@ -453,5 +506,50 @@ fn extract_text(msg: Message) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::config::OriginValidationConfig;
+    use std::collections::HashSet;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    fn loopback_peer() -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 5000)
+    }
+
+    #[test]
+    fn websocket_origin_validation_rejects_disallowed_origin() {
+        let mut headers = HeaderMap::new();
+        headers.insert("origin", "https://evil.example".parse().unwrap());
+        let config = ServerConfig::builder()
+            .origin_validation(OriginValidationConfig {
+                allowed_origins: HashSet::new(),
+                allow_localhost: false,
+                allow_any: false,
+                trusted_proxies: Vec::new(),
+            })
+            .build();
+
+        let result = validate_websocket_origin(&headers, loopback_peer(), Some(&config));
+
+        assert_eq!(result, Err(StatusCode::FORBIDDEN));
+    }
+
+    #[test]
+    fn websocket_origin_validation_accepts_allowlisted_origin() {
+        let mut headers = HeaderMap::new();
+        headers.insert("origin", "https://app.example".parse().unwrap());
+        let config = ServerConfig::builder()
+            .origin_validation(OriginValidationConfig {
+                allowed_origins: ["https://app.example".to_string()].into_iter().collect(),
+                allow_localhost: false,
+                allow_any: false,
+                trusted_proxies: Vec::new(),
+            })
+            .build();
+
+        let result = validate_websocket_origin(&headers, loopback_peer(), Some(&config));
+
+        assert_eq!(result, Ok(()));
+    }
+
     // WebSocket tests are in /tests/ as they require network access
 }

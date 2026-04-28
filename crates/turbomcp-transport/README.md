@@ -391,15 +391,15 @@ impl Transport for CustomTransport {
 | Feature | Description | Default |
 |---------|-------------|---------|
 | `stdio` | Enable STDIO transport (re-exports `turbomcp-stdio`) | ✅ |
-| `http` | Enable HTTP/SSE transport (re-exports `turbomcp-http`; pulls axum, tower, tower-http) | ❌ |
+| `http` | Enable Streamable HTTP client transport (re-exports `turbomcp-http`) | ❌ |
 | `websocket` | Enable WebSocket transport (re-exports `turbomcp-websocket`) | ❌ |
 | `tcp` | Enable TCP transport (re-exports `turbomcp-tcp`) | ❌ |
 | `unix` | Enable Unix socket transport (re-exports `turbomcp-unix`) | ❌ |
 | `tls` | Enable TLS support (rustls / tokio-rustls) | ❌ |
 | `compression` | Enable compression algorithms (gzip, brotli, lz4) | ❌ |
 | `metrics` | Enable metrics collection | ❌ |
-| `auth` | Enable `turbomcp-auth` integration (implies `http`) | ❌ |
-| `jwt-validation` | Enable JWT validation middleware (jsonwebtoken + reqwest) | ❌ |
+| `auth` | Legacy compatibility alias; HTTP server auth lives in `turbomcp-server` / `turbomcp-auth` | ❌ |
+| `jwt-validation` | Legacy compatibility alias; JWT validation lives in `turbomcp-auth` | ❌ |
 
 v3.0 note: this crate is a re-export hub. Each transport feature pulls in the corresponding standalone crate (`turbomcp-stdio`, `turbomcp-http`, etc.) as an optional dependency. For a minimal build, you can depend on the individual transport crate directly.
 
@@ -577,7 +577,6 @@ For comprehensive security information, see:
 
 ## External Resources
 
-- **[Axum Framework](https://github.com/tokio-rs/axum)** - HTTP framework used for HTTP transport
 - **[tokio-tungstenite](https://github.com/snapview/tokio-tungstenite)** - WebSocket implementation
 - **[rustls](https://github.com/rustls/rustls)** - TLS implementation
 

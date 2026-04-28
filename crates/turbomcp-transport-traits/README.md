@@ -6,7 +6,7 @@ Core transport traits and types for the TurboMCP Model Context Protocol SDK.
 
 This crate provides the foundational abstractions that all transport implementations depend on:
 
-- **Traits**: `Transport`, `BidirectionalTransport`, `StreamingTransport`, `TransportFactory`
+- **Traits**: `Transport`, `BidirectionalTransport`, `TransportFactory`
 - **Types**: `TransportType`, `TransportState`, `TransportCapabilities`, `TransportMessage`
 - **Errors**: `TransportError`, `TransportResult`
 - **Config**: `LimitsConfig`, `TimeoutConfig`, `TlsConfig`
@@ -33,7 +33,7 @@ This crate is part of the TurboMCP v3.0 restructuring effort to provide:
 
 - **Lean core**: Only trait definitions and types (~1,700 LOC)
 - **No transport implementations**: Implementations live in separate crates
-- **Foundation for all transports**: STDIO, HTTP, WebSocket, TCP, Unix, gRPC
+- **Foundation for transports**: STDIO, HTTP, WebSocket, TCP, Unix, and out-of-tree extensions
 
 ## License
 

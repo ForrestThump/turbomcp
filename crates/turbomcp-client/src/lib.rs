@@ -209,8 +209,7 @@ pub use handlers::{
 };
 
 // Sampling types
-#[allow(deprecated)]
-pub use sampling::{LlmServerInfo, SamplingHandler, ServerInfo, UserInteractionHandler};
+pub use sampling::{LlmServerInfo, SamplingHandler, UserInteractionHandler};
 
 // v3.0 Tower middleware
 pub use middleware::{

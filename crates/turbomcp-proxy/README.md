@@ -515,8 +515,8 @@ adapters (`adapter rest`, `adapter graphql`) are scaffolded — see
 - [x] **25 Transport Combinations** (5 backends × 5 frontends)
 
 **Authentication & Security:**
-- [x] **JWT Authentication** (RFC 7519, HS256 validation)
-- [x] **API Key Authentication** (configurable header)
+- [x] **JWT Authentication** (RFC 7519, symmetric and JWKS validation)
+- [x] **API Key Authentication** (configurable header and key)
 - [x] **Environment Variable Support** (TURBOMCP_JWT_SECRET)
 - [x] **Security Warnings** (alerts when binding publicly without auth)
 - [x] **Command Allowlist** (prevents shell injection)
@@ -532,11 +532,11 @@ adapters (`adapter rest`, `adapter graphql`) are scaffolded — see
 
 **Core Components:**
 - [x] **BackendConnector**: Supports 5 transport types with type-erased enum dispatch
-- [x] **ProxyService**: McpService trait implementation for Axum integration
+- [x] **ProxyService**: `turbomcp-server` handler for Streamable HTTP integration
 - [x] **IdTranslator**: Bidirectional message ID mapping for session correlation
 - [x] **Introspection**: Complete server capability discovery (tools, resources, prompts)
 - [x] **RuntimeProxyBuilder**: Security-first builder with comprehensive validation
-- [x] **Authentication**: JWT and API key support via turbomcp-transport integration
+- [x] **Authentication**: JWT and API key support in the proxy frontend
 
 ### What's not done yet
 

@@ -2,9 +2,8 @@
 //!
 //! The MCP spec recommends Origin enforcement and CORS as defense-in-depth
 //! against DNS-rebinding / CSRF when a proxy binds to localhost. The runtime
-//! proxy owns its own axum router (separate from the deprecated
-//! `turbomcp_transport::axum` subtree) and therefore has to wire these layers
-//! itself; the audit flagged both as missing.
+//! proxy layers these checks around the supported `turbomcp-server` HTTP router
+//! instead of relying on the legacy transport Axum adapter.
 //!
 //! Configuration is intentionally explicit:
 //! - `allowed_origins` is empty by default → any browser-issued request that

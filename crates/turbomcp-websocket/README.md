@@ -11,8 +11,7 @@ This crate provides full MCP 2025-11-25 protocol support for WebSocket transport
 - **Elicitation Support**: Complete elicitation lifecycle management with timeouts
 - **Automatic Reconnection**: Configurable exponential backoff retry logic
 - **Keep-Alive**: Periodic WebSocket ping/pong to maintain connections
-- **Compression**: Optional message compression support
-- **TLS Support**: Secure WebSocket connections (WSS)
+- **TLS Support**: Secure WebSocket connections via `wss://` URLs
 - **Background Tasks**: Efficient management of concurrent operations
 - **Metrics Collection**: Comprehensive transport metrics and monitoring
 
@@ -40,8 +39,7 @@ use turbomcp_transport_traits::Transport;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create client configuration
     let config = WebSocketBidirectionalConfig::client("ws://localhost:8080".to_string())
-        .with_max_concurrent_elicitations(5)
-        .with_compression(true);
+        .with_max_concurrent_elicitations(5);
 
     // Create and connect transport
     let transport = WebSocketBidirectionalTransport::new(config).await?;

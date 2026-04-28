@@ -130,16 +130,16 @@ impl ServerAttrs {
                 let value: syn::LitStr = meta.value()?.parse()?;
                 description = Some(value.value());
             } else if meta.path.is_ident("transports") {
-                // v3: The `transports` attribute is deprecated.
+                // v3: The `transports` attribute was removed.
                 //
-                // Emit the deprecation diagnostic *before* trying to parse the
+                // Emit the migration diagnostic *before* trying to parse the
                 // value, so users who write `transports = "stdio"` (string instead
                 // of the v2 array form) get the migration guidance rather than a
                 // generic `expected '['` diagnostic.
                 return Err(syn::Error::new(
                     meta.path.span(),
-                    "`transports` attribute is deprecated. Enable features in Cargo.toml instead:\n\
-                    turbomcp = { version = \"3.0\", features = [\"http\", \"tcp\"] }\n\
+                    "`transports` attribute was removed. Enable features in Cargo.toml instead:\n\
+                    turbomcp = { version = \"3.1\", features = [\"http\", \"tcp\"] }\n\
                     Then call transport methods: server.run_http(\"0.0.0.0:8080\").await",
                 ));
             } else if meta.path.is_ident("root") {

@@ -54,7 +54,7 @@ the struct that dispatches tool / resource / prompt calls to the annotated metho
 - `version = "..."` — Server version. Defaults to `"1.0.0"`.
 - `description = "..."` — Optional server description.
 
-The deprecated `transports = [...]` argument is rejected with a diagnostic directing
+The removed `transports = [...]` argument is rejected with a diagnostic directing
 you to Cargo feature flags instead.
 
 The macro scans impl methods for exactly three attribute names — `tool`, `resource`,

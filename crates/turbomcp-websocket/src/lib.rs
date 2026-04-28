@@ -10,8 +10,7 @@
 //! - **Elicitation Support**: Server-initiated requests with timeout handling
 //! - **Automatic Reconnection**: Configurable exponential backoff retry logic
 //! - **Keep-Alive**: Periodic ping/pong to maintain connections
-//! - **Compression**: Optional message compression support
-//! - **TLS Support**: Secure WebSocket connections (WSS)
+//! - **TLS Support**: Secure WebSocket connections via `wss://` URLs
 //! - **Metrics Collection**: Comprehensive transport metrics and monitoring
 //! - **Background Tasks**: Efficient management of concurrent operations
 //!
@@ -24,8 +23,7 @@
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // Create client configuration
 //! let config = WebSocketBidirectionalConfig::client("ws://localhost:8080".to_string())
-//!     .with_max_concurrent_elicitations(5)
-//!     .with_compression(true);
+//!     .with_max_concurrent_elicitations(5);
 //!
 //! // Create and connect transport
 //! let transport = WebSocketBidirectionalTransport::new(config).await?;
@@ -79,7 +77,7 @@ pub mod types;
 
 // Re-export main types for convenience
 pub use bidirectional::CorrelationInfo;
-pub use config::{ReconnectConfig, TlsConfig, WebSocketBidirectionalConfig};
+pub use config::{ReconnectConfig, WebSocketBidirectionalConfig};
 pub use elicitation::ElicitationInfo;
 pub use transport::TransportStatus;
 pub use types::{

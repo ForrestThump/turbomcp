@@ -25,7 +25,6 @@ turbomcp-unix = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["net", "io-std", "io-util", "process", "sync", "time", "fs"] }
 tokio-util = { workspace = true, features = ["codec", "io"] }
 futures = { workspace = true }
-futures-util = { version = "0.3", optional = true }
 pin-project-lite = { workspace = true }
 
 # Serialization
@@ -36,16 +35,6 @@ bytes = { workspace = true }
 # Error handling
 thiserror = { workspace = true }
 anyhow = { workspace = true }
-
-# HTTP/WebSocket (optional)
-axum = { workspace = true, optional = true }
-tower = { workspace = true, optional = true }
-tower-http = { workspace = true, optional = true }
-# GCRA rate limiting (optional - only when axum middleware is enabled)
-governor = { workspace = true, optional = true }
-tokio-tungstenite = { workspace = true, optional = true }
-reqwest = { workspace = true, optional = true }
-async-stream = { version = "0.3", optional = true }
 
 # Compression (optional)
 flate2 = { version = "1.1", optional = true }
@@ -60,10 +49,6 @@ tokio-rustls = { version = "0.26", optional = true }
 tracing = { workspace = true }
 metrics = { workspace = true, optional = true }
 
-# Authentication (optional)
-turbomcp-auth = { workspace = true, optional = true }
-jsonwebtoken = { workspace = true, optional = true }
-base64 = { workspace = true, optional = true }
 subtle = { workspace = true }
 sha2 = { workspace = true }
 # Wipe API keys from memory on Drop
@@ -84,6 +69,7 @@ rand = { workspace = true }
 wiremock = { version = "0.6", optional = true }
 
 [dev-dependencies]
+axum = { workspace = true }
 criterion = { workspace = true }
 tokio-test = { workspace = true }
 pretty_assertions = { workspace = true }
@@ -91,21 +77,17 @@ serial_test = { workspace = true }
 tempfile = { workspace = true }
 proptest = { workspace = true }
 reqwest = { workspace = true }
+tokio-tungstenite = { workspace = true }
+
 [features]
 default = ["stdio"]
 
 # Core transports
 stdio = ["dep:turbomcp-stdio"]
-http = ["dep:turbomcp-http", "axum", "tower", "tower-http", "async-stream", "governor"]
-websocket = ["dep:turbomcp-websocket", "tokio-tungstenite", "http", "futures-util"]
+http = ["dep:turbomcp-http"]
+websocket = ["dep:turbomcp-websocket"]
 tcp = ["dep:turbomcp-tcp", "tokio/net"]
 unix = ["dep:turbomcp-unix", "tokio/net"]
-
-# gRPC support (future)
-grpc = ["http"]
-
-# QUIC support (future) 
-quic = []
 
 # Compression support
 compression = ["flate2", "brotli", "lz4_flex"]
@@ -113,9 +95,10 @@ compression = ["flate2", "brotli", "lz4_flex"]
 # TLS support
 tls = ["rustls", "tokio-rustls"]
 
-# Authentication
-auth = ["dep:turbomcp-auth", "http"]
-jwt-validation = ["jsonwebtoken", "base64", "http", "reqwest"]
+# Legacy feature aliases retained for downstream compatibility. Authentication
+# for HTTP servers lives in `turbomcp-server` and `turbomcp-auth`.
+auth = []
+jwt-validation = []
 
 # Observability
 metrics = ["dep:metrics"]

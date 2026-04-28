@@ -86,22 +86,12 @@ pub trait UserInteractionHandler: Send + Sync + std::fmt::Debug {
 }
 
 /// LLM-server descriptor used by sampling handlers for model selection.
-///
-/// Renamed from the previous `ServerInfo` to avoid prelude-level shadowing
-/// against the MCP `Implementation` / `InitializeResult.server_info` shape.
-/// `ServerInfo` is kept as a deprecated type alias for one release.
 #[derive(Debug, Clone)]
 pub struct LlmServerInfo {
     pub name: String,
     pub models: Vec<String>,
     pub capabilities: Vec<String>,
 }
-
-#[deprecated(
-    since = "3.1.2",
-    note = "Renamed to LlmServerInfo to disambiguate from MCP InitializeResult.server_info"
-)]
-pub type ServerInfo = LlmServerInfo;
 
 impl SamplingHandler for DelegatingSamplingHandler {
     fn handle_create_message(

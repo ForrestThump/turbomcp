@@ -7,8 +7,8 @@
 //! which accepted a `transports = ["stdio"]` attribute and used that to
 //! enable compile-time `print!`/`println!` detection.
 //!
-//! In v3, the `transports` attribute is deprecated and emits a hard compile
-//! error ("transports attribute is deprecated") before any stdio-safety
+//! In v3, the `transports` attribute has been removed and emits a hard compile
+//! error ("transports attribute was removed") before any stdio-safety
 //! analysis can run. The compile-fail `.stderr` snapshots describe the old
 //! stdio-safety error, so they no longer match actual compiler output. The
 //! test is therefore kept `#[ignore]` until the compile-fail files are updated
@@ -30,8 +30,8 @@
 //!    should produce a clear error: "resource requires a URI pattern, e.g.
 //!    #[resource(\"config://app\")]".
 //!
-//! 4. **`deprecated_transports_attr.rs`** - `#[server(transports = ["stdio"])]`
-//!    should produce the deprecation error with the migration guidance message.
+//! 4. **`removed_transports_attr.rs`** - `#[server(transports = ["stdio"])]`
+//!    should produce the removal error with the migration guidance message.
 //!    This is the v3-appropriate successor to the stdio_print_rejected tests.
 //!
 //! 5. **`tool_unsupported_return_type.rs`** - A `#[tool]` returning a type
@@ -42,15 +42,15 @@
 
 #[test]
 #[ignore = "Compile-fail snapshots describe v2 stdio-safety errors triggered by the \
-    deprecated `transports` attribute. In v3, the `transports` attribute itself \
-    fails to compile with a deprecation error before reaching stdio-safety analysis, \
+    removed `transports` attribute. In v3, the `transports` attribute itself \
+    fails to compile with a removal error before reaching stdio-safety analysis, \
     so the .stderr snapshots no longer match. TODO: replace these tests with \
     v3-appropriate compile-fail scenarios listed in the module doc above."]
 fn stdio_safety_compile_tests() {
     let t = trybuild::TestCases::new();
 
     // These test files use `#[server(transports = ["stdio"])]` which in v3
-    // triggers: "transports attribute is deprecated. Enable features in Cargo.toml..."
+    // triggers: "transports attribute was removed. Enable features in Cargo.toml..."
     // The .stderr snapshots instead expect stdio-safety errors about print!/println!.
     // The snapshots must be updated before these tests can be re-enabled.
     t.compile_fail("tests/compile_fail/stdio_println_rejected.rs");

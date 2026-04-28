@@ -24,7 +24,7 @@ workspace = true
 turbomcp-protocol = { workspace = true }
 turbomcp-transport = { workspace = true, features = ["http", "tcp", "websocket"] }
 turbomcp-client = { workspace = true }
-turbomcp-server = { workspace = true, optional = true }
+turbomcp-server = { workspace = true, optional = true, features = ["http", "websocket"] }
 turbomcp-auth = { workspace = true, optional = true }
 
 # Unix domain socket transport — only on Unix platforms (macOS, Linux)
@@ -95,17 +95,18 @@ tempfile = "3.27"
 proptest = "1.11"
 pretty_assertions = "1.4"
 criterion = { workspace = true, features = ["async_tokio"] }
+tracing-subscriber = { workspace = true }
 
 [features]
 default = ["cli", "runtime", "introspection"]
 
 # Core features
 introspection = []
-runtime = ["axum", "dep:tower", "tower-service", "tower-http", "futures-util", "reqwest", "tokio-tungstenite", "auth"]
+runtime = ["introspection", "dep:turbomcp-server", "axum", "dep:tower", "tower-service", "tower-http", "futures-util", "reqwest", "tokio-tungstenite", "auth"]
 tower = ["runtime"]  # Alias for runtime Tower integration (for consistency with other turbomcp crates)
 codegen = ["handlebars", "convert_case", "chrono", "syn", "proc-macro2"]
 schema = ["schemars"]
-auth = ["dep:turbomcp-auth", "dep:jsonwebtoken", "turbomcp-transport/auth", "turbomcp-transport/jwt-validation"]
+auth = ["dep:turbomcp-auth", "dep:jsonwebtoken", "turbomcp-auth/jwt"]
 
 # Adapters (Phase 6)
 rest = ["utoipa", "utoipa-swagger-ui", "axum", "tower", "tower-http"]
@@ -122,7 +123,7 @@ adapters = ["rest"]
 experimental-tasks = ["turbomcp-protocol/experimental-tasks"]
 
 # CLI
-cli = ["clap", "colored", "tracing-subscriber"]
+cli = ["runtime", "clap", "colored", "tracing-subscriber"]
 
 # Full feature set
 full = ["introspection", "runtime", "codegen", "schema", "cli", "auth", "adapters"]

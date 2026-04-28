@@ -1,7 +1,7 @@
 //! Configuration types for WebSocket bidirectional transport
 //!
 //! This module provides configuration structures for WebSocket transport
-//! including connection settings, reconnection policies, and TLS configuration.
+//! including connection settings, reconnection policies, and elicitation limits.
 
 use std::time::Duration;
 
@@ -28,37 +28,9 @@ pub struct WebSocketBidirectionalConfig {
 
     /// Maximum concurrent elicitations
     pub max_concurrent_elicitations: usize,
-
-    /// Enable compression.
-    ///
-    /// **Deprecated since 3.2.0.** This is a no-op: tungstenite 0.29 does not
-    /// implement RFC 7692 permessage-deflate, and `connect_async_with_config`
-    /// has no compression knob. The advertised transport capability is hard-set
-    /// to `supports_compression: false` regardless of this field's value.
-    #[deprecated(
-        since = "3.2.0",
-        note = "no-op: tungstenite does not support permessage-deflate. \
-                The transport advertises supports_compression=false unconditionally."
-    )]
-    pub enable_compression: bool,
-
-    /// TLS configuration.
-    ///
-    /// **Deprecated since 3.2.0.** This is a phantom config: `connect_async_with_config`
-    /// is invoked with the default tungstenite `Connector`, so `cert_path`/`key_path`/
-    /// `skip_verify` are not consulted. Use a `wss://` URL — TLS is negotiated via
-    /// the platform certificate store via tokio-tungstenite's default rustls builder.
-    /// A future release may wire this to `connect_async_tls_with_config(...)`.
-    #[deprecated(
-        since = "3.2.0",
-        note = "phantom config: TLS comes from the wss:// URL using platform certs. \
-                cert_path/key_path/skip_verify are not consulted by this transport."
-    )]
-    pub tls_config: Option<TlsConfig>,
 }
 
 impl Default for WebSocketBidirectionalConfig {
-    #[allow(deprecated)] // populating deprecated fields with their no-op defaults
     fn default() -> Self {
         Self {
             url: None,
@@ -68,8 +40,6 @@ impl Default for WebSocketBidirectionalConfig {
             reconnect: ReconnectConfig::default(),
             elicitation_timeout: Duration::from_secs(30),
             max_concurrent_elicitations: 10,
-            enable_compression: false,
-            tls_config: None,
         }
     }
 }
@@ -123,40 +93,6 @@ impl WebSocketBidirectionalConfig {
     /// Set maximum concurrent elicitations
     pub fn with_max_concurrent_elicitations(mut self, max: usize) -> Self {
         self.max_concurrent_elicitations = max;
-        self
-    }
-
-    /// Enable compression.
-    ///
-    /// **Deprecated since 3.2.0** — see [`WebSocketBidirectionalConfig::enable_compression`].
-    /// This builder method is preserved for source compatibility but stores into a
-    /// no-op field; the transport advertises `supports_compression: false` regardless.
-    #[deprecated(
-        since = "3.2.0",
-        note = "no-op: tungstenite does not support permessage-deflate"
-    )]
-    pub fn with_compression(mut self, enable: bool) -> Self {
-        #[allow(deprecated)]
-        {
-            self.enable_compression = enable;
-        }
-        self
-    }
-
-    /// Set TLS configuration.
-    ///
-    /// **Deprecated since 3.2.0** — see [`WebSocketBidirectionalConfig::tls_config`].
-    /// This builder method is preserved for source compatibility; the transport
-    /// uses the default tungstenite/rustls connector and never reads these fields.
-    #[deprecated(
-        since = "3.2.0",
-        note = "phantom config: TLS comes from the wss:// URL using platform certs"
-    )]
-    pub fn with_tls_config(mut self, tls_config: TlsConfig) -> Self {
-        #[allow(deprecated)]
-        {
-            self.tls_config = Some(tls_config);
-        }
         self
     }
 }
@@ -229,80 +165,7 @@ impl ReconnectConfig {
     }
 }
 
-/// TLS configuration
-#[derive(Clone, Debug, Default)]
-pub struct TlsConfig {
-    /// Client certificate path
-    pub cert_path: Option<String>,
-
-    /// Client key path
-    pub key_path: Option<String>,
-
-    /// CA certificate path
-    pub ca_path: Option<String>,
-
-    /// Skip certificate verification (dangerous!)
-    pub skip_verify: bool,
-}
-
-impl TlsConfig {
-    /// Create new TLS configuration
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Create TLS configuration with certificate and key
-    pub fn with_client_cert(cert_path: String, key_path: String) -> Self {
-        Self {
-            cert_path: Some(cert_path),
-            key_path: Some(key_path),
-            ..Self::default()
-        }
-    }
-
-    /// Create TLS configuration with CA certificate
-    pub fn with_ca_cert(ca_path: String) -> Self {
-        Self {
-            ca_path: Some(ca_path),
-            ..Self::default()
-        }
-    }
-
-    /// Create insecure TLS configuration (skip verification)
-    pub fn insecure() -> Self {
-        Self {
-            skip_verify: true,
-            ..Self::default()
-        }
-    }
-
-    /// Set certificate path
-    pub fn with_cert_path(mut self, path: String) -> Self {
-        self.cert_path = Some(path);
-        self
-    }
-
-    /// Set key path
-    pub fn with_key_path(mut self, path: String) -> Self {
-        self.key_path = Some(path);
-        self
-    }
-
-    /// Set CA certificate path
-    pub fn with_ca_path(mut self, path: String) -> Self {
-        self.ca_path = Some(path);
-        self
-    }
-
-    /// Set skip verification flag
-    pub fn with_skip_verify(mut self, skip: bool) -> Self {
-        self.skip_verify = skip;
-        self
-    }
-}
-
 #[cfg(test)]
-#[allow(deprecated)] // tests exercise the deprecated `enable_compression` / `tls_config` fields
 mod tests {
     use super::*;
 
@@ -312,7 +175,6 @@ mod tests {
         assert_eq!(config.max_message_size, 16 * 1024 * 1024);
         assert_eq!(config.keep_alive_interval, Duration::from_secs(30));
         assert_eq!(config.max_concurrent_elicitations, 10);
-        assert!(!config.enable_compression);
     }
 
     #[test]
@@ -334,26 +196,10 @@ mod tests {
         let config = WebSocketBidirectionalConfig::new()
             .with_max_message_size(1024)
             .with_keep_alive_interval(Duration::from_secs(60))
-            .with_compression(true)
             .with_max_concurrent_elicitations(5);
 
         assert_eq!(config.max_message_size, 1024);
         assert_eq!(config.keep_alive_interval, Duration::from_secs(60));
-        assert!(config.enable_compression);
         assert_eq!(config.max_concurrent_elicitations, 5);
-    }
-
-    #[test]
-    fn test_tls_config_presets() {
-        let client_cert =
-            TlsConfig::with_client_cert("cert.pem".to_string(), "key.pem".to_string());
-        assert_eq!(client_cert.cert_path, Some("cert.pem".to_string()));
-        assert_eq!(client_cert.key_path, Some("key.pem".to_string()));
-
-        let ca_cert = TlsConfig::with_ca_cert("ca.pem".to_string());
-        assert_eq!(ca_cert.ca_path, Some("ca.pem".to_string()));
-
-        let insecure = TlsConfig::insecure();
-        assert!(insecure.skip_verify);
     }
 }

@@ -180,8 +180,7 @@ impl WebSocketBidirectionalTransport {
         // permessage-deflate is not implemented on this transport: tokio-tungstenite
         // / tungstenite 0.29 do not support it, and the on-the-wire compressors
         // listed below were never negotiated with the peer. Always advertise no
-        // compression support so peers don't get a false promise. The
-        // `enable_compression` config field is now a documented no-op (#[deprecated]).
+        // compression support so peers don't get a false promise.
         TransportCapabilities {
             max_message_size: Some(config.max_message_size),
             supports_compression: false,
@@ -414,8 +413,6 @@ mod tests {
     #[test]
     fn test_create_capabilities() {
         let config = WebSocketBidirectionalConfig {
-            #[allow(deprecated)]
-            enable_compression: true,
             max_message_size: 1024 * 1024,
             max_concurrent_elicitations: 5,
             ..Default::default()

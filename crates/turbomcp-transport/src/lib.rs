@@ -173,22 +173,6 @@ pub mod stdio {
 /// Integration with the Tower service abstraction.
 pub mod tower;
 
-/// Integration with the Axum web framework.
-///
-/// **Deprecated since 3.2.0**: this subtree predates the MCP 2025-11-25 Streamable
-/// HTTP rework and lacks `Mcp-Session-Id` lifecycle, `Last-Event-ID` resumption, and
-/// the unified `/mcp` method-multiplexed endpoint. New code should serve over
-/// `turbomcp_server::transport::http`, which is spec-compliant. The subtree will be
-/// removed in a future major release.
-///
-/// The deprecation attribute lives on each public re-export (`AxumMcpExt`,
-/// `McpAppState`, `McpServerConfig`, `McpService`) below — not on the module
-/// itself, because a module-level `#[deprecated]` cascades into every reference
-/// inside the subtree (including its own tests) and `#![allow(deprecated)]` does
-/// not propagate across file boundaries cleanly.
-#[cfg(feature = "http")]
-pub mod axum;
-
 /// WebSocket bidirectional transport for full-duplex communication with MCP 2025-11-25 compliance.
 ///
 /// v3.0: This module re-exports from the `turbomcp-websocket` crate.
@@ -198,7 +182,7 @@ pub mod axum;
 pub mod websocket_bidirectional {
     pub use turbomcp_websocket::{
         CorrelationInfo, ElicitationInfo, MessageProcessingResult, PendingElicitation,
-        ReconnectConfig, TlsConfig, TransportStatus, WebSocketBidirectionalConfig,
+        ReconnectConfig, TransportStatus, WebSocketBidirectionalConfig,
         WebSocketBidirectionalTransport, WebSocketConnectionStats, WebSocketStreamHandler,
     };
 
@@ -281,9 +265,9 @@ pub use bidirectional::{
 
 // Re-export core transport traits and types
 pub use core::{
-    BidirectionalTransport, StreamingTransport, Transport, TransportCapabilities, TransportConfig,
-    TransportError, TransportEvent, TransportMessage, TransportMetrics, TransportResult,
-    TransportState, TransportType, validate_request_size, validate_response_size,
+    BidirectionalTransport, Transport, TransportCapabilities, TransportConfig, TransportError,
+    TransportEvent, TransportMessage, TransportMetrics, TransportResult, TransportState,
+    TransportType, validate_request_size, validate_response_size,
 };
 
 // Re-export server transport functionality
@@ -299,19 +283,9 @@ pub use stdio::StdioTransport;
 // Re-export Tower integration
 pub use tower::{SessionInfo, SessionManager, TowerTransportAdapter};
 
-// Re-export Axum integration.
-//
-// Each item is `#[deprecated]` at its source definition (in the `axum` subtree),
-// so consumers using either `turbomcp_transport::AxumMcpExt` or
-// `turbomcp_transport::axum::AxumMcpExt` get the migration warning. The
-// `#[allow(deprecated)]` here is just to silence the re-export site itself.
-#[cfg(feature = "http")]
-#[allow(deprecated)]
-pub use axum::{AxumMcpExt, McpAppState, McpServerConfig, McpService};
-
 #[cfg(feature = "websocket")]
 pub use websocket_bidirectional::{
-    ReconnectConfig, TlsConfig, WebSocketBidirectionalConfig, WebSocketBidirectionalTransport,
+    ReconnectConfig, WebSocketBidirectionalConfig, WebSocketBidirectionalTransport,
 };
 
 #[cfg(feature = "tcp")]

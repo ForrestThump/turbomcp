@@ -1,9 +1,5 @@
 //! Tower Service implementation for the proxy
 
-// In-tree consumer of the deprecated `turbomcp_transport::axum` subtree.
-// See `cli/commands/serve.rs` for the migration plan.
-#![allow(deprecated)]
-
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -16,7 +12,6 @@ use tracing::{debug, error, info};
 
 use turbomcp_protocol::McpError;
 use turbomcp_protocol::jsonrpc::JsonRpcRequest;
-use turbomcp_transport::axum::McpService;
 
 use crate::proxy::ProxyService;
 
@@ -226,26 +221,8 @@ impl Service<ProxyRequest> for ProxyTowerService {
             let request_value = serde_json::to_value(&req.request)
                 .map_err(|e| McpError::serialization(e.to_string()))?;
 
-            // Create a dummy session for the proxy service
-            let session = turbomcp_transport::tower::SessionInfo {
-                id: uuid::Uuid::new_v4().to_string(),
-                created_at: std::time::Instant::now(),
-                last_activity: std::time::Instant::now(),
-                remote_addr: req
-                    .metadata
-                    .get("remote_addr")
-                    .and_then(|v| v.as_str())
-                    .map(String::from),
-                user_agent: req
-                    .metadata
-                    .get("user_agent")
-                    .and_then(|v| v.as_str())
-                    .map(String::from),
-                metadata: HashMap::new(),
-            };
-
             // Forward to proxy service
-            let result = proxy.process_request(request_value, &session).await;
+            let result = proxy.process_value(request_value).await;
 
             let duration = start.elapsed();
 

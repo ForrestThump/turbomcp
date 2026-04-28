@@ -23,7 +23,6 @@ pub use turbomcp_transport_traits::{
     // Config
     LimitsConfig,
     MessageDirection,
-    StreamingTransport,
     TimeoutConfig,
     TlsConfig,
     TlsVersion,

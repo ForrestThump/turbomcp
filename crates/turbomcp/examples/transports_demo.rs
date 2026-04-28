@@ -2,7 +2,7 @@
 //!
 //! In TurboMCP v3, transport methods are provided by the `McpHandlerExt` trait
 //! and are enabled via Cargo features. This is a cleaner approach than the
-//! deprecated `transports` attribute.
+//! removed `transports` attribute.
 //!
 //! Run with:
 //! ```bash
@@ -68,7 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("In TurboMCP v3, transports are enabled via Cargo features:");
     tracing::info!("  [dependencies]");
-    tracing::info!("  turbomcp = {{ version = \"3.0\", features = [\"http\", \"tcp\"] }}");
+    tracing::info!("  turbomcp = {{ version = \"3.1\", features = [\"http\", \"tcp\"] }}");
 
     tracing::info!("Transport methods available with this build:");
     tracing::info!("  - run_stdio() (always available)");

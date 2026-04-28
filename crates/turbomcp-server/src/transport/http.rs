@@ -417,6 +417,9 @@ pub(crate) fn build_router<H: McpHandler>(
     rate_limiter: Option<Arc<RateLimiter>>,
     config: Option<ServerConfig>,
 ) -> Router {
+    let max_body_size = config
+        .as_ref()
+        .map_or(MAX_BODY_SIZE, |config| config.max_message_size);
     let state = SseState {
         handler,
         session_manager: SessionManager::new(),
@@ -442,8 +445,8 @@ pub(crate) fn build_router<H: McpHandler>(
         // RequestBodyLimitLayer enforces the cap at the middleware layer so
         // oversized bodies are rejected with 413 Payload Too Large before
         // our handler (which takes Request<Body>) ever reads the stream.
-        .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
-        .layer(RequestBodyLimitLayer::new(MAX_BODY_SIZE))
+        .layer(DefaultBodyLimit::max(max_body_size))
+        .layer(RequestBodyLimitLayer::new(max_body_size))
         .with_state(state)
 }
 
@@ -698,16 +701,20 @@ async fn handle_json_rpc<H: McpHandler>(
     // clients can tell "body is malformed" from "body too big to accept".
     // Prefer the Content-Length header as a fast, stream-free check, then
     // fall back to inspecting the to_bytes error chain for chunked bodies.
+    let max_body_size = state
+        .config
+        .as_ref()
+        .map_or(MAX_BODY_SIZE, |config| config.max_message_size);
     if let Some(declared_len) = headers
         .get(axum::http::header::CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<usize>().ok())
-        && declared_len > MAX_BODY_SIZE
+        && declared_len > max_body_size
     {
         return empty_response(StatusCode::PAYLOAD_TOO_LARGE);
     }
 
-    let payload = match to_bytes(body, MAX_BODY_SIZE).await {
+    let payload = match to_bytes(body, max_body_size).await {
         Ok(body) => match serde_json::from_slice::<serde_json::Value>(&body) {
             Ok(payload) => payload,
             Err(_) => return empty_response(StatusCode::BAD_REQUEST),
@@ -904,6 +911,59 @@ async fn handle_delete_session<H: McpHandler>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
+    use tower::ServiceExt;
+    use turbomcp_core::context::RequestContext as CoreRequestContext;
+    use turbomcp_types::{
+        Prompt, PromptResult, Resource, ResourceResult, ServerInfo, Tool, ToolResult,
+    };
+
+    #[derive(Clone)]
+    struct TestHandler;
+
+    impl McpHandler for TestHandler {
+        fn server_info(&self) -> ServerInfo {
+            ServerInfo::new("test", "1.0.0")
+        }
+
+        fn list_tools(&self) -> Vec<Tool> {
+            Vec::new()
+        }
+
+        fn list_resources(&self) -> Vec<Resource> {
+            Vec::new()
+        }
+
+        fn list_prompts(&self) -> Vec<Prompt> {
+            Vec::new()
+        }
+
+        async fn call_tool(
+            &self,
+            name: &str,
+            _args: Value,
+            _ctx: &CoreRequestContext,
+        ) -> McpResult<ToolResult> {
+            Err(McpError::tool_not_found(name))
+        }
+
+        async fn read_resource(
+            &self,
+            uri: &str,
+            _ctx: &CoreRequestContext,
+        ) -> McpResult<ResourceResult> {
+            Err(McpError::resource_not_found(uri))
+        }
+
+        async fn get_prompt(
+            &self,
+            name: &str,
+            _args: Option<Value>,
+            _ctx: &CoreRequestContext,
+        ) -> McpResult<PromptResult> {
+            Err(McpError::prompt_not_found(name))
+        }
+    }
 
     // MCP 2025-11-25 §Multiple Connections:
     //   "The server MUST send each of its JSON-RPC messages on only one of
@@ -939,6 +999,25 @@ mod tests {
             first_got ^ second_got,
             "message must reach exactly one subscriber, got first={first:?}, second={second:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn build_router_uses_configured_http_body_limit() {
+        let config = ServerConfig::builder()
+            .max_message_size(1024)
+            .allow_any_origin(true)
+            .build();
+        let app = build_router(TestHandler, None, Some(config));
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from("x".repeat(2048)))
+            .expect("request");
+
+        let response = app.oneshot(request).await.expect("response");
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     // HTTP route-level tests live in /tests/ because they need a bound port.
