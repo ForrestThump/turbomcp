@@ -35,7 +35,7 @@
 //! ## Features
 //!
 //! - `std` - Standard library support (default)
-//! - `json` - JSON codec (default)
+//! - `json` - Compatibility alias; JSON is always available
 //! - `simd` - SIMD-accelerated JSON (sonic-rs)
 //! - `msgpack` - MessagePack binary format
 
@@ -425,13 +425,10 @@ impl StreamingJsonDecoder {
 
     /// Try to decode the next complete message
     ///
-    /// Returns `Some(T)` if a complete message was decoded, or `None` if either
-    /// (a) no full line is buffered yet (more data needed), or (b) an empty/
-    /// whitespace-only line was consumed and skipped. Because case (b) may
-    /// leave subsequent complete messages still buffered, callers that drain
-    /// all available messages should loop on `try_decode` until it returns
-    /// `Ok(None)` *and* `is_empty()` is true (or the buffer length stops
-    /// changing between calls).
+    /// Returns `Some(T)` if a complete message was decoded, or `None` if no full
+    /// non-empty line is buffered yet. Empty/whitespace-only lines are skipped
+    /// internally, so they cannot hide a later complete message until more bytes
+    /// arrive.
     pub fn try_decode<T: DeserializeOwned>(&mut self) -> CodecResult<Option<T>> {
         // Surface (and clear) a sticky overflow before attempting any decode.
         // The caller learns explicitly that data was lost and can resync.
@@ -441,14 +438,13 @@ impl StreamingJsonDecoder {
                 "streaming buffer overflowed; in-flight message discarded",
             ));
         }
-        // Look for newline delimiter
-        if let Some(pos) = self.buffer.iter().position(|&b| b == b'\n') {
+        while let Some(pos) = self.buffer.iter().position(|&b| b == b'\n') {
             let line = &self.buffer[..pos];
 
             // Skip empty lines
             if line.is_empty() || line.iter().all(|b| b.is_ascii_whitespace()) {
                 self.buffer.drain(..=pos);
-                return Ok(None);
+                continue;
             }
 
             // Try to decode
@@ -457,13 +453,13 @@ impl StreamingJsonDecoder {
             // Remove processed data (including newline)
             self.buffer.drain(..=pos);
 
-            match result {
+            return match result {
                 Ok(value) => Ok(Some(value)),
                 Err(e) => Err(CodecError::decode(e.to_string())),
-            }
-        } else {
-            Ok(None)
+            };
         }
+
+        Ok(None)
     }
 
     /// Clear the internal buffer
@@ -582,6 +578,7 @@ impl AnyCodec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
     use serde::{Deserialize, Serialize};
 
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -666,6 +663,23 @@ mod tests {
     }
 
     #[test]
+    fn test_streaming_decoder_skips_empty_lines_before_message() {
+        let mut decoder = StreamingJsonDecoder::new();
+
+        decoder.feed(
+            br#"
+
+{"id":7,"method":"after-empty","params":null}
+"#,
+        );
+
+        let msg: TestMessage = decoder.try_decode().unwrap().unwrap();
+        assert_eq!(msg.id, 7);
+        assert_eq!(msg.method, "after-empty");
+        assert!(decoder.try_decode::<TestMessage>().unwrap().is_none());
+    }
+
+    #[test]
     fn test_streaming_decoder_buffer_limit() {
         let mut decoder = StreamingJsonDecoder::with_max_size(100);
 
@@ -678,6 +692,10 @@ mod tests {
             decoder.is_empty(),
             "Buffer should be cleared after exceeding limit"
         );
+        let err = decoder
+            .try_decode::<TestMessage>()
+            .expect_err("overflow must be visible to caller");
+        assert!(err.message.contains("overflowed"));
     }
 
     #[test]

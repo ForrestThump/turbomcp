@@ -423,6 +423,44 @@ fn test_error_response_with_data() {
 }
 
 #[test]
+fn test_error_data_caps_strings_inside_arrays() {
+    let long = "x".repeat(2048);
+    let error = JsonRpcError::with_data(
+        -32000,
+        "Server error",
+        json!({
+            "items": [
+                long,
+                {"nested": ["y".repeat(2048)]}
+            ]
+        }),
+    );
+
+    let data = error.data.unwrap();
+    let top = data["items"][0].as_str().unwrap();
+    let nested = data["items"][1]["nested"][0].as_str().unwrap();
+
+    assert!(top.len() < 2048);
+    assert!(top.contains("truncated"));
+    assert!(nested.len() < 2048);
+    assert!(nested.contains("truncated"));
+}
+
+#[test]
+fn test_standard_kind_only_classifies_standard_errors() {
+    assert_eq!(
+        JsonRpcError::parse_error().standard_kind(),
+        Some(JsonRpcErrorCode::ParseError)
+    );
+    assert_eq!(
+        JsonRpcError::method_not_found("missing").standard_kind(),
+        Some(JsonRpcErrorCode::MethodNotFound)
+    );
+    assert_eq!(JsonRpcError::new(-32000, "server").standard_kind(), None);
+    assert_eq!(JsonRpcError::new(1001, "app").standard_kind(), None);
+}
+
+#[test]
 fn test_request_with_numeric_id() {
     let request = JsonRpcRequest::new("test_method".to_string(), None, RequestId::Number(0));
 

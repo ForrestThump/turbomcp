@@ -193,15 +193,13 @@ pub enum ServerNotification {
 
 /// Cancellation notification.
 ///
-/// Per MCP 2025-11-25, `requestId` should technically be optional (it MUST be
-/// provided when cancelling non-task requests; tasks use `tasks/cancel`
-/// instead). This implementation keeps `request_id` required for now — see the
-/// audit report for follow-up.
+/// Per MCP 2025-11-25, `requestId` is optional. It MUST be provided when
+/// cancelling non-task requests; tasks use `tasks/cancel` instead.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CancelledNotification {
     /// Request ID that was cancelled
-    #[serde(rename = "requestId")]
-    pub request_id: super::core::RequestId,
+    #[serde(rename = "requestId", default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<super::core::RequestId>,
     /// Optional reason for cancellation
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,

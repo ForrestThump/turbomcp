@@ -255,6 +255,9 @@ impl JsonRpcError {
     fn cap_data_value(data: Value) -> Value {
         match data {
             Value::String(s) => Value::String(Self::cap_message(s)),
+            Value::Array(values) => {
+                Value::Array(values.into_iter().map(Self::cap_data_value).collect())
+            }
             Value::Object(map) => {
                 let capped = map
                     .into_iter()
@@ -363,7 +366,14 @@ impl JsonRpcError {
     /// Classify this error against the JSON-RPC standard error enum.
     /// Returns `None` for codes outside the JSON-RPC reserved range.
     pub fn standard_kind(&self) -> Option<JsonRpcErrorCode> {
-        Some(JsonRpcErrorCode::from(self.code))
+        match self.code {
+            -32700 => Some(JsonRpcErrorCode::ParseError),
+            -32600 => Some(JsonRpcErrorCode::InvalidRequest),
+            -32601 => Some(JsonRpcErrorCode::MethodNotFound),
+            -32602 => Some(JsonRpcErrorCode::InvalidParams),
+            -32603 => Some(JsonRpcErrorCode::InternalError),
+            _ => None,
+        }
     }
 }
 

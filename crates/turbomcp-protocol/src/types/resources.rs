@@ -88,6 +88,9 @@ pub struct ReadResourceResult {
 pub struct SubscribeRequest {
     /// Resource URI
     pub uri: Uri,
+    /// Optional metadata per the current MCP specification
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub _meta: Option<serde_json::Value>,
 }
 
 /// Unsubscribe request
@@ -95,6 +98,9 @@ pub struct SubscribeRequest {
 pub struct UnsubscribeRequest {
     /// Resource URI
     pub uri: Uri,
+    /// Optional metadata per the current MCP specification
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub _meta: Option<serde_json::Value>,
 }
 
 /// Resource updated notification
@@ -102,4 +108,7 @@ pub struct UnsubscribeRequest {
 pub struct ResourceUpdatedNotification {
     /// Resource URI
     pub uri: Uri,
+    /// Optional metadata per the current MCP specification
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub _meta: Option<serde_json::Value>,
 }

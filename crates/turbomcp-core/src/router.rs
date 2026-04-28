@@ -370,7 +370,14 @@ fn build_initialize_result<H: McpHandler>(
 ///
 /// This is a convenience function for parsing incoming messages.
 pub fn parse_request(input: &str) -> Result<JsonRpcIncoming, McpError> {
-    JsonRpcIncoming::parse(input).map_err(|e| McpError::parse_error(e.to_string()))
+    let request =
+        JsonRpcIncoming::parse(input).map_err(|e| McpError::parse_error(e.to_string()))?;
+    if !request.is_valid_version() {
+        return Err(McpError::invalid_request(
+            "jsonrpc field must be exactly \"2.0\"",
+        ));
+    }
+    Ok(request)
 }
 
 /// Parse a pre-parsed `serde_json::Value` into a JSON-RPC incoming request.
@@ -378,7 +385,14 @@ pub fn parse_request(input: &str) -> Result<JsonRpcIncoming, McpError> {
 /// parse once into `Value` (to detect server-to-client responses), then use this
 /// to convert into the typed request without re-parsing the source string.
 pub fn parse_request_from_value(value: serde_json::Value) -> Result<JsonRpcIncoming, McpError> {
-    serde_json::from_value(value).map_err(|e| McpError::parse_error(e.to_string()))
+    let request: JsonRpcIncoming =
+        serde_json::from_value(value).map_err(|e| McpError::parse_error(e.to_string()))?;
+    if !request.is_valid_version() {
+        return Err(McpError::invalid_request(
+            "jsonrpc field must be exactly \"2.0\"",
+        ));
+    }
+    Ok(request)
 }
 
 /// Serialize a JSON-RPC outgoing response to a string.
@@ -393,7 +407,7 @@ pub fn serialize_response(response: &JsonRpcOutgoing) -> Result<alloc::string::S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::McpResult;
+    use crate::error::{ErrorKind, McpResult};
     use crate::marker::MaybeSend;
     use core::future::Future;
     use std::collections::HashMap;
@@ -468,6 +482,13 @@ mod tests {
         let request = parse_request(input).unwrap();
         assert_eq!(request.method, "ping");
         assert_eq!(request.id, Some(serde_json::json!(1)));
+    }
+
+    #[test]
+    fn test_parse_request_rejects_invalid_jsonrpc_version() {
+        let input = r#"{"jsonrpc": "1.0", "id": 1, "method": "ping"}"#;
+        let error = parse_request(input).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::InvalidRequest);
     }
 
     #[test]

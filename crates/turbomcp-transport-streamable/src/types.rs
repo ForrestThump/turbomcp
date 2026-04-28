@@ -2,6 +2,7 @@
 
 #[cfg(not(feature = "std"))]
 use alloc::{
+    collections::BTreeMap as HashMap,
     string::{String, ToString},
     vec::Vec,
 };
@@ -13,9 +14,6 @@ use std::{
     vec::Vec,
 };
 
-// Use hashbrown for no_std compatibility
-#[cfg(not(feature = "std"))]
-use hashbrown::HashMap;
 #[cfg(feature = "std")]
 use std::collections::HashMap;
 
@@ -462,6 +460,8 @@ impl From<StreamableError> for StreamableResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(not(feature = "std"))]
+    use alloc::vec;
 
     #[test]
     fn test_http_method_parse() {

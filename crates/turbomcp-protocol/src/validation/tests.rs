@@ -775,6 +775,31 @@ fn test_validate_long_string() {
 }
 
 #[test]
+fn test_validate_params_structure_errors_are_not_duplicated() {
+    let custom_rules = ValidationRules {
+        max_string_length: 10,
+        ..Default::default()
+    };
+    let validator = ProtocolValidator::new().with_rules(custom_rules);
+
+    let mut request = create_valid_request();
+    request.method = "custom/string".to_string();
+    request.params = Some(json!({
+        "text": "x".repeat(20)
+    }));
+
+    let result = validator.validate_request(&request);
+    let errors = result.errors();
+    assert_eq!(
+        errors
+            .iter()
+            .filter(|error| error.code == "STRING_TOO_LONG")
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn test_validate_complex_nested_structure() {
     let validator = ProtocolValidator::new();
 

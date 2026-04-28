@@ -174,8 +174,9 @@ impl SseEncoder {
             output.push('\n');
         }
 
-        // Data field (required, can be multiline)
-        for line in event.data.lines() {
+        // Data field (required, can be multiline). Use split('\n') instead of
+        // lines() so empty payloads and trailing newlines round-trip correctly.
+        for line in event.data.split('\n') {
             output.push_str("data: ");
             output.push_str(line);
             output.push('\n');
@@ -220,6 +221,7 @@ pub struct SseParser {
     current_event: Option<String>,
     current_data: Vec<String>,
     current_retry: Option<u32>,
+    last_event_id: Option<String>,
 }
 
 impl SseParser {
@@ -231,6 +233,7 @@ impl SseParser {
             current_event: None,
             current_data: Vec::new(),
             current_retry: None,
+            last_event_id: None,
         }
     }
 
@@ -248,8 +251,11 @@ impl SseParser {
 
         // Process complete lines
         while let Some(newline_pos) = self.buffer.find('\n') {
-            let line = self.buffer[..newline_pos].to_string();
+            let mut line = self.buffer[..newline_pos].to_string();
             self.buffer = self.buffer[newline_pos + 1..].to_string();
+            if line.ends_with('\r') {
+                line.pop();
+            }
 
             // Handle the line
             if line.is_empty() {
@@ -261,7 +267,8 @@ impl SseParser {
                 // Comment, ignore
             } else if let Some(colon_pos) = line.find(':') {
                 let field = &line[..colon_pos];
-                let value = line[colon_pos + 1..].trim_start();
+                let raw_value = &line[colon_pos + 1..];
+                let value = raw_value.strip_prefix(' ').unwrap_or(raw_value);
 
                 match field {
                     "id" => self.current_id = Some(value.to_string()),
@@ -300,8 +307,13 @@ impl SseParser {
 
         let data = self.current_data.join("\n");
 
+        let id = self.current_id.take();
+        if let Some(id) = &id {
+            self.last_event_id = Some(id.clone());
+        }
+
         let event = SseEvent {
-            id: self.current_id.take(),
+            id,
             event: self.current_event.take(),
             data,
             retry: self.current_retry.take(),
@@ -319,13 +331,14 @@ impl SseParser {
         self.current_event = None;
         self.current_data.clear();
         self.current_retry = None;
+        self.last_event_id = None;
     }
 
-    /// Get the last event ID seen.
+    /// Get the last emitted event ID.
     ///
     /// This is useful for reconnection with `Last-Event-ID` header.
     pub fn last_event_id(&self) -> Option<&str> {
-        self.current_id.as_deref()
+        self.last_event_id.as_deref()
     }
 }
 
@@ -415,6 +428,30 @@ mod tests {
     }
 
     #[test]
+    fn test_sse_encode_empty_data() {
+        let event = SseEvent::message("");
+        let encoded = SseEncoder::encode_string(&event);
+        assert_eq!(encoded, "data: \n\n");
+
+        let mut parser = SseParser::new();
+        let events = parser.feed(encoded.as_bytes());
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].data, "");
+    }
+
+    #[test]
+    fn test_sse_preserves_trailing_newline_data() {
+        let event = SseEvent::message("line1\n");
+        let encoded = SseEncoder::encode_string(&event);
+        assert_eq!(encoded, "data: line1\ndata: \n\n");
+
+        let mut parser = SseParser::new();
+        let events = parser.feed(encoded.as_bytes());
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].data, "line1\n");
+    }
+
+    #[test]
     fn test_sse_encode_with_id() {
         let event = SseEvent::with_id("123", "data");
         let encoded = SseEncoder::encode_string(&event);
@@ -459,6 +496,17 @@ mod tests {
     }
 
     #[test]
+    fn test_sse_parser_crlf() {
+        let mut parser = SseParser::new();
+        let events = parser.feed(b"id: 123\r\ndata: hello\r\n\r\n");
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].id, Some("123".to_string()));
+        assert_eq!(events[0].data, "hello");
+        assert_eq!(parser.last_event_id(), Some("123"));
+    }
+
+    #[test]
     fn test_sse_parser_with_id() {
         let mut parser = SseParser::new();
         let events = parser.feed(b"id: 123\ndata: test\n\n");
@@ -466,6 +514,7 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].id, Some("123".to_string()));
         assert_eq!(events[0].data, "test");
+        assert_eq!(parser.last_event_id(), Some("123"));
     }
 
     #[test]

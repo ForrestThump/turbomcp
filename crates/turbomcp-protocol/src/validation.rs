@@ -652,11 +652,6 @@ impl ProtocolValidator {
             );
         }
 
-        // Validate parameters if present
-        if let Some(ref params) = request.params {
-            self.validate_parameters(params, ctx);
-        }
-
         // Request ID is always present for requests (enforced by type system)
         // Validate ID format if needed
         self.validate_request_id(&request.id, ctx);
@@ -724,11 +719,6 @@ impl ProtocolValidator {
             );
         }
 
-        // Validate parameters if present
-        if let Some(ref params) = notification.params {
-            self.validate_parameters(params, ctx);
-        }
-
         // Notifications do NOT have an ID field (enforced by type system)
     }
 
@@ -787,24 +777,18 @@ impl ProtocolValidator {
 
     fn validate_method_params(&self, method: &str, params: &Value, ctx: &mut ValidationContext) {
         ctx.push_path("params".to_string());
+        self.validate_parameters(params, ctx);
 
-        match method {
-            "initialize" => self.validate_value_structure(params, "initialize", ctx),
-            "tools/list" => {
-                // Should be empty object or null
-                if !params.is_null() && !params.as_object().is_some_and(|obj| obj.is_empty()) {
-                    ctx.add_warning(
-                        "UNEXPECTED_PARAMS",
-                        "tools/list should not have parameters".to_string(),
-                        None,
-                    );
-                }
-            }
-            "tools/call" => self.validate_value_structure(params, "call_tool", ctx),
-            _ => {
-                // Unknown method - validate basic structure
-                self.validate_value_structure(params, "generic", ctx);
-            }
+        // tools/list should be empty object or null.
+        if method == "tools/list"
+            && !params.is_null()
+            && !params.as_object().is_some_and(|obj| obj.is_empty())
+        {
+            ctx.add_warning(
+                "UNEXPECTED_PARAMS",
+                "tools/list should not have parameters".to_string(),
+                None,
+            );
         }
 
         ctx.pop_path();

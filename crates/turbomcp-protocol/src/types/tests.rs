@@ -921,6 +921,44 @@ fn test_client_notification_variants() {
 }
 
 #[test]
+fn test_cancelled_notification_request_id_is_optional() {
+    let without_id: CancelledNotification = serde_json::from_value(json!({
+        "reason": "client shutdown"
+    }))
+    .unwrap();
+    assert!(without_id.request_id.is_none());
+
+    let with_id = CancelledNotification {
+        request_id: Some(RequestId::from("req-1")),
+        reason: None,
+        _meta: None,
+    };
+    let serialized = serde_json::to_value(&with_id).unwrap();
+    assert_eq!(serialized["requestId"], "req-1");
+}
+
+#[test]
+fn test_resource_subscription_wrappers_preserve_meta() {
+    let meta = json!({"progressToken": "tok-1"});
+    let subscribe = SubscribeRequest {
+        uri: "file:///project/src/main.rs".into(),
+        _meta: Some(meta.clone()),
+    };
+    let unsubscribe = UnsubscribeRequest {
+        uri: "file:///project/src/main.rs".into(),
+        _meta: Some(meta.clone()),
+    };
+    let updated = ResourceUpdatedNotification {
+        uri: "file:///project/src/main.rs".into(),
+        _meta: Some(meta.clone()),
+    };
+
+    assert_eq!(serde_json::to_value(&subscribe).unwrap()["_meta"], meta);
+    assert_eq!(serde_json::to_value(&unsubscribe).unwrap()["_meta"], meta);
+    assert_eq!(serde_json::to_value(&updated).unwrap()["_meta"], meta);
+}
+
+#[test]
 fn test_include_context_variants() {
     let contexts = vec![
         IncludeContext::None,

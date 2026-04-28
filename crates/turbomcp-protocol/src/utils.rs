@@ -163,10 +163,6 @@ impl RetryConfig {
 }
 
 /// Retry a future with exponential backoff
-///
-/// # Panics
-///
-/// Panics if no retry attempts are made and no error is captured
 pub async fn retry_with_backoff<F, Fut, T, E>(
     mut operation: F,
     config: RetryConfig,
@@ -176,26 +172,23 @@ where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, E>>,
 {
-    let mut last_error = None;
+    let max_attempts = config.max_attempts.max(1);
 
-    for attempt in 0..config.max_attempts {
+    let mut attempt = 0;
+    loop {
         match operation().await {
             Ok(result) => return Ok(result),
             Err(error) => {
-                if !should_retry(&error) || attempt + 1 >= config.max_attempts {
+                attempt += 1;
+                if !should_retry(&error) || attempt >= max_attempts {
                     return Err(error);
                 }
 
-                let delay = config.delay_for_attempt(attempt + 1);
+                let delay = config.delay_for_attempt(attempt);
                 sleep(delay).await;
-                last_error = Some(error);
             }
         }
     }
-
-    // This should never happen since we always set last_error before breaking
-    // But if it does, we need to return some error. Use expect to catch this bug.
-    Err(last_error.expect("Retry loop ended without attempts - this is a bug in retry logic"))
 }
 
 /// Circuit breaker state
@@ -465,6 +458,33 @@ mod tests {
 
         assert_eq!(result.unwrap(), "success");
         assert_eq!(counter.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn test_retry_with_zero_attempts_runs_once() {
+        let counter = Arc::new(AtomicU32::new(0));
+        let counter_clone = counter.clone();
+
+        let config = RetryConfig::new()
+            .with_max_attempts(0)
+            .with_base_delay(Duration::from_millis(1))
+            .with_jitter(false);
+
+        let result = retry_with_backoff(
+            move || {
+                let counter = counter_clone.clone();
+                async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    Err::<(), _>("fail")
+                }
+            },
+            config,
+            |_| true,
+        )
+        .await;
+
+        assert_eq!(result, Err("fail"));
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

@@ -685,13 +685,17 @@ pub trait RootsHandler: Send + Sync + std::fmt::Debug {
 /// impl CancellationHandler for MyCancellationHandler {
 ///     fn handle_cancellation(&self, notification: CancelledNotification) -> Pin<Box<dyn Future<Output = HandlerResult<()>> + Send + '_>> {
 ///         Box::pin(async move {
-///             println!("Request {} was cancelled", notification.request_id);
+///             if let Some(request_id) = &notification.request_id {
+///                 println!("Request {} was cancelled", request_id);
+///             } else {
+///                 println!("Cancellation notification received without requestId");
+///             }
 ///             if let Some(reason) = &notification.reason {
 ///                 println!("Reason: {}", reason);
 ///             }
 ///
 ///             // In a real implementation:
-///             // - Look up the in-flight request by notification.request_id
+///             // - Look up the in-flight request if notification.request_id is present
 ///             // - Signal cancellation (e.g., via CancellationToken)
 ///             // - Clean up any resources
 ///
@@ -1216,13 +1220,22 @@ impl CancellationHandler for LoggingCancellationHandler {
         notification: CancelledNotification,
     ) -> Pin<Box<dyn Future<Output = HandlerResult<()>> + Send + '_>> {
         Box::pin(async move {
-            if let Some(reason) = &notification.reason {
-                info!(
-                    "Request {} was cancelled: {}",
-                    notification.request_id, reason
-                );
-            } else {
-                info!("Request {} was cancelled", notification.request_id);
+            match (&notification.request_id, &notification.reason) {
+                (Some(request_id), Some(reason)) => {
+                    info!("Request {} was cancelled: {}", request_id, reason);
+                }
+                (Some(request_id), None) => {
+                    info!("Request {} was cancelled", request_id);
+                }
+                (None, Some(reason)) => {
+                    info!(
+                        "Cancellation notification received without requestId: {}",
+                        reason
+                    );
+                }
+                (None, None) => {
+                    info!("Cancellation notification received without requestId");
+                }
             }
             Ok(())
         })

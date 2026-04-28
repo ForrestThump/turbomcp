@@ -1216,7 +1216,10 @@ impl<T: Transport + 'static> Client<T> {
         }
 
         // Send resources/subscribe request
-        let request = SubscribeRequest { uri: uri.into() };
+        let request = SubscribeRequest {
+            uri: uri.into(),
+            _meta: None,
+        };
 
         self.inner
             .protocol
@@ -1275,7 +1278,10 @@ impl<T: Transport + 'static> Client<T> {
         }
 
         // Send resources/unsubscribe request
-        let request = UnsubscribeRequest { uri: uri.into() };
+        let request = UnsubscribeRequest {
+            uri: uri.into(),
+            _meta: None,
+        };
 
         self.inner
             .protocol
