@@ -1,10 +1,15 @@
 //! OpenAPI specification parsing.
 
 use std::path::Path;
+use std::time::Duration;
 
 use openapiv3::OpenAPI;
+use url::Url;
 
 use crate::error::{OpenApiError, Result};
+use crate::security::validate_url_for_ssrf;
+
+const DEFAULT_SPEC_FETCH_TIMEOUT_SECS: u64 = 30;
 
 /// Parse an OpenAPI specification from a string.
 ///
@@ -37,7 +42,13 @@ pub fn load_from_file(path: &Path) -> Result<OpenAPI> {
 
 /// Fetch an OpenAPI specification from a URL.
 pub async fn fetch_from_url(url: &str) -> Result<OpenAPI> {
-    let response = reqwest::get(url).await?;
+    let url = Url::parse(url)?;
+    validate_url_for_ssrf(&url)?;
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(DEFAULT_SPEC_FETCH_TIMEOUT_SECS))
+        .build()?;
+    let response = client.get(url).send().await?;
 
     if !response.status().is_success() {
         return Err(OpenApiError::ApiError(format!(
@@ -106,5 +117,11 @@ paths:
     fn test_invalid_spec() {
         let result = parse_spec("not valid openapi");
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_fetch_from_url_blocks_localhost_before_request() {
+        let result = fetch_from_url("http://127.0.0.1:9/openapi.json").await;
+        assert!(matches!(result, Err(OpenApiError::SsrfBlocked(_))));
     }
 }

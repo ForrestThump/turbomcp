@@ -9,6 +9,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+const SDK_VERSION: &str = env!("CARGO_PKG_VERSION");
+const WORKER_VERSION: &str = "0.8";
+
 /// Execute the new project command.
 pub fn execute(args: &NewArgs) -> CliResult<()> {
     // Determine output directory
@@ -52,7 +55,7 @@ pub fn execute(args: &NewArgs) -> CliResult<()> {
 
     println!("\nProject created successfully!");
     println!("\nNext steps:");
-    println!("  cd {}", args.name);
+    println!("  cd {}", output_dir.display());
 
     match args.template {
         ProjectTemplate::CloudflareWorkers
@@ -87,13 +90,14 @@ description = "{description}"
 {author}
 
 [dependencies]
-turbomcp = "3.0"
+turbomcp = "{sdk_version}"
 tokio = {{ version = "1", features = ["full"] }}
 serde = {{ version = "1", features = ["derive"] }}
 schemars = "1.2"
 "#,
         name = args.name,
         description = description,
+        sdk_version = SDK_VERSION,
         author = args
             .author
             .as_ref()
@@ -166,7 +170,7 @@ description = "{description}"
 {author}
 
 [dependencies]
-turbomcp = {{ version = "3.0", features = ["http", "auth"] }}
+turbomcp = {{ version = "{sdk_version}", features = ["http", "auth"] }}
 tokio = {{ version = "1", features = ["full"] }}
 serde = {{ version = "1", features = ["derive"] }}
 serde_json = "1"
@@ -176,6 +180,7 @@ tracing-subscriber = {{ version = "0.3", features = ["env-filter"] }}
 "#,
         name = args.name,
         description = description,
+        sdk_version = SDK_VERSION,
         author = args
             .author
             .as_ref()
@@ -263,11 +268,8 @@ impl {struct_name} {{
     /// Server configuration
     #[resource("config://server")]
     async fn config(&self, _uri: String) -> ResourceResult {{
-        ResourceResult::json(
-            "config://server",
-            &self.config,
-        ).map_err(|e| ResourceError::new(e.to_string()))
-         .unwrap_or_else(|e| ResourceResult::text("config://server", &format!("Error: {{}}", e)))
+        ResourceResult::json("config://server", &self.config)
+            .unwrap_or_else(|e| ResourceResult::text("config://server", format!("Error: {{}}", e)))
     }}
 
     /// Greeting prompt
@@ -346,13 +348,14 @@ description = "{description}"
 crate-type = ["cdylib"]
 
 [dependencies]
-turbomcp-wasm = {{ version = "3.0", features = ["macros", "streamable"] }}
-worker = "0.5"
+turbomcp-wasm = {{ version = "{sdk_version}", features = ["macros", "streamable"] }}
+worker = "{worker_version}"
 serde = {{ version = "1", features = ["derive"] }}
 serde_json = "1"
 schemars = "1.2"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
+console_error_panic_hook = "0.1"
 
 [profile.release]
 opt-level = "s"
@@ -360,6 +363,8 @@ lto = true
 "#,
         name = args.name,
         description = description,
+        sdk_version = SDK_VERSION,
+        worker_version = WORKER_VERSION,
         author = args
             .author
             .as_ref()
@@ -468,13 +473,14 @@ description = "{description}"
 crate-type = ["cdylib"]
 
 [dependencies]
-turbomcp-wasm = {{ version = "3.0", features = ["macros", "streamable", "auth"] }}
-worker = "0.5"
+turbomcp-wasm = {{ version = "{sdk_version}", features = ["macros", "streamable", "auth"] }}
+worker = "{worker_version}"
 serde = {{ version = "1", features = ["derive"] }}
 serde_json = "1"
 schemars = "1.2"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
+console_error_panic_hook = "0.1"
 
 [profile.release]
 opt-level = "s"
@@ -482,6 +488,8 @@ lto = true
 "#,
         name = args.name,
         description = description,
+        sdk_version = SDK_VERSION,
+        worker_version = WORKER_VERSION,
         author = args
             .author
             .as_ref()
@@ -599,13 +607,14 @@ description = "{description}"
 crate-type = ["cdylib"]
 
 [dependencies]
-turbomcp-wasm = {{ version = "3.0", features = ["macros", "streamable"] }}
-worker = "0.5"
+turbomcp-wasm = {{ version = "{sdk_version}", features = ["macros", "streamable"] }}
+worker = "{worker_version}"
 serde = {{ version = "1", features = ["derive"] }}
 serde_json = "1"
 schemars = "1.2"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
+console_error_panic_hook = "0.1"
 
 [profile.release]
 opt-level = "s"
@@ -613,6 +622,8 @@ lto = true
 "#,
         name = args.name,
         description = description,
+        sdk_version = SDK_VERSION,
+        worker_version = WORKER_VERSION,
         author = args
             .author
             .as_ref()
@@ -905,5 +916,64 @@ mod tests {
             ProjectTemplate::CloudflareWorkers.to_string(),
             "cloudflare-workers"
         );
+    }
+
+    fn test_args(template: ProjectTemplate, output: &Path) -> NewArgs {
+        NewArgs {
+            name: "generated-server".to_string(),
+            template,
+            output: Some(output.to_path_buf()),
+            git: false,
+            description: None,
+            author: None,
+        }
+    }
+
+    #[test]
+    fn generated_native_templates_use_current_sdk_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let minimal = dir.path().join("minimal");
+        fs::create_dir_all(&minimal).unwrap();
+        generate_minimal(&test_args(ProjectTemplate::Minimal, &minimal), &minimal).unwrap();
+        let cargo_toml = fs::read_to_string(minimal.join("Cargo.toml")).unwrap();
+        assert!(cargo_toml.contains(&format!("turbomcp = \"{}\"", SDK_VERSION)));
+
+        let full = dir.path().join("full");
+        fs::create_dir_all(&full).unwrap();
+        generate_full(&test_args(ProjectTemplate::Full, &full), &full).unwrap();
+        let cargo_toml = fs::read_to_string(full.join("Cargo.toml")).unwrap();
+        let main_rs = fs::read_to_string(full.join("src/main.rs")).unwrap();
+        assert!(cargo_toml.contains(&format!("version = \"{}\"", SDK_VERSION)));
+        assert!(!main_rs.contains("ResourceError"));
+    }
+
+    #[test]
+    fn generated_worker_templates_use_current_versions_and_panic_hook() {
+        let dir = tempfile::tempdir().unwrap();
+        let cases = [
+            (
+                ProjectTemplate::CloudflareWorkers,
+                generate_cloudflare_workers as fn(&NewArgs, &Path) -> CliResult<()>,
+            ),
+            (
+                ProjectTemplate::CloudflareWorkersOauth,
+                generate_cloudflare_workers_oauth as fn(&NewArgs, &Path) -> CliResult<()>,
+            ),
+            (
+                ProjectTemplate::CloudflareWorkersDurableObjects,
+                generate_cloudflare_workers_do as fn(&NewArgs, &Path) -> CliResult<()>,
+            ),
+        ];
+
+        for (template, generate) in cases {
+            let output = dir.path().join(template.to_string());
+            fs::create_dir_all(&output).unwrap();
+            generate(&test_args(template, &output), &output).unwrap();
+            let cargo_toml = fs::read_to_string(output.join("Cargo.toml")).unwrap();
+            assert!(cargo_toml.contains(&format!("version = \"{}\"", SDK_VERSION)));
+            assert!(cargo_toml.contains(&format!("worker = \"{}\"", WORKER_VERSION)));
+            assert!(cargo_toml.contains("console_error_panic_hook = \"0.1\""));
+            assert!(!cargo_toml.contains("3.0"));
+        }
     }
 }
