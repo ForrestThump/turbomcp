@@ -11,10 +11,10 @@ see the [top-level MIGRATION.md](../../MIGRATION.md).
 
 ```toml
 [dependencies]
-turbomcp-auth = "3.1.2"
+turbomcp-auth = "3.1.3"
 
 # Or via the umbrella crate:
-turbomcp = { version = "3.1.2", features = ["auth"] }
+turbomcp = { version = "3.1.3", features = ["auth"] }
 ```
 
 ### Unified error types
@@ -55,7 +55,7 @@ Three new feature-gated modules were added. All are disabled by default.
 
 ```toml
 # Both compile in v3; prefer middleware
-turbomcp-auth = { version = "3.1.2", features = ["middleware"] }
+turbomcp-auth = { version = "3.1.3", features = ["middleware"] }
 ```
 
 ### Observability

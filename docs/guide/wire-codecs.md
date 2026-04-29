@@ -59,7 +59,7 @@ SIMD-accelerated JSON parsing using `sonic-rs`:
 
 ```toml
 [dependencies]
-turbomcp-wire = { version = "3.1.2", features = ["simd"] }
+turbomcp-wire = { version = "3.1.3", features = ["simd"] }
 ```
 
 ```rust
@@ -76,7 +76,7 @@ Compact binary MessagePack format:
 
 ```toml
 [dependencies]
-turbomcp-wire = { version = "3.1.2", features = ["msgpack"] }
+turbomcp-wire = { version = "3.1.3", features = ["msgpack"] }
 ```
 
 ```rust
@@ -221,7 +221,7 @@ Wire codecs work in `no_std` environments:
 
 ```toml
 [dependencies]
-turbomcp-wire = { version = "3.1.2", default-features = false, features = ["json"] }
+turbomcp-wire = { version = "3.1.3", default-features = false, features = ["json"] }
 ```
 
 ```rust

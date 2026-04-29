@@ -29,11 +29,11 @@ If you want a minimal build without the aggregator, you can depend directly on t
 ```toml
 # Minimal: only STDIO
 [dependencies]
-turbomcp-stdio = "3.1.2"
+turbomcp-stdio = "3.1.3"
 
 # Only HTTP
 [dependencies]
-turbomcp-http = "3.1.2"
+turbomcp-http = "3.1.3"
 ```
 
 ### Feature flag changes
@@ -42,7 +42,7 @@ Feature names are unchanged. The default feature remains `stdio`.
 
 ```toml
 # v2.x and v3 - feature names identical
-turbomcp-transport = { version = "3.1.2", features = ["http", "websocket", "tcp"] }
+turbomcp-transport = { version = "3.1.3", features = ["http", "websocket", "tcp"] }
 ```
 
 Each feature now activates the corresponding modular crate as an optional dependency in addition to pulling in required framework crates (axum, tower, tokio-tungstenite, etc.):

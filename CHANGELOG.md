@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [3.1.3] - 2026-04-28
+## [3.1.3] - 2026-04-29
 
 Patch release: follow-on exhaustive audit of lower-to-upper layers, focusing on
 JSON-RPC correctness, stream framing robustness, deprecated transport surface
@@ -35,6 +35,9 @@ removal, and active documentation/scaffold alignment.
   examples use the current crate version and supported resource/tool patterns,
   and active README/migration guidance no longer points new users at deprecated
   surfaces.
+- **Release-facing metadata now targets 3.1.3** — workspace manifests, internal
+  crate dependency pins, lockfile entries, install snippets, README examples,
+  and package-facing migration docs identify the patch release consistently.
 
 ### Removed
 

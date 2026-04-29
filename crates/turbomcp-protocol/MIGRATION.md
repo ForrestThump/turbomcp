@@ -72,7 +72,7 @@ The only experimental feature flag remaining is `experimental-tasks` for the Tas
 To opt out of the default SIMD acceleration:
 
 ```toml
-turbomcp-protocol = { version = "3.1.2", default-features = false, features = ["std"] }
+turbomcp-protocol = { version = "3.1.3", default-features = false, features = ["std"] }
 ```
 
 ---
