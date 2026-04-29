@@ -44,7 +44,7 @@ use turbomcp::prelude::*;
 #[derive(Clone)]
 struct DemoServer;
 
-#[server(name = "turbomcp-demo", version = "3.0.0")]
+#[server(name = "turbomcp-demo", version = "3.1.3")]
 impl DemoServer {
     #[tool]
     async fn hello(&self, name: Option<String>) -> String {
@@ -65,13 +65,13 @@ impl DemoServer {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    DemoServer.run().await?;
+    DemoServer.run_stdio().await?;
     Ok(())
 }
 ```
 
 ## Related
 
-- [Examples Guide](../crates/turbomcp/examples/README.md) — 15 focused examples
+- [Examples Guide](../crates/turbomcp/examples/README.md) — workspace examples
 - [Main README](../README.md) — Full documentation
 - [Migration Guide](../MIGRATION.md) — Upgrading from v1 or v2

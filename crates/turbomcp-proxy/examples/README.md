@@ -1,204 +1,102 @@
 # turbomcp-proxy Examples
 
-This directory contains practical examples demonstrating turbomcp-proxy features.
-
-## Running Examples
-
-All examples can be run using:
-```bash
-cargo run --example <example_name>
-```
+This directory contains practical examples for proxy construction, backend
+introspection, and schema export.
 
 ## Available Examples
 
-### 1. `runtime_proxy.rs` - Runtime Proxy Integration
-
-Demonstrates building and running a runtime proxy programmatically.
+### `runtime_proxy.rs` - Runtime Proxy Builder
 
 ```bash
-cargo run --example runtime_proxy
+cargo run -p turbomcp-proxy --example runtime_proxy
 ```
 
-Shows:
-- Creating a `RuntimeProxyBuilder`
-- Configuring backends and frontends
-- Building and running the proxy server
-- HTTP endpoint exposure
+Demonstrates `RuntimeProxyBuilder`, backend/frontend configuration, security
+validation, and proxy metrics. Some attempted backends are intentionally invalid
+so the example can show validation errors without requiring external services.
 
-### 2. `tcp_backend.rs` - TCP Backend Connection
-
-Demonstrates connecting to an MCP server via TCP and introspecting its capabilities.
+### `tcp_backend.rs` - TCP Backend Introspection
 
 ```bash
-# First, start an MCP server on TCP port 5000
-your-mcp-server --listen-tcp localhost:5000
+# Terminal 1: start the workspace TCP MCP server
+cargo run -p turbomcp --example tcp_server --features tcp
 
-# Then run the example
-cargo run --example tcp_backend
+# Terminal 2: connect and introspect it
+cargo run -p turbomcp-proxy --example tcp_backend
 ```
 
-Shows:
-- Configuring TCP backend (`host:port`)
-- Backend connection and initialization
-- Server introspection
-- Accessing tools and resources
+Shows how to configure a TCP backend, initialize the MCP client connection, and
+print tools/resources/prompts discovered from the backend.
 
-**Use Cases:**
-- Connecting to remote MCP servers
-- High-performance network communication
-- Multi-host deployments
-
-### 3. `unix_socket_backend.rs` - Unix Domain Socket Backend
-
-Demonstrates connecting to an MCP server via Unix domain socket for efficient IPC.
+### `unix_socket_backend.rs` - Unix Socket Backend Introspection
 
 ```bash
-# First, start an MCP server on Unix socket
-your-mcp-server --listen-unix /tmp/mcp.sock
+# Terminal 1: start the workspace Unix socket MCP server
+cargo run -p turbomcp --example unix_server --features unix
 
-# Then run the example
-cargo run --example unix_socket_backend
+# Terminal 2: connect and introspect it
+cargo run -p turbomcp-proxy --example unix_socket_backend
 ```
 
-Shows:
-- Configuring Unix socket backend
-- Socket path validation
-- Server introspection
-- IPC benefits explanation
+Shows the same introspection path using a Unix domain socket. This example is
+for Unix/Linux/macOS and requires the socket file to exist.
 
-**Use Cases:**
-- Same-host communication
-- Container networking
-- Security isolation with filesystem permissions
-- Zero network overhead
-
-### 4. `schema_export.rs` - Schema Generation
-
-Demonstrates exporting MCP server capabilities as standard schemas.
+### `schema_export.rs` - Schema Generation
 
 ```bash
-cargo run --example schema_export
+# Self-contained mock spec; no backend required
+cargo run -p turbomcp-proxy --example schema_export
+
+# Real STDIO backend
+cargo run -p turbomcp-proxy --example schema_export -- \
+  --backend stdio --cmd "your-mcp-server"
+
+# Real TCP backend
+cargo run -p turbomcp-proxy --example schema_export -- \
+  --backend tcp --tcp 127.0.0.1:8765
+
+# Real Unix socket backend
+cargo run -p turbomcp-proxy --example schema_export -- \
+  --backend unix --unix /tmp/turbomcp-demo.sock
 ```
 
-Shows:
-- Introspecting server capabilities
-- Generating OpenAPI 3.1 schema
-- Generating GraphQL Schema Definition Language
-- Generating Protobuf 3 definition
-
-**Output Includes:**
-- REST API documentation (OpenAPI)
-- GraphQL type definitions
-- Protocol buffer messages
+Generates OpenAPI 3.1, GraphQL SDL, and Protobuf 3 definitions from an MCP
+server capability snapshot. With no arguments it uses a built-in mock spec so
+the example is always runnable.
 
 ## CLI Equivalents
 
-All examples demonstrate functionality available via CLI:
-
-### TCP Backend
 ```bash
 turbomcp-proxy serve \
-  --backend tcp --tcp localhost:5000 \
+  --backend tcp --tcp 127.0.0.1:8765 \
   --frontend http --bind 127.0.0.1:3001
-```
 
-### Unix Socket Backend
-```bash
 turbomcp-proxy serve \
-  --backend unix --unix /tmp/mcp.sock \
+  --backend unix --unix /tmp/turbomcp-demo.sock \
   --frontend http --bind 127.0.0.1:3002
-```
 
-### Schema Export
-```bash
-# OpenAPI
 turbomcp-proxy schema openapi \
-  --backend tcp --tcp localhost:5000 \
+  --backend tcp --tcp 127.0.0.1:8765 \
   --output api-spec.json
 
-# GraphQL
-turbomcp-proxy schema graphql \
-  --backend unix --unix /tmp/mcp.sock \
-  --output schema.graphql
-
-# Protobuf
 turbomcp-proxy schema protobuf \
   --backend stdio --cmd "your-mcp-server" \
   --output server.proto
 ```
 
-## Common Patterns
-
-### Testing a Backend Connection
-
-```bash
-cargo run --example tcp_backend
-# or
-cargo run --example unix_socket_backend
-```
-
-### Generating API Documentation
-
-```bash
-cargo run --example schema_export
-```
-
-### Quick HTTP Proxy Setup
-
-```bash
-turbomcp-proxy serve \
-  --backend tcp --tcp your-server:5000 \
-  --frontend http --bind 0.0.0.0:3000 \
-  --jwt-secret "your-secret" \
-  --require-auth
-```
-
 ## Requirements
 
-- Rust 1.90.0+
-- An MCP server accessible via:
-  - STDIO (subprocess)
-  - TCP (network)
-  - Unix socket (same host)
-  - HTTP/WebSocket (web service)
-
-## Testing with Mock Servers
-
-For testing without a real MCP server:
-
-```bash
-# Use the built-in example servers from turbomcp
-cargo run --example <example_name> -- \
-  --backend stdio \
-  --cmd "your-test-server"
-```
-
-## Performance Notes
-
-- **STDIO**: Best for subprocess communication, moderate latency
-- **TCP**: Best for remote servers, network-dependent latency
-- **Unix Sockets**: Best for same-host IPC, minimal latency and overhead
-- **HTTP/WebSocket**: Best for web clients, network-dependent latency
-
-## Next Steps
-
-1. Choose the transport that fits your use case
-2. Start your MCP server with the appropriate listener
-3. Run the corresponding example
-4. Use the CLI tool for production deployments
-5. Refer to the main [README.md](../README.md) for detailed documentation
+- Rust 1.89.0 or newer
+- A live MCP backend for `tcp_backend.rs` and `unix_socket_backend.rs`
+- No external backend for `runtime_proxy.rs` or mock-mode `schema_export.rs`
 
 ## Troubleshooting
 
-**"Connection refused"**
-- Ensure the MCP server is running and listening on the configured address
-- Check port/socket permissions
+`Connection refused`: ensure the TCP backend is running on the configured host
+and port.
 
-**"Socket not found"**
-- Verify the Unix socket path is correct
-- Check that the server has permission to create the socket file
+`Socket not found`: ensure the Unix socket path exists and the server has
+created it before running the example.
 
-**"Backend connection error"**
-- Check network connectivity (for TCP)
-- Verify credentials/authentication tokens (if required)
-- Review server logs for detailed error information
+`Backend connection error`: verify the backend speaks MCP over the selected
+transport and can complete initialization.

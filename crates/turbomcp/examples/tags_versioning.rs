@@ -11,7 +11,9 @@
 //! - API evolution without breaking changes
 //! - Multiple versions of the same tool
 //!
-//! Run with: `cargo run --example tags_versioning`
+//! Run with:
+//! - `cargo run --example tags_versioning` to inspect component metadata.
+//! - `cargo run --example tags_versioning -- --serve` to start the STDIO server.
 
 use turbomcp::prelude::*;
 
@@ -74,6 +76,17 @@ impl TaggedServer {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::args().any(|arg| arg == "--serve") {
+        // STDIO servers must not write human output to stdout.
+        tracing_subscriber::fmt()
+            .with_writer(std::io::stderr)
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .init();
+
+        TaggedServer.run_stdio().await?;
+        return Ok(());
+    }
+
     // Print out the server's tools to show their metadata
     let server = TaggedServer;
 
@@ -123,10 +136,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!();
     }
 
-    println!("Run with --stdio to start the server:");
-    println!("  cargo run --example tags_versioning");
-    println!("\nStarting stdio server...");
-
-    TaggedServer.run_stdio().await?;
+    println!("Start the STDIO server with:");
+    println!("  cargo run --example tags_versioning -- --serve");
     Ok(())
 }

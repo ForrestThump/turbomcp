@@ -158,8 +158,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Custom Route Mapping Demo ===\n");
 
     let custom_mapping = RouteMapping::default_rules()
-        // Make all /pets/* endpoints tools (even GET)
-        .map_pattern(r"^/pets.*", McpType::Tool)?
+        // Make all /pets/* endpoints tools, overriding the default GET -> Resource rule.
+        .map_rule(
+            ["GET", "POST", "PUT", "PATCH", "DELETE"],
+            r"^/pets.*",
+            McpType::Tool,
+            10,
+        )?
         // But skip any /internal/* endpoints
         .map_pattern(r"^/internal.*", McpType::Skip)?;
 

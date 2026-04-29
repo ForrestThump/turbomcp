@@ -9,7 +9,7 @@
 //!
 //! **Connect:**
 //! ```bash
-//! cargo run --example tcp_client --features tcp
+//! cargo run --example tcp_client --features "tcp full-client"
 //! ```
 
 #[cfg(feature = "tcp")]

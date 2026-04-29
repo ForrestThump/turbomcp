@@ -1,16 +1,16 @@
 //! Example: Unix Domain Socket Backend Proxy
 //!
-//! Demonstrates connecting to an MCP server via Unix domain socket and exposing it over HTTP.
+//! Demonstrates connecting to an MCP server via Unix domain socket and printing its capabilities.
 //! Unix sockets provide efficient IPC (Inter-Process Communication) with security isolation.
 //!
 //! Usage:
-//!   1. Start an MCP server listening on Unix socket at /tmp/mcp.sock
+//!   1. Start an MCP server listening on Unix socket at /tmp/turbomcp-demo.sock
 //!   2. Run: cargo run --example unix_socket_backend
-//!   3. Connect to HTTP at http://localhost:3002/mcp
+//!   3. Inspect the backend capabilities printed by this example
 //!
-//! Example MCP server startup (if you have one):
+//! Example MCP server startup:
 //!   ```bash
-//!   your-mcp-server --listen-unix /tmp/mcp.sock
+//!   cargo run -p turbomcp --example unix_server --features unix
 //!   ```
 
 use std::path::PathBuf;
@@ -26,14 +26,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🚀 Unix Domain Socket Backend Proxy Example");
     println!("===========================================\n");
 
-    let socket_path = "/tmp/mcp.sock";
+    let socket_path = "/tmp/turbomcp-demo.sock";
 
     // Check if socket exists
     if !PathBuf::from(socket_path).exists() {
         eprintln!("❌ Socket file not found at {}", socket_path);
         eprintln!("\nTo run this example:");
         eprintln!("  1. Start an MCP server listening on Unix socket:");
-        eprintln!("     your-mcp-server --listen-unix {}", socket_path);
+        eprintln!("     cargo run -p turbomcp --example unix_server --features unix");
         eprintln!("  2. Then run this example");
         return Err("Socket not found".into());
     }

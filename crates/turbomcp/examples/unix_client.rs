@@ -9,7 +9,7 @@
 //!
 //! **Then run client:**
 //! ```bash
-//! cargo run --example unix_client --features unix
+//! cargo run --example unix_client --features "unix full-client"
 //! ```
 
 use std::collections::HashMap;

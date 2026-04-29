@@ -6,7 +6,7 @@
 //!
 //! Run with:
 //! ```bash
-//! cargo run --example transports_demo --features "stdio,http,tcp"
+//! cargo run --example transports_demo --features "http tcp"
 //! ```
 
 use turbomcp::prelude::*;
@@ -83,7 +83,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("  - run_websocket(\"0.0.0.0:8080\")");
 
     #[cfg(feature = "unix")]
-    tracing::info!("  - run_unix(\"/tmp/mcp.sock\")");
+    tracing::info!("  - run_unix(\"/tmp/turbomcp-demo.sock\")");
 
     tracing::info!("=== Usage Examples ===");
 

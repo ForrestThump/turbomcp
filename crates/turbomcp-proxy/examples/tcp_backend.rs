@@ -1,15 +1,15 @@
 //! Example: TCP Backend Proxy
 //!
-//! Demonstrates connecting to an MCP server via TCP and exposing it over HTTP.
+//! Demonstrates connecting to an MCP server via TCP and printing its capabilities.
 //!
 //! Usage:
-//!   1. Start an MCP server on TCP port 5000
+//!   1. Start an MCP server on TCP port 8765
 //!   2. Run: cargo run --example tcp_backend
-//!   3. Connect to HTTP at http://localhost:3001/mcp
+//!   3. Inspect the backend capabilities printed by this example
 //!
-//! Example MCP server startup (if you have one):
+//! Example MCP server startup:
 //!   ```bash
-//!   your-mcp-server --listen-tcp localhost:5000
+//!   cargo run -p turbomcp --example tcp_server --features tcp
 //!   ```
 
 use turbomcp_proxy::proxy::{BackendConfig, BackendConnector, BackendTransport};
@@ -27,14 +27,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Configure TCP backend connection
     let backend_config = BackendConfig {
         transport: BackendTransport::Tcp {
-            host: "localhost".to_string(),
-            port: 5000,
+            host: "127.0.0.1".to_string(),
+            port: 8765,
         },
         client_name: "tcp-proxy-example".to_string(),
         client_version: "1.0.0".to_string(),
     };
 
-    println!("📡 Connecting to TCP server at localhost:5000...");
+    println!("📡 Connecting to TCP server at 127.0.0.1:8765...");
 
     // Create backend connector (establishes connection and initializes)
     let backend = BackendConnector::new(backend_config).await?;
@@ -78,7 +78,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  1. Wrap this backend in a ProxyService");
     println!("  2. Expose it over HTTP with Axum");
     println!(
-        "  3. Run: turbomcp-proxy serve --backend tcp --tcp localhost:5000 --frontend http --bind 127.0.0.1:3001"
+        "  3. Run: turbomcp-proxy serve --backend tcp --tcp 127.0.0.1:8765 --frontend http --bind 127.0.0.1:3001"
     );
 
     Ok(())

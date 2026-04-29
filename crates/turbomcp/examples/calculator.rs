@@ -16,10 +16,12 @@
 //! # Testing with CLI
 //!
 //! ```bash
-//! # Initialize (MCP spec requires clientInfo)
-//! echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","clientInfo":{"name":"cli","version":"1.0"},"capabilities":{}}}' | cargo run --example calculator --features stdio
-//! echo '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' | cargo run --example calculator --features stdio
-//! echo '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"add","arguments":{"a":5,"b":3}}}' | cargo run --example calculator --features stdio
+//! printf '%s\n' \
+//!   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","clientInfo":{"name":"cli","version":"1.0"},"capabilities":{}}}' \
+//!   '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+//!   '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+//!   '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"add","arguments":{"a":5,"b":3}}}' \
+//! | cargo run --example calculator --features stdio
 //! ```
 
 use turbomcp::prelude::*;
@@ -71,7 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Run the server on STDIO transport
     // The #[server] macro generates the McpHandler implementation
-    // which provides run_stdio(), run_http(), run_tcp(), etc.
+    // which provides run_stdio() and other feature-gated transport methods.
     Calculator.run_stdio().await?;
 
     Ok(())

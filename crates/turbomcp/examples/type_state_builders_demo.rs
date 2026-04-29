@@ -43,7 +43,7 @@ fn main() {
         server_caps.experimental.as_ref().map_or(0, |e| e.len())
     );
 
-    // Example 2: Client capabilities with opt-out model (TurboMCP 2.0)
+    // Example 2: Client capabilities with opt-out model
     println!("\n2. Opt-Out Capability Model (Forward Compatible!)");
     println!("   -----------------------------------------------");
 
@@ -158,15 +158,20 @@ fn main() {
     }
 
     if let Some(ref experimental) = client_caps.experimental {
-        println!("   🚀 TurboMCP Client Extensions:");
-        for (key, value) in experimental {
-            if key.starts_with("turbomcp_") {
+        let turbomcp_extensions: Vec<_> = experimental
+            .iter()
+            .filter(|(key, _)| key.starts_with("turbomcp_"))
+            .collect();
+
+        if !turbomcp_extensions.is_empty() {
+            println!("   🚀 TurboMCP Client Extensions:");
+            for (key, value) in turbomcp_extensions {
                 println!("      - {}: {}", key.replace("turbomcp_", ""), value);
             }
         }
     }
 
-    println!("\n🎉 Demo Complete! TurboMCP 2.0 capability builders provide:");
+    println!("\n🎉 Demo Complete! TurboMCP capability builders provide:");
     println!("   ✅ Opt-out model (forward compatible!)");
     println!("   ✅ Compile-time capability validation");
     println!("   ✅ Advanced MCP capability support");

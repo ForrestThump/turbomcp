@@ -95,8 +95,12 @@ name = "unix_client"
 required-features = ["unix", "full-client"]
 
 [[example]]
+name = "unix_server"
+required-features = ["unix"]
+
+[[example]]
 name = "transports_demo"
-required-features = ["stdio", "http", "tcp"]
+required-features = ["stdio"]
 
 [[example]]
 name = "type_state_builders_demo"

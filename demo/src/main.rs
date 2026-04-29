@@ -7,7 +7,7 @@ use turbomcp::prelude::*;
 #[derive(Clone)]
 struct DemoServer;
 
-#[server(name = "turbomcp-demo", version = "3.0.0")]
+#[server(name = "turbomcp-demo", version = "3.1.3")]
 impl DemoServer {
     /// Say hello to someone
     #[tool]
@@ -32,6 +32,6 @@ impl DemoServer {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Run with STDIO - the simplest possible MCP server
-    DemoServer.run().await?;
+    DemoServer.run_stdio().await?;
     Ok(())
 }

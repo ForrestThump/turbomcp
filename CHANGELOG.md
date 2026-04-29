@@ -68,6 +68,11 @@ removal, and active documentation/scaffold alignment.
   core/gRPC references no longer advertise removed imports or client methods,
   proxy README package links no longer target ignored local notes, and rustdoc
   now passes with warnings denied.
+- **Examples and demo documentation match current runnable APIs** — STDIO
+  examples now show complete MCP initialization flows, transport examples use
+  the required client features, a Unix server/client pair is documented and
+  compiled, proxy schema export has a no-backend mock mode, and stale unsupported
+  file-based config examples were removed.
 
 ## [3.1.2] - 2026-04-27
 

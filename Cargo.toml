@@ -203,7 +203,7 @@ testcontainers = "0.27"
 doc-comment = "0.3"
 
 # Workspace dependencies are defined below
-# Internal crate dependencies - v3.0.0
+# Internal workspace crate dependencies
 #
 # NOTE on `default-features = false`:
 # - turbomcp-core: Has `default = ["std"]` - needed for no_std/WASM builds
@@ -214,13 +214,13 @@ doc-comment = "0.3"
 # All other crates either have empty defaults (removed vestigial `default-features = false`)
 # or useful defaults that should be enabled by default.
 turbomcp = { version = "3.1.3", path = "crates/turbomcp" }
-# v3.0: turbomcp-types is THE source of truth for all MCP types
+# v3: turbomcp-types is THE source of truth for all MCP types
 turbomcp-types = { version = "3.1.3", path = "crates/turbomcp-types" }
-# v3.0: turbomcp-core re-extracted as no_std foundation layer
+# v3: turbomcp-core is the no_std foundation layer
 turbomcp-core = { version = "3.1.3", path = "crates/turbomcp-core", default-features = false }
-# v3.0: turbomcp-transport-traits lean transport traits crate
+# v3: turbomcp-transport-traits is the lean transport traits crate
 turbomcp-transport-traits = { version = "3.1.3", path = "crates/turbomcp-transport-traits" }
-# v3.0: Individual transport crates (extracted from monolithic turbomcp-transport)
+# v3: Individual transport crates extracted from monolithic turbomcp-transport
 turbomcp-stdio = { version = "3.1.3", path = "crates/turbomcp-stdio" }
 turbomcp-http = { version = "3.1.3", path = "crates/turbomcp-http" }
 turbomcp-websocket = { version = "3.1.3", path = "crates/turbomcp-websocket" }

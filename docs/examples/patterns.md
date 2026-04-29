@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use turbomcp::prelude::*;
+use turbomcp::prelude::*;
 
 #[derive(Clone)]
 struct CounterServer {
@@ -82,7 +83,7 @@ impl SessionServer {
     #[tool("Store preference in session")]
     async fn set_preference(
         &self,
-        ctx: Context,
+        ctx: &RequestContext,
         key: String,
         value: String,
     ) -> McpResult<String> {
@@ -103,7 +104,7 @@ impl SessionServer {
     }
 
     #[tool("Get preference from session")]
-    async fn get_preference(&self, ctx: Context, key: String) -> McpResult<String> {
+    async fn get_preference(&self, ctx: &RequestContext, key: String) -> McpResult<String> {
         let session_id = ctx.request_id().to_string();
         let sessions = self.sessions.read().await;
 
@@ -948,4 +949,4 @@ impl PooledServer {
 - [Advanced Examples](./advanced.md) - Sampling, elicitation, complex flows
 - [Context & DI](../guide/context-injection.md) - Dependency injection details
 - [Advanced Patterns](../guide/advanced-patterns.md) - Additional optimization techniques
-- [Examples Directory](https://github.com/turbomcp/turbomcp/tree/main/crates/turbomcp/examples) - 26+ runnable examples
+- [Examples Directory](https://github.com/Epistates/turbomcp/tree/main/crates/turbomcp/examples) - workspace examples

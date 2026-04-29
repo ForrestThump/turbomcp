@@ -91,10 +91,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         result.assert_text_contains("100");
         println!("✓ add(100, 0.5) contains '100'");
 
-        // Assert error on invalid input
-        let result = client.call_tool("divide", serde_json::json!({"a": 1.0, "b": 0.0})).await;
-        assert!(result.is_err(), "Expected error for division by zero");
-        println!("✓ divide(1, 0) returns error");
+        // Assert tool-level error on invalid input
+        let result = client
+            .call_tool("divide", serde_json::json!({"a": 1.0, "b": 0.0}))
+            .await?;
+        result.assert_is_error();
+        result.assert_text_contains("Division by zero");
+        println!("✓ divide(1, 0) returns tool error");
         println!();
 
         // =====================================================================
@@ -178,9 +181,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("      let result = client.call_tool(\"add\", json!({{\"a\": 2, \"b\": 3}})).await.unwrap();");
         println!("      result.assert_text(\"5\");");
         println!();
-        println!("      // Test error case");
+        println!("      // Test tool error case");
         println!("      let result = client.call_tool(\"divide\", json!({{\"a\": 1, \"b\": 0}})).await;");
-        println!("      assert!(result.is_err());");
+        println!("      let result = result.unwrap();");
+        println!("      result.assert_is_error();");
+        println!("      result.assert_text_contains(\"Division by zero\");");
         println!("  }}");
 
         Ok::<_, McpError>(())

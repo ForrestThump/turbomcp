@@ -9,7 +9,7 @@
 //!
 //! **Then run client:**
 //! ```bash
-//! cargo run --example tcp_client --features tcp
+//! cargo run --example tcp_client --features "tcp full-client"
 //! ```
 
 use std::collections::HashMap;
