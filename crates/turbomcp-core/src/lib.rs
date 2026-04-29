@@ -172,12 +172,12 @@ pub use turbomcp_types::{
 /// MCP Protocol version supported by this SDK (latest official spec).
 ///
 /// This is the canonical version string. For typed usage, see
-/// [`types::core::ProtocolVersion::LATEST`].
+/// [`turbomcp_types::ProtocolVersion::LATEST`].
 pub const PROTOCOL_VERSION: &str = "2025-11-25";
 
 /// Supported protocol version strings.
 ///
-/// For typed usage, see [`types::core::ProtocolVersion::STABLE`].
+/// For typed usage, see [`turbomcp_types::ProtocolVersion::STABLE`].
 pub const SUPPORTED_VERSIONS: &[&str] = &["2025-06-18", "2025-11-25"];
 
 /// Maximum message size in bytes (1MB)

@@ -395,8 +395,8 @@ impl StreamingJsonDecoder {
     ///
     /// If the buffered bytes exceed `max_buffer_size`, the in-flight unfinished
     /// message (everything before the next newline) is discarded and the
-    /// decoder is marked as `overflowed`. The very next call to [`try_decode`]
-    /// returns [`CodecError::buffer_overflow`] and clears the flag, so the
+    /// decoder is marked as `overflowed`. The very next call to [`Self::try_decode`]
+    /// returns a [`CodecError`] and clears the flag, so the
     /// caller sees an explicit signal that data was lost (rather than silent
     /// desync). We attempt to resync at the next newline boundary instead of
     /// dropping the entire buffer, so a long oversize message followed by a

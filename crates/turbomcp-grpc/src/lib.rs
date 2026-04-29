@@ -7,9 +7,9 @@
 //! # Features
 //!
 //! - **Server**: gRPC server implementation with streaming notifications
-//! - **Client**: gRPC client with automatic reconnection
+//! - **Client**: gRPC client wrapper with explicit session initialization
 //! - **Tower Integration**: Composable middleware via Tower
-//! - **TLS**: Optional TLS 1.3 support via rustls
+//! - **TLS**: Configured through tonic's transport builders
 //!
 //! # Quick Start
 //!

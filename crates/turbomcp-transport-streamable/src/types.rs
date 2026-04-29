@@ -124,7 +124,7 @@ impl OriginValidation {
         }
     }
 
-    /// Strict variant of [`validate`].
+    /// Strict variant of [`Self::validate`].
     ///
     /// Rejects any origin (including a literal `null`) when `allowed` is
     /// empty. Server-to-server clients without an `Origin` header still

@@ -497,8 +497,9 @@ impl From<JsonRpcErrorCode> for JsonRpcError {
 #[derive(Debug, Clone, Deserialize)]
 pub struct JsonRpcIncoming {
     /// JSON-RPC version. Required to be "2.0" per JSON-RPC 2.0 §4.
-    /// Validated by [`Self::validate`] / [`Self::parse`]; raw deserialize accepts any
-    /// string for diagnostic purposes (so callers can report a 1.0/missing-version error).
+    /// Parsed by [`Self::parse`] and checked with [`Self::is_valid_version`]; raw
+    /// deserialize accepts any string for diagnostic purposes (so callers can
+    /// report a 1.0/missing-version error).
     pub jsonrpc: String,
     /// Request ID (None for notifications)
     #[serde(default)]

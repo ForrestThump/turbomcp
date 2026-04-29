@@ -61,6 +61,10 @@ removal, and active documentation/scaffold alignment.
 - **Validation utilities avoid duplicate work and retry edge cases** —
   validation dispatch no longer runs duplicate checks for the same value, and
   `retry_with_backoff(max_attempts = 0)` now performs the initial attempt.
+- **Active API docs and rustdoc links align with the current public surface** —
+  core/gRPC references no longer advertise removed imports or client methods,
+  proxy README package links no longer target ignored local notes, and rustdoc
+  now passes with warnings denied.
 
 ## [3.1.2] - 2026-04-27
 

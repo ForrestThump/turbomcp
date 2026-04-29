@@ -155,7 +155,7 @@ pub fn server(args: TokenStream, input: TokenStream) -> TokenStream {
 ///
 /// Per MCP §Cancellation, a client may send `notifications/cancelled` to
 /// abandon an in-flight request. The transport layer signals the matching
-/// handler via a [`tokio_util::sync::CancellationToken`] installed on the
+/// handler via a `tokio_util::sync::CancellationToken` installed on the
 /// `RequestContext`, but cancellation is **cooperative**: the handler must
 /// poll `ctx.is_cancelled()` (or `await` on a cancellable future) to honour
 /// it. A handler doing pure synchronous CPU work, or holding an `await`

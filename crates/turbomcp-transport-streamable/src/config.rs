@@ -45,10 +45,10 @@ pub struct StreamableConfig {
     /// Allowed origins for CORS and DNS rebinding protection.
     ///
     /// **Empty means no allowlist configured.** Combined with
-    /// [`OriginValidation::validate`] (the default), any browser-issued
+    /// [`crate::types::OriginValidation::validate`] (the default), any browser-issued
     /// request is accepted — this is the right default for plumbing/tests
     /// but not for production. To fail closed when the allowlist is empty,
-    /// route requests through [`OriginValidation::validate_strict`] instead.
+    /// route requests through [`crate::types::OriginValidation::validate_strict`] instead.
     /// Default: empty (no restrictions; permissive)
     pub allowed_origins: Vec<String>,
 

@@ -5,9 +5,9 @@ High-performance gRPC transport for the Model Context Protocol (MCP).
 ## Features
 
 - **Server**: Full gRPC server implementation with streaming notifications
-- **Client**: gRPC client with automatic initialization and reconnection
+- **Client**: gRPC client wrapper with explicit session initialization
 - **Tower Integration**: Composable middleware via Tower layers
-- **TLS**: Optional TLS 1.3 support via rustls
+- **TLS**: Configured through tonic's transport builders
 - **Streaming**: Server-streaming for real-time notifications
 
 ## Installation
@@ -115,9 +115,9 @@ let service = ServiceBuilder::new()
 
 - `server` (default) - Enable server implementation
 - `client` (default) - Enable client implementation
-- `health` - Enable gRPC health checking service
-- `reflection` - Enable gRPC reflection for debugging
-- `tls` - Enable TLS support
+- `health` - Compatibility feature; use MCP `Ping` or add `tonic-health` directly
+- `reflection` - Reserved compatibility feature
+- `tls` - Reserved compatibility feature; TLS is configured through tonic
 
 ## License
 

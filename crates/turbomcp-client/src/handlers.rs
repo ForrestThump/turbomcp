@@ -267,7 +267,7 @@ impl ElicitationRequest {
         }
     }
 
-    /// Deserialize the requested schema into a typed [`ElicitationSchema`].
+    /// Deserialize the requested schema into a typed [`turbomcp_protocol::types::ElicitationSchema`].
     ///
     /// Returns `None` for URL-mode elicitations or on deserialization failure.
     #[must_use]

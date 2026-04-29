@@ -54,7 +54,7 @@ impl MessageCompressor {
     /// Override the maximum decompressed payload size, in bytes.
     ///
     /// Decompression that would exceed this cap returns
-    /// [`TransportError::ProtocolViolation`] without allocating the bomb.
+    /// [`TransportError::ResponseTooLarge`] without allocating the bomb.
     #[must_use]
     pub const fn with_max_decompressed_size(mut self, max: usize) -> Self {
         self.max_decompressed_size = max;

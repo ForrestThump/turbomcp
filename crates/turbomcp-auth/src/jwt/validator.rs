@@ -201,7 +201,7 @@ impl JwtValidator {
     ///
     /// # Arguments
     ///
-    /// * `expected_issuer` - The expected iss claim (e.g., "https://accounts.google.com")
+    /// * `expected_issuer` - The expected iss claim (e.g., "<https://accounts.google.com>")
     /// * `expected_audience` - The expected aud claim (typically your MCP server URI)
     ///
     /// # Default Settings
@@ -218,10 +218,10 @@ impl JwtValidator {
     ///
     /// # SSRF Protection (default-on since v3.1)
     ///
-    /// The discovery URL is validated through [`SsrfValidator::default`], which blocks
+    /// The discovery URL is validated through [`crate::ssrf::SsrfValidator::default`], which blocks
     /// loopback, RFC 1918, link-local, and cloud-metadata addresses. If you legitimately
     /// need to reach a private issuer (test environments, internal-only OIDC providers),
-    /// pass an explicit [`SsrfValidator`] via [`Self::new_with_ssrf`] or use
+    /// pass an explicit [`crate::ssrf::SsrfValidator`] via [`Self::new_with_ssrf`] or use
     /// [`Self::new_unchecked`] to opt out entirely (not recommended in production).
     ///
     /// # Example

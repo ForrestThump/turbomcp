@@ -14,7 +14,7 @@
 //! # RFC 8707 Compliance
 //!
 //! This implementation follows RFC 8707 Section 2 for resource identifiers:
-//! - Uses absolute URIs (https://api.example.com/path)
+//! - Uses absolute URIs (<https://api.example.com/path>)
 //! - Normalizes scheme and host to lowercase
 //! - Removes fragments (forbidden by spec)
 //! - Removes query parameters (normalized form)
@@ -38,7 +38,7 @@ use url::Url;
 ///
 /// # Arguments
 ///
-/// * `uri` - The resource URI to validate (e.g., "https://api.example.com/mcp")
+/// * `uri` - The resource URI to validate (e.g., "<https://api.example.com/mcp>")
 ///
 /// # Returns
 ///

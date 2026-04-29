@@ -6,7 +6,7 @@
 //!
 //! # Background
 //!
-//! The fundamental challenge for unified native/WASM code is that [`wasm_bindgen::JsValue`]
+//! The fundamental challenge for unified native/WASM code is that `wasm_bindgen::JsValue`
 //! is `!Send` by design due to JavaScript's slab-based object management. This has
 //! "huge trickle-down effects" on downstream crates.
 //!

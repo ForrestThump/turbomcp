@@ -71,7 +71,7 @@ impl OAuth2Provider {
     ///
     /// * `name` - Provider name for identification
     /// * `client` - OAuth2 client configured for the provider
-    /// * `resource_uri` - **MCP server canonical URI** (RFC 8707) - e.g., "https://mcp.example.com"
+    /// * `resource_uri` - **MCP server canonical URI** (RFC 8707) - e.g., "<https://mcp.example.com>"
     ///
     /// # MCP Requirement
     ///

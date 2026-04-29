@@ -1,61 +1,49 @@
 # gRPC Transport API Reference
 
-The `turbomcp-grpc` crate provides high-performance gRPC transport for MCP in TurboMCP v3.
-
-## Overview
-
-gRPC transport offers:
-
-- **Full MCP Protocol** - All operations via efficient gRPC calls
-- **Streaming** - Server-streaming for real-time notifications
-- **Tower Integration** - Composable middleware via Tower layers
-- **TLS** - Optional TLS 1.3 support via rustls
-- **Health Checks** - gRPC health checking service
+The `turbomcp-grpc` crate provides a tonic-based gRPC transport for MCP. It
+exposes a server service, a client wrapper, and a small Tower layer for request
+logging/timing.
 
 ## Installation
 
 ```toml
 [dependencies]
 turbomcp-grpc = "3.1.2"
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tonic = "0.14"
 ```
 
 ## Feature Flags
 
 | Feature | Description | Default |
 |---------|-------------|---------|
-| `server` | Enable server implementation | Yes |
-| `client` | Enable client implementation | Yes |
-| `health` | Enable gRPC health checking | No |
-| `reflection` | Enable gRPC reflection | No |
-| `tls` | Enable TLS support | No |
+| `server` | Build `McpGrpcServer` | Yes |
+| `client` | Build `McpGrpcClient` | Yes |
+| `health` | Compatibility feature; use MCP `Ping` or add `tonic-health` directly | No |
+| `reflection` | Reserved compatibility feature | No |
+| `tls` | Reserved compatibility feature; TLS is configured through tonic | No |
 
 ## Server
 
-### Basic Server
-
 ```rust
-use turbomcp_grpc::server::McpGrpcServer;
-use turbomcp_core::types::Tool;
+use tonic::transport::Server;
+use turbomcp_grpc::McpGrpcServer;
+use turbomcp_types::{Tool, ToolInputSchema};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let server = McpGrpcServer::builder()
         .server_info("my-server", "1.0.0")
-        .add_tool(Tool {
-            name: "hello".to_string(),
-            description: Some("Says hello".to_string()),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string"}
-                }
-            }),
-            annotations: None,
-        })
+        .add_tool(
+            Tool::new("hello", "Says hello").with_schema(
+                ToolInputSchema::default()
+                    .add_property("name", serde_json::json!({"type": "string"}))
+                    .require_property("name"),
+            ),
+        )
         .build();
 
-    tonic::transport::Server::builder()
+    Server::builder()
         .add_service(server.into_service())
         .serve("[::1]:50051".parse()?)
         .await?;
@@ -64,73 +52,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-### McpGrpcServer Builder
+### Builder Surface
 
 ```rust
 use turbomcp_grpc::server::McpGrpcServer;
 
 let server = McpGrpcServer::builder()
-    // Server identification
     .server_info("name", "version")
-    .instructions("Welcome to my server")
-
-    // Add tools
+    .protocol_version("2025-11-25")
+    .instructions("Welcome")
+    .capabilities(server_capabilities)
     .add_tool(tool)
-    .add_tools(vec![tool1, tool2])
-    .tool_handler(|name, args| async move {
-        // Handle tool calls
-        Ok(json!({"result": "success"}))
-    })
-
-    // Add resources
     .add_resource(resource)
-    .add_resources(vec![res1, res2])
-    .resource_handler(|uri| async move {
-        // Read resource
-        Ok(contents)
-    })
-
-    // Add prompts
+    .add_resource_template(template)
     .add_prompt(prompt)
-    .prompt_handler(|name, args| async move {
-        // Get prompt
-        Ok(messages)
-    })
-
-    // Build
+    .tool_handler(my_tool_handler)
+    .resource_handler(my_resource_handler)
+    .prompt_handler(my_prompt_handler)
     .build();
 ```
 
-### Server with TLS
+Handlers are trait implementations: `ToolHandler`, `ResourceHandler`, and
+`PromptHandler`.
+
+### Server TLS
+
+TLS is configured on tonic's `Server` builder:
 
 ```rust
-use tonic::transport::{Server, ServerTlsConfig, Identity};
+use tonic::transport::{Identity, Server, ServerTlsConfig};
 
 let cert = std::fs::read("server.pem")?;
 let key = std::fs::read("server.key")?;
 let identity = Identity::from_pem(cert, key);
 
-let tls_config = ServerTlsConfig::new().identity(identity);
-
 Server::builder()
-    .tls_config(tls_config)?
-    .add_service(server.into_service())
-    .serve("[::1]:50051".parse()?)
-    .await?;
-```
-
-### Health Checking
-
-```rust
-use tonic_health::server::health_reporter;
-
-let (mut health_reporter, health_service) = health_reporter();
-health_reporter
-    .set_serving::<McpGrpcServer>()
-    .await;
-
-Server::builder()
-    .add_service(health_service)
+    .tls_config(ServerTlsConfig::new().identity(identity))?
     .add_service(server.into_service())
     .serve("[::1]:50051".parse()?)
     .await?;
@@ -138,213 +95,111 @@ Server::builder()
 
 ## Client
 
-### Basic Client
-
 ```rust
-use turbomcp_grpc::client::McpGrpcClient;
+use turbomcp_grpc::McpGrpcClient;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut client = McpGrpcClient::connect("http://[::1]:50051").await?;
 
-    // Initialize session
     let init_result = client.initialize().await?;
     println!("Connected to: {:?}", init_result.server_info);
 
-    // List tools
     let tools = client.list_tools().await?;
     println!("Available tools: {:?}", tools);
 
-    // Call a tool
-    let result = client.call_tool(
-        "hello",
-        Some(serde_json::json!({"name": "World"}))
-    ).await?;
+    let result = client
+        .call_tool("hello", Some(serde_json::json!({"name": "World"})))
+        .await?;
     println!("Result: {:?}", result);
 
     Ok(())
 }
 ```
 
-### McpGrpcClient Methods
+### Client Configuration
+
+```rust
+use std::time::Duration;
+use turbomcp_grpc::client::{McpGrpcClient, McpGrpcClientConfig};
+
+let config = McpGrpcClientConfig {
+    name: "my-client".to_string(),
+    version: "1.0.0".to_string(),
+    connect_timeout: Duration::from_secs(5),
+    request_timeout: Duration::from_secs(30),
+    ..Default::default()
+};
+
+let client = McpGrpcClient::connect_with_config("http://[::1]:50051", config).await?;
+```
+
+### Client Methods
 
 ```rust
 impl McpGrpcClient {
-    // Connection
-    pub async fn connect(endpoint: &str) -> Result<Self, GrpcError>;
-    pub async fn connect_with_tls(endpoint: &str, tls: ClientTlsConfig) -> Result<Self, GrpcError>;
+    pub async fn connect(addr: impl AsRef<str>) -> GrpcResult<Self>;
+    pub async fn connect_with_config(
+        addr: impl AsRef<str>,
+        config: McpGrpcClientConfig,
+    ) -> GrpcResult<Self>;
 
-    // Session
-    pub async fn initialize(&mut self) -> Result<InitializeResult, GrpcError>;
-    pub fn is_initialized(&self) -> bool;
-    pub async fn ping(&mut self) -> Result<(), GrpcError>;
+    pub async fn initialize(&mut self) -> GrpcResult<InitializeResult>;
+    pub async fn ping(&mut self) -> GrpcResult<()>;
 
-    // Tools
-    pub async fn list_tools(&mut self) -> Result<Vec<Tool>, GrpcError>;
-    pub async fn call_tool(&mut self, name: &str, args: Option<Value>) -> Result<CallToolResult, GrpcError>;
+    pub async fn list_tools(&mut self) -> GrpcResult<Vec<Tool>>;
+    pub async fn call_tool(
+        &mut self,
+        name: impl AsRef<str>,
+        arguments: Option<serde_json::Value>,
+    ) -> GrpcResult<CallToolResult>;
 
-    // Resources
-    pub async fn list_resources(&mut self) -> Result<Vec<Resource>, GrpcError>;
-    pub async fn read_resource(&mut self, uri: &str) -> Result<ReadResourceResult, GrpcError>;
-    pub async fn list_resource_templates(&mut self) -> Result<Vec<ResourceTemplate>, GrpcError>;
+    pub async fn list_resources(&mut self) -> GrpcResult<Vec<Resource>>;
+    pub async fn list_resource_templates(&mut self) -> GrpcResult<Vec<ResourceTemplate>>;
+    pub async fn read_resource(&mut self, uri: impl AsRef<str>) -> GrpcResult<Vec<ResourceContent>>;
 
-    // Prompts
-    pub async fn list_prompts(&mut self) -> Result<Vec<Prompt>, GrpcError>;
-    pub async fn get_prompt(&mut self, name: &str, args: Option<Value>) -> Result<GetPromptResult, GrpcError>;
+    pub async fn list_prompts(&mut self) -> GrpcResult<Vec<Prompt>>;
+    pub async fn get_prompt(
+        &mut self,
+        name: impl AsRef<str>,
+        arguments: Option<serde_json::Value>,
+    ) -> GrpcResult<GetPromptResult>;
 
-    // Completions
-    pub async fn complete(&mut self, request: CompleteRequest) -> Result<CompleteResult, GrpcError>;
-
-    // Logging
-    pub async fn set_logging_level(&mut self, level: LoggingLevel) -> Result<(), GrpcError>;
-
-    // Notifications
-    pub async fn subscribe(&mut self) -> Result<impl Stream<Item = Notification>, GrpcError>;
+    pub fn server_info(&self) -> Option<&Implementation>;
+    pub fn server_capabilities(&self) -> Option<&ServerCapabilities>;
+    pub fn protocol_version(&self) -> &str;
 }
 ```
 
-### Client with TLS
-
-```rust
-use tonic::transport::ClientTlsConfig;
-
-let tls_config = ClientTlsConfig::new()
-    .ca_certificate(Certificate::from_pem(ca_cert));
-
-let client = McpGrpcClient::connect_with_tls(
-    "https://[::1]:50051",
-    tls_config
-).await?;
-```
-
-### Streaming Notifications
-
-```rust
-use futures::StreamExt;
-
-let mut notifications = client.subscribe().await?;
-
-while let Some(notification) = notifications.next().await {
-    match notification? {
-        Notification::ToolsListChanged => {
-            let tools = client.list_tools().await?;
-            println!("Tools updated: {:?}", tools);
-        }
-        Notification::ResourcesListChanged => {
-            let resources = client.list_resources().await?;
-            println!("Resources updated: {:?}", resources);
-        }
-        _ => {}
-    }
-}
-```
+Client TLS is configured through tonic's `Endpoint`/`Channel` APIs today. The
+`McpGrpcClient` convenience constructor accepts an endpoint URL and applies
+timeout settings from `McpGrpcClientConfig`.
 
 ## Tower Integration
 
-### McpGrpcLayer
-
 ```rust
-use turbomcp_grpc::layer::McpGrpcLayer;
 use tower::ServiceBuilder;
-use std::time::Duration;
-
-let layer = McpGrpcLayer::new()
-    .timeout(Duration::from_secs(30))
-    .logging(true)
-    .timing(true)
-    .retry_count(3);
+use turbomcp_grpc::McpGrpcLayer;
 
 let service = ServiceBuilder::new()
-    .layer(layer)
+    .layer(McpGrpcLayer::new().logging(true).timing(true))
     .service(inner_service);
 ```
 
-### Layer Configuration
+`McpGrpcLayer` exposes:
 
 ```rust
 impl McpGrpcLayer {
     pub fn new() -> Self;
-
-    /// Set request timeout
-    pub fn timeout(self, duration: Duration) -> Self;
-
-    /// Enable request/response logging
     pub fn logging(self, enabled: bool) -> Self;
-
-    /// Enable timing metrics
     pub fn timing(self, enabled: bool) -> Self;
-
-    /// Set retry count for failed requests
-    pub fn retry_count(self, count: usize) -> Self;
-
-    /// Set maximum concurrent requests
-    pub fn concurrency_limit(self, limit: usize) -> Self;
-}
-```
-
-## Protocol Definition
-
-The gRPC service is defined in Protocol Buffers:
-
-```protobuf
-service McpService {
-    // Session
-    rpc Initialize(InitializeRequest) returns (InitializeResponse);
-    rpc Ping(PingRequest) returns (PingResponse);
-
-    // Tools
-    rpc ListTools(ListToolsRequest) returns (ListToolsResponse);
-    rpc CallTool(CallToolRequest) returns (CallToolResponse);
-
-    // Resources
-    rpc ListResources(ListResourcesRequest) returns (ListResourcesResponse);
-    rpc ReadResource(ReadResourceRequest) returns (ReadResourceResponse);
-    rpc ListResourceTemplates(ListResourceTemplatesRequest) returns (ListResourceTemplatesResponse);
-
-    // Prompts
-    rpc ListPrompts(ListPromptsRequest) returns (ListPromptsResponse);
-    rpc GetPrompt(GetPromptRequest) returns (GetPromptResponse);
-
-    // Completions
-    rpc Complete(CompleteRequest) returns (CompleteResponse);
-
-    // Logging
-    rpc SetLoggingLevel(SetLoggingLevelRequest) returns (SetLoggingLevelResponse);
-
-    // Notifications (server streaming)
-    rpc Subscribe(SubscribeRequest) returns (stream Notification);
 }
 ```
 
 ## Error Handling
 
-### GrpcError
-
 ```rust
-use turbomcp_grpc::error::GrpcError;
-
-pub enum GrpcError {
-    /// Connection failed
-    ConnectionError(String),
-
-    /// Request timed out
-    Timeout,
-
-    /// Server returned error status
-    Status(tonic::Status),
-
-    /// Protocol error
-    ProtocolError(String),
-
-    /// Not initialized
-    NotInitialized,
-}
-```
-
-### Error Handling Example
-
-```rust
-use turbomcp_grpc::{client::McpGrpcClient, error::GrpcError};
+use turbomcp_grpc::{GrpcError, McpGrpcClient};
 
 async fn safe_call(client: &mut McpGrpcClient) -> Result<(), GrpcError> {
     match client.call_tool("my_tool", None).await {
@@ -353,75 +208,21 @@ async fn safe_call(client: &mut McpGrpcClient) -> Result<(), GrpcError> {
             Ok(())
         }
         Err(GrpcError::Status(status)) => {
-            eprintln!("Server error: {} - {}", status.code(), status.message());
+            eprintln!("gRPC status: {} - {}", status.code(), status.message());
             Err(GrpcError::Status(status))
         }
-        Err(GrpcError::Timeout) => {
-            eprintln!("Request timed out");
-            Err(GrpcError::Timeout)
-        }
-        Err(e) => {
-            eprintln!("Other error: {:?}", e);
-            Err(e)
-        }
+        Err(e) => Err(e),
     }
 }
 ```
 
-## Interceptors
+## Protocol Definition
 
-Add request interceptors for authentication, logging, etc:
-
-```rust
-use tonic::{Request, Status};
-
-fn auth_interceptor(mut req: Request<()>) -> Result<Request<()>, Status> {
-    let token = "Bearer my-token";
-    req.metadata_mut().insert(
-        "authorization",
-        token.parse().unwrap()
-    );
-    Ok(req)
-}
-
-let channel = Channel::from_static("http://[::1]:50051")
-    .connect()
-    .await?;
-
-let client = McpGrpcClient::with_interceptor(channel, auth_interceptor);
-```
-
-## Metrics
-
-When using the Tower layer with timing enabled:
-
-```rust
-let layer = McpGrpcLayer::new().timing(true);
-
-// Metrics are emitted via tracing
-// mcp.grpc.request_duration_seconds
-// mcp.grpc.requests_total
-// mcp.grpc.errors_total
-```
-
-## Load Balancing
-
-```rust
-use tonic::transport::Channel;
-
-let channel = Channel::balance_list(
-    vec![
-        "http://server1:50051".parse()?,
-        "http://server2:50051".parse()?,
-        "http://server3:50051".parse()?,
-    ].into_iter()
-);
-
-let client = McpGrpcClient::from_channel(channel);
-```
+The generated gRPC service is defined in
+`crates/turbomcp-grpc/src/proto/mcp.proto`.
 
 ## Next Steps
 
-- **[Tower Middleware Guide](../guide/tower-middleware.md)** - Middleware patterns
-- **[Transports Guide](../guide/transports.md)** - All transport options
-- **[Telemetry API](telemetry.md)** - Observability integration
+- [Tower Middleware Guide](../guide/tower-middleware.md)
+- [Transports Guide](../guide/transports.md)
+- [Telemetry API](telemetry.md)

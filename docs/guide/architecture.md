@@ -10,7 +10,7 @@ The `no_std` compatible foundation layer provides core types that work everywher
 
 ```rust
 // Works in WASM, embedded, and standard environments
-use turbomcp_core::types::{Tool, Resource, Prompt};
+use turbomcp_core::{Prompt, Resource, Tool};
 use turbomcp_core::error::{McpError, McpResult};
 ```
 

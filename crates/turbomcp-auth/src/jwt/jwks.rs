@@ -367,7 +367,7 @@ impl JwksCache {
     ///
     /// # Arguments
     ///
-    /// * `issuer` - The issuer URL (e.g., "https://accounts.google.com")
+    /// * `issuer` - The issuer URL (e.g., "<https://accounts.google.com>")
     ///
     /// # JWKS Discovery
     ///

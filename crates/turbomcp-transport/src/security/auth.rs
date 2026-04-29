@@ -46,7 +46,7 @@ pub enum AuthMethod {
 ///
 /// API keys are stored as plain `String`s in a `HashSet` for fast set
 /// operations and hash-based lookup; comparison itself goes through the
-/// constant-time [`ct_contains`] helper to prevent timing leaks. On
+/// constant-time `ct_contains` helper to prevent timing leaks. On
 /// `Drop`, every key is wiped via [`zeroize::Zeroize`] before the
 /// allocation is released, mitigating recovery from process core dumps
 /// or memory scanning.

@@ -836,7 +836,7 @@ ToolResult::contents(vec![
 ### Prompts
 
 ```rust
-use turbomcp_core::types::prompts::PromptArgument;
+use turbomcp_types::PromptArgument;
 
 // Prompt with arguments
 .prompt(

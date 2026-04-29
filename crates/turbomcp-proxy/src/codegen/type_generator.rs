@@ -28,7 +28,7 @@ impl TypeGenerator {
 
     /// Convert a JSON Schema to a Rust type name
     ///
-    /// Returns the Rust type string (e.g., "String", "Vec<i64>", "`CustomType`")
+    /// Returns the Rust type string (e.g., "String", "`Vec<i64>`", "`CustomType`")
     ///
     /// # Errors
     ///

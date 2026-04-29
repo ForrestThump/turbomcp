@@ -236,8 +236,6 @@ turbomcp-proxy generate \
 └─────────────────────────────────────────────────────────┘
 ```
 
-See [ARCHITECTURE.md](./ARCHITECTURE.md) for deeper internals.
-
 ---
 
 ## Installation
@@ -257,9 +255,6 @@ cargo install --path .
 
 ## Documentation
 
-- **[ARCHITECTURE.md](./ARCHITECTURE.md)** — Internal architecture overview
-- **[SECURITY_REVIEW.md](./SECURITY_REVIEW.md)** — Security assessment
-- **[LIBRARY_USAGE.md](./LIBRARY_USAGE.md)** — Using the crate as a library
 - **[Examples](./examples/)** — Runnable usage examples
 - **[API Docs](https://docs.rs/turbomcp-proxy)** — Rust API documentation
 
@@ -526,7 +521,7 @@ adapters (`adapter rest`, `adapter graphql`) are scaffolded — see
 
 **Quality Assurance:**
 - [x] **40+ Comprehensive Tests** (transport combinations, security validations)
-- [x] **World-Class Security Review** (SECURITY_REVIEW.md)
+- [x] **Security-Focused Regression Coverage**
 - [x] **Zero TODO Markers** (production-ready)
 - [x] **100% Safe Rust** (no unsafe code)
 
@@ -554,19 +549,13 @@ adapters (`adapter rest`, `adapter graphql`) are scaffolded — see
 
 ## Contributing
 
-Contributions welcome. See the top-level repository's
-[CONTRIBUTING guide](../../README.md) and
-[ARCHITECTURE.md](../../ARCHITECTURE.md) for project-wide context.
+Contributions welcome through the top-level TurboMCP repository.
 
 ---
 
 ## License
 
-Licensed under either of:
-- Apache License, Version 2.0 ([LICENSE-APACHE](../../LICENSE-APACHE))
-- MIT license ([LICENSE-MIT](../../LICENSE-MIT))
-
-at your option.
+Licensed under MIT.
 
 ---
 

@@ -204,7 +204,7 @@ pub async fn route_request_with_config<H: McpHandler>(
 /// 2. Delegates to the core router
 /// 3. Applies the version adapter to filter the response
 ///
-/// Transport layers should store the negotiated [`ProtocolVersion`] from
+/// Transport layers should store the negotiated [`turbomcp_protocol::types::ProtocolVersion`] from
 /// the initialize handshake and pass it here for all subsequent requests.
 pub async fn route_request_versioned<H: McpHandler>(
     handler: &H,
