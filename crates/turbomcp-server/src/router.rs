@@ -19,7 +19,7 @@
 
 use std::collections::HashSet;
 
-use super::config::{ClientCapabilities, ServerConfig};
+use super::config::{ClientCapabilities, SearchToolsConfig, ServerConfig};
 use turbomcp_core::context::RequestContext;
 use turbomcp_core::error::McpError;
 use turbomcp_core::handler::McpHandler;
@@ -198,9 +198,25 @@ pub async fn route_request_with_config<H: McpHandler>(
 
     // For all other methods, apply tool filtering then delegate to core router.
     let disabled = config.map(|c| &c.disabled_tools);
+    let hidden = config.map(|c| &c.hidden_tools);
+    let search_cfg =
+        config.and_then(|c| if c.search_tools.enabled { Some(&c.search_tools) } else { None });
 
-    // Pre-check: reject calls to disabled tools before hitting the core router.
     if request.method == "tools/call" {
+        // Intercept the built-in search tool before it reaches the handler.
+        if let Some(cfg) = search_cfg {
+            let call_name = request
+                .params
+                .as_ref()
+                .and_then(|p| p.get("name"))
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            if call_name == cfg.tool_name {
+                return handle_search_tools(handler, &request, config).await;
+            }
+        }
+
+        // Pre-check: reject calls to disabled tools before hitting the core router.
         if let Some(disabled) = disabled.filter(|d| !d.is_empty()) {
             let name = request
                 .params
@@ -218,11 +234,23 @@ pub async fn route_request_with_config<H: McpHandler>(
     let core_config = turbomcp_core::router::RouteConfig::default();
     let response = turbomcp_core::router::route_request(handler, request, ctx, &core_config).await;
 
-    // Post-filter: strip disabled tools from the tools/list response.
+    // Post-filter tools/list: strip disabled, strip hidden, inject search_tools.
     if method == "tools/list" {
-        if let Some(disabled) = disabled.filter(|d| !d.is_empty()) {
-            return filter_disabled_tools(response, disabled);
-        }
+        let response = if let Some(disabled) = disabled.filter(|d| !d.is_empty()) {
+            filter_disabled_tools(response, disabled)
+        } else {
+            response
+        };
+        let response = if let Some(hidden) = hidden.filter(|h| !h.is_empty()) {
+            filter_hidden_tools(response, hidden)
+        } else {
+            response
+        };
+        return if let Some(cfg) = search_cfg {
+            inject_search_tool(response, cfg)
+        } else {
+            response
+        };
     }
 
     response
@@ -259,9 +287,25 @@ pub async fn route_request_versioned<H: McpHandler>(
     }
 
     let disabled = config.map(|c| &c.disabled_tools);
+    let hidden = config.map(|c| &c.hidden_tools);
+    let search_cfg =
+        config.and_then(|c| if c.search_tools.enabled { Some(&c.search_tools) } else { None });
 
-    // Pre-check: reject calls to disabled tools before hitting the core router.
     if method == "tools/call" {
+        // Intercept the built-in search tool before it reaches the handler.
+        if let Some(cfg) = search_cfg {
+            let call_name = request
+                .params
+                .as_ref()
+                .and_then(|p| p.get("name"))
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            if call_name == cfg.tool_name {
+                return handle_search_tools(handler, &request, config).await;
+            }
+        }
+
+        // Pre-check: reject calls to disabled tools before hitting the core router.
         if let Some(disabled) = disabled.filter(|d| !d.is_empty()) {
             let name = request
                 .params
@@ -282,10 +326,20 @@ pub async fn route_request_versioned<H: McpHandler>(
     let core_config = turbomcp_core::router::RouteConfig::default();
     let response = turbomcp_core::router::route_request(handler, request, ctx, &core_config).await;
 
-    // Post-filter: strip disabled tools from the tools/list response.
+    // Post-filter tools/list: strip disabled, strip hidden, inject search_tools.
     let response = if method == "tools/list" {
-        if let Some(disabled) = disabled.filter(|d| !d.is_empty()) {
+        let response = if let Some(disabled) = disabled.filter(|d| !d.is_empty()) {
             filter_disabled_tools(response, disabled)
+        } else {
+            response
+        };
+        let response = if let Some(hidden) = hidden.filter(|h| !h.is_empty()) {
+            filter_hidden_tools(response, hidden)
+        } else {
+            response
+        };
+        if let Some(cfg) = search_cfg {
+            inject_search_tool(response, cfg)
         } else {
             response
         }
@@ -298,7 +352,10 @@ pub async fn route_request_versioned<H: McpHandler>(
 }
 
 /// Remove disabled tools from a `tools/list` response.
-fn filter_disabled_tools(mut response: JsonRpcOutgoing, disabled: &HashSet<String>) -> JsonRpcOutgoing {
+fn filter_disabled_tools(
+    mut response: JsonRpcOutgoing,
+    disabled: &HashSet<String>,
+) -> JsonRpcOutgoing {
     if let Some(result) = response.result.as_mut() {
         if let Some(tools) = result.get_mut("tools").and_then(|v| v.as_array_mut()) {
             tools.retain(|t| {
@@ -310,6 +367,117 @@ fn filter_disabled_tools(mut response: JsonRpcOutgoing, disabled: &HashSet<Strin
         }
     }
     response
+}
+
+/// Remove hidden tools from a `tools/list` response.
+///
+/// Hidden tools are suppressed from the listing but remain callable and appear
+/// in `search_tools` results.
+fn filter_hidden_tools(
+    mut response: JsonRpcOutgoing,
+    hidden: &HashSet<String>,
+) -> JsonRpcOutgoing {
+    if let Some(result) = response.result.as_mut() {
+        if let Some(tools) = result.get_mut("tools").and_then(|v| v.as_array_mut()) {
+            tools.retain(|t| {
+                t.get("name")
+                    .and_then(|n| n.as_str())
+                    .map(|n| !hidden.contains(n))
+                    .unwrap_or(true)
+            });
+        }
+    }
+    response
+}
+
+/// Append the built-in `search_tools` entry to a `tools/list` response.
+fn inject_search_tool(mut response: JsonRpcOutgoing, cfg: &SearchToolsConfig) -> JsonRpcOutgoing {
+    if let Some(result) = response.result.as_mut() {
+        if let Some(tools) = result.get_mut("tools").and_then(|v| v.as_array_mut()) {
+            tools.push(search_tool_definition(&cfg.tool_name));
+        }
+    }
+    response
+}
+
+/// Build the JSON schema definition for the built-in search tool.
+fn search_tool_definition(tool_name: &str) -> serde_json::Value {
+    serde_json::json!({
+        "name": tool_name,
+        "description": "Search for available tools by name or description. \
+            Returns tools matching the query, including tools that are not \
+            shown in the main tool listing.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Search terms matched case-insensitively \
+                        against tool names and descriptions (partial match)."
+                }
+            },
+            "required": ["query"]
+        }
+    })
+}
+
+/// Handle a `tools/call` request for the built-in search tool.
+///
+/// Searches `handler.list_tools()`, excludes disabled tools, applies the query,
+/// and returns matching tool definitions as a text content block.
+async fn handle_search_tools<H: McpHandler>(
+    handler: &H,
+    request: &JsonRpcIncoming,
+    config: Option<&ServerConfig>,
+) -> JsonRpcOutgoing {
+    let query = request
+        .params
+        .as_ref()
+        .and_then(|p| p.get("arguments"))
+        .and_then(|a| a.get("query"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    let disabled = config.map(|c| &c.disabled_tools);
+
+    let matching: Vec<serde_json::Value> = handler
+        .list_tools()
+        .into_iter()
+        .filter_map(|t| serde_json::to_value(t).ok())
+        .filter(|t| {
+            let name = t.get("name").and_then(|n| n.as_str()).unwrap_or_default();
+            if let Some(disabled) = disabled.filter(|d| !d.is_empty()) {
+                if disabled.contains(name) {
+                    return false;
+                }
+            }
+            if query.is_empty() {
+                return true;
+            }
+            let desc = t
+                .get("description")
+                .and_then(|d| d.as_str())
+                .unwrap_or_default();
+            name.to_lowercase().contains(&query) || desc.to_lowercase().contains(&query)
+        })
+        .collect();
+
+    let text = if matching.is_empty() {
+        format!("No tools found matching '{query}'.")
+    } else {
+        match serde_json::to_string_pretty(&matching) {
+            Ok(json) => format!("Found {} tool(s):\n{json}", matching.len()),
+            Err(_) => "Error serializing tool results.".to_string(),
+        }
+    };
+
+    JsonRpcOutgoing::success(
+        request.id.clone(),
+        serde_json::json!({
+            "content": [{"type": "text", "text": text}]
+        }),
+    )
 }
 
 /// Apply a version adapter to a JSON-RPC response.
@@ -603,6 +771,331 @@ mod tests {
         let tools = response.result.unwrap()["tools"].as_array().unwrap().clone();
         assert_eq!(tools.len(), 1, "non-disabled tool should remain visible");
         assert_eq!(tools[0]["name"], "test_tool");
+    }
+
+    #[tokio::test]
+    async fn test_hidden_tool_absent_from_list() {
+        let handler = TestHandler;
+        let ctx = RequestContext::stdio();
+        let config = super::super::config::ServerConfig::builder()
+            .hide_tool("test_tool")
+            .build();
+        let request = JsonRpcIncoming {
+            jsonrpc: "2.0".to_string(),
+            id: Some(serde_json::json!(1)),
+            method: "tools/list".to_string(),
+            params: None,
+        };
+
+        let response = route_request_with_config(&handler, request, &ctx, Some(&config)).await;
+        let tools = response.result.unwrap()["tools"].as_array().unwrap().clone();
+        assert!(tools.is_empty(), "hidden tool should be absent from list");
+    }
+
+    #[tokio::test]
+    async fn test_hidden_tool_still_callable() {
+        let handler = TestHandler;
+        let ctx = RequestContext::stdio();
+        let config = super::super::config::ServerConfig::builder()
+            .hide_tool("test_tool")
+            .build();
+        let request = JsonRpcIncoming {
+            jsonrpc: "2.0".to_string(),
+            id: Some(serde_json::json!(1)),
+            method: "tools/call".to_string(),
+            params: Some(serde_json::json!({"name": "test_tool", "arguments": {}})),
+        };
+
+        let response = route_request_with_config(&handler, request, &ctx, Some(&config)).await;
+        assert!(response.error.is_none(), "hidden tool must remain callable");
+        assert!(response.result.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_search_tools_not_injected_by_default() {
+        let handler = TestHandler;
+        let ctx = RequestContext::stdio();
+        let config = super::super::config::ServerConfig::builder().build();
+        let request = JsonRpcIncoming {
+            jsonrpc: "2.0".to_string(),
+            id: Some(serde_json::json!(1)),
+            method: "tools/list".to_string(),
+            params: None,
+        };
+
+        let response = route_request_with_config(&handler, request, &ctx, Some(&config)).await;
+        let tools = response.result.unwrap()["tools"].as_array().unwrap().clone();
+        assert!(
+            tools.iter().all(|t| t["name"] != "search_tools"),
+            "search_tools must not appear when disabled"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_tools_injected_when_enabled() {
+        let handler = TestHandler;
+        let ctx = RequestContext::stdio();
+        let config = super::super::config::ServerConfig::builder()
+            .enable_search_tools()
+            .build();
+        let request = JsonRpcIncoming {
+            jsonrpc: "2.0".to_string(),
+            id: Some(serde_json::json!(1)),
+            method: "tools/list".to_string(),
+            params: None,
+        };
+
+        let response = route_request_with_config(&handler, request, &ctx, Some(&config)).await;
+        let tools = response.result.unwrap()["tools"].as_array().unwrap().clone();
+        assert!(
+            tools.iter().any(|t| t["name"] == "search_tools"),
+            "search_tools must appear when enabled"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_tools_returns_matching_tools() {
+        let handler = TestHandler;
+        let ctx = RequestContext::stdio();
+        let config = super::super::config::ServerConfig::builder()
+            .enable_search_tools()
+            .build();
+        let request = JsonRpcIncoming {
+            jsonrpc: "2.0".to_string(),
+            id: Some(serde_json::json!(1)),
+            method: "tools/call".to_string(),
+            params: Some(serde_json::json!({
+                "name": "search_tools",
+                "arguments": {"query": "test"}
+            })),
+        };
+
+        let response = route_request_with_config(&handler, request, &ctx, Some(&config)).await;
+        assert!(response.error.is_none());
+        let result = response.result.unwrap();
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("test_tool"), "search should find test_tool");
+    }
+
+    #[tokio::test]
+    async fn test_search_tools_finds_hidden_tools() {
+        let handler = TestHandler;
+        let ctx = RequestContext::stdio();
+        let config = super::super::config::ServerConfig::builder()
+            .hide_tool("test_tool")
+            .enable_search_tools()
+            .build();
+
+        // Confirm the tool is hidden from list
+        let list_req = JsonRpcIncoming {
+            jsonrpc: "2.0".to_string(),
+            id: Some(serde_json::json!(1)),
+            method: "tools/list".to_string(),
+            params: None,
+        };
+        let list_resp =
+            route_request_with_config(&handler, list_req, &ctx, Some(&config)).await;
+        let tools = list_resp.result.unwrap()["tools"].as_array().unwrap().clone();
+        assert!(
+            tools.iter().all(|t| t["name"] != "test_tool"),
+            "hidden tool must not appear in list"
+        );
+
+        // But search should find it
+        let search_req = JsonRpcIncoming {
+            jsonrpc: "2.0".to_string(),
+            id: Some(serde_json::json!(2)),
+            method: "tools/call".to_string(),
+            params: Some(serde_json::json!({
+                "name": "search_tools",
+                "arguments": {"query": "test"}
+            })),
+        };
+        let search_resp =
+            route_request_with_config(&handler, search_req, &ctx, Some(&config)).await;
+        assert!(search_resp.error.is_none());
+        let text = search_resp.result.unwrap()["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(text.contains("test_tool"), "search must find hidden tools");
+    }
+
+    #[tokio::test]
+    async fn test_search_tools_excludes_disabled_tools() {
+        let handler = TestHandler;
+        let ctx = RequestContext::stdio();
+        let config = super::super::config::ServerConfig::builder()
+            .disable_tool("test_tool")
+            .enable_search_tools()
+            .build();
+        let request = JsonRpcIncoming {
+            jsonrpc: "2.0".to_string(),
+            id: Some(serde_json::json!(1)),
+            method: "tools/call".to_string(),
+            params: Some(serde_json::json!({
+                "name": "search_tools",
+                "arguments": {"query": "test"}
+            })),
+        };
+
+        let response = route_request_with_config(&handler, request, &ctx, Some(&config)).await;
+        assert!(response.error.is_none());
+        let text = response.result.unwrap()["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            !text.contains("test_tool"),
+            "search must not surface disabled tools"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_tools_empty_query_returns_all() {
+        let handler = TestHandler;
+        let ctx = RequestContext::stdio();
+        let config = super::super::config::ServerConfig::builder()
+            .enable_search_tools()
+            .build();
+        let request = JsonRpcIncoming {
+            jsonrpc: "2.0".to_string(),
+            id: Some(serde_json::json!(1)),
+            method: "tools/call".to_string(),
+            params: Some(serde_json::json!({
+                "name": "search_tools",
+                "arguments": {"query": ""}
+            })),
+        };
+
+        let response = route_request_with_config(&handler, request, &ctx, Some(&config)).await;
+        assert!(response.error.is_none());
+        let text = response.result.unwrap()["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(text.contains("test_tool"), "empty query should return all tools");
+    }
+
+    #[tokio::test]
+    async fn test_search_tools_no_match() {
+        let handler = TestHandler;
+        let ctx = RequestContext::stdio();
+        let config = super::super::config::ServerConfig::builder()
+            .enable_search_tools()
+            .build();
+        let request = JsonRpcIncoming {
+            jsonrpc: "2.0".to_string(),
+            id: Some(serde_json::json!(1)),
+            method: "tools/call".to_string(),
+            params: Some(serde_json::json!({
+                "name": "search_tools",
+                "arguments": {"query": "zzz_no_match_at_all"}
+            })),
+        };
+
+        let response = route_request_with_config(&handler, request, &ctx, Some(&config)).await;
+        assert!(response.error.is_none());
+        let text = response.result.unwrap()["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            text.contains("No tools found"),
+            "unmatched query should produce empty-result message"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_tools_custom_name_in_list_and_callable() {
+        let handler = TestHandler;
+        let ctx = RequestContext::stdio();
+        let config = super::super::config::ServerConfig::builder()
+            .enable_search_tools_named("find_tool")
+            .build();
+
+        // Custom name appears in the tool list; default name does not.
+        let list_req = JsonRpcIncoming {
+            jsonrpc: "2.0".to_string(),
+            id: Some(serde_json::json!(1)),
+            method: "tools/list".to_string(),
+            params: None,
+        };
+        let list_resp =
+            route_request_with_config(&handler, list_req, &ctx, Some(&config)).await;
+        let tools = list_resp.result.unwrap()["tools"].as_array().unwrap().clone();
+        assert!(
+            tools.iter().any(|t| t["name"] == "find_tool"),
+            "custom name must appear in tools/list"
+        );
+        assert!(
+            tools.iter().all(|t| t["name"] != "search_tools"),
+            "default name must not appear when overridden"
+        );
+
+        // Custom name is callable.
+        let call_req = JsonRpcIncoming {
+            jsonrpc: "2.0".to_string(),
+            id: Some(serde_json::json!(2)),
+            method: "tools/call".to_string(),
+            params: Some(serde_json::json!({
+                "name": "find_tool",
+                "arguments": {"query": "test"}
+            })),
+        };
+        let call_resp =
+            route_request_with_config(&handler, call_req, &ctx, Some(&config)).await;
+        assert!(call_resp.error.is_none(), "custom-named search tool must be callable");
+    }
+
+    // ── route_request_versioned path (production hot path) ───────────────
+
+    #[tokio::test]
+    async fn test_route_versioned_hidden_tool_absent_from_list() {
+        let handler = TestHandler;
+        let ctx = RequestContext::stdio();
+        let config = super::super::config::ServerConfig::builder()
+            .hide_tool("test_tool")
+            .build();
+        let version = turbomcp_types::ProtocolVersion::LATEST.clone();
+        let request = JsonRpcIncoming {
+            jsonrpc: "2.0".to_string(),
+            id: Some(serde_json::json!(1)),
+            method: "tools/list".to_string(),
+            params: None,
+        };
+
+        let response =
+            route_request_versioned(&handler, request, &ctx, &version, Some(&config)).await;
+        let tools = response.result.unwrap()["tools"].as_array().unwrap().clone();
+        assert!(
+            tools.is_empty(),
+            "hidden tool must be absent from list via versioned path"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_route_versioned_search_tools_injected() {
+        let handler = TestHandler;
+        let ctx = RequestContext::stdio();
+        let config = super::super::config::ServerConfig::builder()
+            .enable_search_tools()
+            .build();
+        let version = turbomcp_types::ProtocolVersion::LATEST.clone();
+        let request = JsonRpcIncoming {
+            jsonrpc: "2.0".to_string(),
+            id: Some(serde_json::json!(1)),
+            method: "tools/list".to_string(),
+            params: None,
+        };
+
+        let response =
+            route_request_versioned(&handler, request, &ctx, &version, Some(&config)).await;
+        let tools = response.result.unwrap()["tools"].as_array().unwrap().clone();
+        assert!(
+            tools.iter().any(|t| t["name"] == "search_tools"),
+            "search_tools must be injected via versioned path"
+        );
     }
 
     #[tokio::test]

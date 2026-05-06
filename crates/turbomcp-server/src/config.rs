@@ -87,6 +87,18 @@ pub struct ServerConfig {
     /// from `tools/call`. They remain compiled into the binary; only the config
     /// controls whether they are exposed to clients.
     pub disabled_tools: HashSet<String>,
+    /// Tool names that are hidden from `tools/list` but remain callable via
+    /// `tools/call` and appear in [`search_tools`](Self::search_tools) results.
+    ///
+    /// Use hidden tools to reduce LLM context pollution while keeping
+    /// infrequently-used tools accessible on demand.
+    pub hidden_tools: HashSet<String>,
+    /// Built-in tool-search configuration.
+    ///
+    /// When [`SearchToolsConfig::enabled`] is `true`, a `search_tools` tool
+    /// is injected into every `tools/list` response and intercepted at the
+    /// router layer, allowing LLMs to discover hidden tools.
+    pub search_tools: SearchToolsConfig,
 }
 
 impl Default for ServerConfig {
@@ -99,6 +111,8 @@ impl Default for ServerConfig {
             max_message_size: DEFAULT_MAX_MESSAGE_SIZE,
             origin_validation: OriginValidationConfig::default(),
             disabled_tools: HashSet::new(),
+            hidden_tools: HashSet::new(),
+            search_tools: SearchToolsConfig::default(),
         }
     }
 }
@@ -127,6 +141,8 @@ pub struct ServerConfigBuilder {
     max_message_size: Option<usize>,
     origin_validation: Option<OriginValidationConfig>,
     disabled_tools: HashSet<String>,
+    hidden_tools: HashSet<String>,
+    search_tools: Option<SearchToolsConfig>,
 }
 
 impl ServerConfigBuilder {
@@ -241,6 +257,59 @@ impl ServerConfigBuilder {
         self
     }
 
+    /// Hide a single tool from `tools/list` without disabling it.
+    ///
+    /// Hidden tools remain callable via `tools/call` and appear in
+    /// `search_tools` results when that feature is enabled.
+    #[must_use]
+    pub fn hide_tool(mut self, name: impl Into<String>) -> Self {
+        self.hidden_tools.insert(name.into());
+        self
+    }
+
+    /// Hide multiple tools from `tools/list` without disabling them.
+    #[must_use]
+    pub fn hide_tools<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.hidden_tools.extend(names.into_iter().map(Into::into));
+        self
+    }
+
+    /// Enable the built-in `search_tools` tool with default settings.
+    ///
+    /// The injected tool is named `"search_tools"` and searches all tools
+    /// (including hidden ones) by name and description.
+    #[must_use]
+    pub fn enable_search_tools(mut self) -> Self {
+        let cfg = self.search_tools.get_or_insert_with(SearchToolsConfig::default);
+        cfg.enabled = true;
+        self
+    }
+
+    /// Enable the built-in search tool with a custom name.
+    ///
+    /// Use this if `"search_tools"` conflicts with an existing tool in your
+    /// handler.
+    #[must_use]
+    pub fn enable_search_tools_named(mut self, name: impl Into<String>) -> Self {
+        let cfg = self.search_tools.get_or_insert_with(SearchToolsConfig::default);
+        cfg.enabled = true;
+        cfg.tool_name = name.into();
+        self
+    }
+
+    /// Apply a complete [`SearchToolsConfig`].
+    ///
+    /// Useful when loading configuration from a file.
+    #[must_use]
+    pub fn search_tools_config(mut self, cfg: SearchToolsConfig) -> Self {
+        self.search_tools = Some(cfg);
+        self
+    }
+
     /// Build the server configuration with sensible defaults.
     ///
     /// This method always succeeds and uses defaults for any unset fields.
@@ -255,6 +324,8 @@ impl ServerConfigBuilder {
             max_message_size: self.max_message_size.unwrap_or(DEFAULT_MAX_MESSAGE_SIZE),
             origin_validation: self.origin_validation.unwrap_or_default(),
             disabled_tools: self.disabled_tools,
+            hidden_tools: self.hidden_tools,
+            search_tools: self.search_tools.unwrap_or_default(),
         }
     }
 
@@ -328,6 +399,8 @@ impl ServerConfigBuilder {
             max_message_size,
             origin_validation: self.origin_validation.unwrap_or_default(),
             disabled_tools: self.disabled_tools,
+            hidden_tools: self.hidden_tools,
+            search_tools: self.search_tools.unwrap_or_default(),
         })
     }
 }
@@ -600,6 +673,34 @@ impl RequiredCapabilities {
             CapabilityValidation::Valid
         } else {
             CapabilityValidation::Missing(missing)
+        }
+    }
+}
+
+/// Configuration for the built-in `search_tools` tool.
+///
+/// When enabled, a `search_tools` tool is automatically injected into
+/// `tools/list` responses and handled at the router layer, allowing LLMs
+/// to discover tools that are hidden from the regular listing.
+#[derive(Debug, Clone)]
+pub struct SearchToolsConfig {
+    /// Whether the built-in search tool is active.
+    ///
+    /// Defaults to `false` for backwards compatibility — must be explicitly
+    /// enabled.
+    pub enabled: bool,
+    /// The name advertised for the built-in search tool.
+    ///
+    /// Defaults to `"search_tools"`. Override if that name conflicts with an
+    /// existing tool in your handler.
+    pub tool_name: String,
+}
+
+impl Default for SearchToolsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            tool_name: "search_tools".to_string(),
         }
     }
 }
@@ -1050,6 +1151,60 @@ mod tests {
             .expect("valid config");
 
         assert!(config.disabled_tools.contains("expensive_tool"));
+    }
+
+    #[test]
+    fn test_builder_hide_tool() {
+        let config = ServerConfig::builder()
+            .hide_tool("expensive_op")
+            .build();
+        assert!(config.hidden_tools.contains("expensive_op"));
+        assert!(!config.disabled_tools.contains("expensive_op"));
+        assert!(!config.search_tools.enabled);
+    }
+
+    #[test]
+    fn test_builder_hide_tools_batch() {
+        let config = ServerConfig::builder()
+            .hide_tools(["tool_a", "tool_b"])
+            .build();
+        assert_eq!(config.hidden_tools.len(), 2);
+        assert!(config.hidden_tools.contains("tool_a"));
+        assert!(config.hidden_tools.contains("tool_b"));
+    }
+
+    #[test]
+    fn test_builder_search_tools_disabled_by_default() {
+        let config = ServerConfig::builder().build();
+        assert!(!config.search_tools.enabled);
+        assert_eq!(config.search_tools.tool_name, "search_tools");
+    }
+
+    #[test]
+    fn test_builder_enable_search_tools() {
+        let config = ServerConfig::builder().enable_search_tools().build();
+        assert!(config.search_tools.enabled);
+        assert_eq!(config.search_tools.tool_name, "search_tools");
+    }
+
+    #[test]
+    fn test_builder_enable_search_tools_named() {
+        let config = ServerConfig::builder()
+            .enable_search_tools_named("find_tool")
+            .build();
+        assert!(config.search_tools.enabled);
+        assert_eq!(config.search_tools.tool_name, "find_tool");
+    }
+
+    #[test]
+    fn test_builder_search_tools_config_method() {
+        let cfg = SearchToolsConfig {
+            enabled: true,
+            tool_name: "my_search".to_string(),
+        };
+        let config = ServerConfig::builder().search_tools_config(cfg).build();
+        assert!(config.search_tools.enabled);
+        assert_eq!(config.search_tools.tool_name, "my_search");
     }
 
     #[test]

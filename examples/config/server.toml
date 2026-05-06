@@ -47,12 +47,24 @@ structured = true                  # Enable structured JSON logging
 # file = "/var/log/turbomcp/server.log"  # Optional log file path
 
 # Tool filtering configuration
-# List tool names to disable. Disabled tools are filtered from tools/list
-# responses and blocked at tools/call. They remain compiled into the binary,
-# so no recompile is needed when changing this list.
 [tools]
+# disabled: Filtered from tools/list AND blocked at tools/call.
+# The tool remains in the binary; toggle visibility without recompiling.
 disabled = []
 # disabled = ["debug_inspector", "admin_reset", "expensive_batch_op"]
+
+# hidden: Filtered from tools/list but still callable via tools/call.
+# Hidden tools appear in search_tools results when search is enabled.
+# Use this to reduce LLM context pollution for infrequently-needed tools.
+hidden = []
+# hidden = ["advanced_export", "bulk_delete"]
+
+# search_tools: Inject a built-in search_tools tool that lets LLMs discover
+# the full tool catalog (including hidden tools) without listing everything.
+# Opt-in only — disabled by default for backwards compatibility.
+search_tools_enabled = false
+# search_tools_enabled = true
+# search_tools_name = "search_tools"  # optional custom name
 
 # Additional custom configuration
 # Use this for application-specific settings

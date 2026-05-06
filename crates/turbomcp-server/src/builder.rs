@@ -406,6 +406,71 @@ impl<H: McpHandler> ServerBuilder<H> {
         self
     }
 
+    /// Hide a single tool from `tools/list` without disabling it.
+    ///
+    /// Hidden tools remain callable via `tools/call` and appear in
+    /// `search_tools` results when the built-in search is enabled.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// builder.with_hidden_tool("advanced_export")
+    /// ```
+    #[must_use]
+    pub fn with_hidden_tool(mut self, name: impl Into<String>) -> Self {
+        self.config = self.config.hide_tool(name);
+        self
+    }
+
+    /// Hide multiple tools from `tools/list` without disabling them.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// builder.with_hidden_tools(["advanced_export", "bulk_delete"])
+    /// ```
+    #[must_use]
+    pub fn with_hidden_tools<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.config = self.config.hide_tools(names);
+        self
+    }
+
+    /// Enable the built-in `search_tools` tool.
+    ///
+    /// When enabled, `search_tools` appears in `tools/list` and lets LLMs
+    /// discover the full tool catalog — including hidden tools — on demand.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// builder.with_search_tools_enabled()
+    /// ```
+    #[must_use]
+    pub fn with_search_tools_enabled(mut self) -> Self {
+        self.config = self.config.enable_search_tools();
+        self
+    }
+
+    /// Enable the built-in search tool with a custom name.
+    ///
+    /// Use this if `"search_tools"` would conflict with an existing tool in
+    /// your handler.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// builder.with_search_tools_named("find_tool")
+    /// ```
+    #[must_use]
+    pub fn with_search_tools_named(mut self, name: impl Into<String>) -> Self {
+        self.config = self.config.enable_search_tools_named(name);
+        self
+    }
+
     /// Apply a custom server configuration.
     ///
     /// This replaces any previously set configuration options.
@@ -435,6 +500,14 @@ impl<H: McpHandler> ServerBuilder<H> {
 
         if !config.disabled_tools.is_empty() {
             builder = builder.disable_tools(config.disabled_tools);
+        }
+
+        if !config.hidden_tools.is_empty() {
+            builder = builder.hide_tools(config.hidden_tools);
+        }
+
+        if config.search_tools.enabled {
+            builder = builder.search_tools_config(config.search_tools);
         }
 
         self.config = builder;
@@ -717,6 +790,54 @@ mod tests {
         // Test STDIO
         let builder = handler.clone().builder().transport(Transport::stdio());
         assert!(matches!(builder.transport, Transport::Stdio));
+    }
+
+    #[test]
+    fn test_builder_with_hidden_tool() {
+        let handler = TestHandler;
+        let builder = handler.builder().with_hidden_tool("advanced_op");
+        let config = builder.config.build();
+        assert!(config.hidden_tools.contains("advanced_op"));
+        assert!(!config.disabled_tools.contains("advanced_op"));
+    }
+
+    #[test]
+    fn test_builder_with_search_tools_enabled() {
+        let handler = TestHandler;
+        let builder = handler.builder().with_search_tools_enabled();
+        let config = builder.config.build();
+        assert!(config.search_tools.enabled);
+        assert_eq!(config.search_tools.tool_name, "search_tools");
+    }
+
+    #[test]
+    fn test_builder_with_search_tools_named() {
+        let handler = TestHandler;
+        let builder = handler.builder().with_search_tools_named("find_tool");
+        let config = builder.config.build();
+        assert!(config.search_tools.enabled);
+        assert_eq!(config.search_tools.tool_name, "find_tool");
+    }
+
+    #[test]
+    fn test_builder_with_config_propagates_hidden_and_search() {
+        use super::super::config::{SearchToolsConfig, ServerConfig};
+        let handler = TestHandler;
+
+        let source = ServerConfig {
+            hidden_tools: ["hidden_op".to_string()].into_iter().collect(),
+            search_tools: SearchToolsConfig {
+                enabled: true,
+                tool_name: "find_tool".to_string(),
+            },
+            ..ServerConfig::default()
+        };
+
+        let builder = handler.builder().with_config(source);
+        let config = builder.config.build();
+        assert!(config.hidden_tools.contains("hidden_op"));
+        assert!(config.search_tools.enabled);
+        assert_eq!(config.search_tools.tool_name, "find_tool");
     }
 
     #[cfg(feature = "http")]
