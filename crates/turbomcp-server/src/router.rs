@@ -17,6 +17,8 @@
 //! - Capability structure follows the spec format
 //! - Error codes follow JSON-RPC 2.0 standard
 
+use std::collections::HashSet;
+
 use super::config::{ClientCapabilities, ServerConfig};
 use turbomcp_core::context::RequestContext;
 use turbomcp_core::error::McpError;
@@ -194,10 +196,36 @@ pub async fn route_request_with_config<H: McpHandler>(
         return apply_adapter_to_response(adapter, "initialize", response);
     }
 
-    // For all other methods, delegate to core router (no adapter — caller
-    // must use route_request_versioned for post-initialize adapter filtering)
+    // For all other methods, apply tool filtering then delegate to core router.
+    let disabled = config.map(|c| &c.disabled_tools);
+
+    // Pre-check: reject calls to disabled tools before hitting the core router.
+    if request.method == "tools/call" {
+        if let Some(disabled) = disabled.filter(|d| !d.is_empty()) {
+            let name = request
+                .params
+                .as_ref()
+                .and_then(|p| p.get("name"))
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            if disabled.contains(name) {
+                return JsonRpcOutgoing::error(id, McpError::tool_not_found(name));
+            }
+        }
+    }
+
+    let method = request.method.clone();
     let core_config = turbomcp_core::router::RouteConfig::default();
-    turbomcp_core::router::route_request(handler, request, ctx, &core_config).await
+    let response = turbomcp_core::router::route_request(handler, request, ctx, &core_config).await;
+
+    // Post-filter: strip disabled tools from the tools/list response.
+    if method == "tools/list" {
+        if let Some(disabled) = disabled.filter(|d| !d.is_empty()) {
+            return filter_disabled_tools(response, disabled);
+        }
+    }
+
+    response
 }
 
 /// Route a JSON-RPC request with version-aware adapter filtering.
@@ -205,8 +233,9 @@ pub async fn route_request_with_config<H: McpHandler>(
 /// This is the recommended entry point for post-initialize requests when the
 /// session has a negotiated protocol version. It:
 /// 1. Validates the method is available in the negotiated version
-/// 2. Delegates to the core router
-/// 3. Applies the version adapter to filter the response
+/// 2. Applies tool-disable filtering from `config` (if provided)
+/// 3. Delegates to the core router
+/// 4. Applies the version adapter to filter the response
 ///
 /// Transport layers should store the negotiated [`turbomcp_protocol::types::ProtocolVersion`] from
 /// the initialize handshake and pass it here for all subsequent requests.
@@ -215,6 +244,7 @@ pub async fn route_request_versioned<H: McpHandler>(
     request: JsonRpcIncoming,
     ctx: &RequestContext,
     negotiated_version: &turbomcp_types::ProtocolVersion,
+    config: Option<&ServerConfig>,
 ) -> JsonRpcOutgoing {
     if request.is_notification() {
         return JsonRpcOutgoing::notification_ack();
@@ -228,12 +258,58 @@ pub async fn route_request_versioned<H: McpHandler>(
         return JsonRpcOutgoing::error(request.id.clone(), McpError::method_not_found(reason));
     }
 
+    let disabled = config.map(|c| &c.disabled_tools);
+
+    // Pre-check: reject calls to disabled tools before hitting the core router.
+    if method == "tools/call" {
+        if let Some(disabled) = disabled.filter(|d| !d.is_empty()) {
+            let name = request
+                .params
+                .as_ref()
+                .and_then(|p| p.get("name"))
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            if disabled.contains(name) {
+                return JsonRpcOutgoing::error(
+                    request.id.clone(),
+                    McpError::tool_not_found(name),
+                );
+            }
+        }
+    }
+
     // Route through core
     let core_config = turbomcp_core::router::RouteConfig::default();
     let response = turbomcp_core::router::route_request(handler, request, ctx, &core_config).await;
 
+    // Post-filter: strip disabled tools from the tools/list response.
+    let response = if method == "tools/list" {
+        if let Some(disabled) = disabled.filter(|d| !d.is_empty()) {
+            filter_disabled_tools(response, disabled)
+        } else {
+            response
+        }
+    } else {
+        response
+    };
+
     // Apply version adapter to filter the response
     apply_adapter_to_response(adapter, &method, response)
+}
+
+/// Remove disabled tools from a `tools/list` response.
+fn filter_disabled_tools(mut response: JsonRpcOutgoing, disabled: &HashSet<String>) -> JsonRpcOutgoing {
+    if let Some(result) = response.result.as_mut() {
+        if let Some(tools) = result.get_mut("tools").and_then(|v| v.as_array_mut()) {
+            tools.retain(|t| {
+                t.get("name")
+                    .and_then(|n| n.as_str())
+                    .map(|n| !disabled.contains(n))
+                    .unwrap_or(true)
+            });
+        }
+    }
+    response
 }
 
 /// Apply a version adapter to a JSON-RPC response.
@@ -465,6 +541,68 @@ mod tests {
         let response = route_request(&handler, request, &ctx).await;
         assert!(response.result.is_some());
         assert!(response.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_disabled_tool_hidden_from_list() {
+        let handler = TestHandler;
+        let ctx = RequestContext::stdio();
+        let config = super::super::config::ServerConfig::builder()
+            .disable_tool("test_tool")
+            .build();
+        let request = JsonRpcIncoming {
+            jsonrpc: "2.0".to_string(),
+            id: Some(serde_json::json!(1)),
+            method: "tools/list".to_string(),
+            params: None,
+        };
+
+        let response = route_request_with_config(&handler, request, &ctx, Some(&config)).await;
+        assert!(response.result.is_some());
+        let tools = response.result.unwrap()["tools"].as_array().unwrap().clone();
+        assert!(tools.is_empty(), "disabled tool should be absent from list");
+    }
+
+    #[tokio::test]
+    async fn test_disabled_tool_call_rejected() {
+        let handler = TestHandler;
+        let ctx = RequestContext::stdio();
+        let config = super::super::config::ServerConfig::builder()
+            .disable_tool("test_tool")
+            .build();
+        let request = JsonRpcIncoming {
+            jsonrpc: "2.0".to_string(),
+            id: Some(serde_json::json!(1)),
+            method: "tools/call".to_string(),
+            params: Some(serde_json::json!({
+                "name": "test_tool",
+                "arguments": {}
+            })),
+        };
+
+        let response = route_request_with_config(&handler, request, &ctx, Some(&config)).await;
+        assert!(response.result.is_none());
+        assert!(response.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_non_disabled_tool_still_accessible() {
+        let handler = TestHandler;
+        let ctx = RequestContext::stdio();
+        let config = super::super::config::ServerConfig::builder()
+            .disable_tool("other_tool")
+            .build();
+        let request = JsonRpcIncoming {
+            jsonrpc: "2.0".to_string(),
+            id: Some(serde_json::json!(1)),
+            method: "tools/list".to_string(),
+            params: None,
+        };
+
+        let response = route_request_with_config(&handler, request, &ctx, Some(&config)).await;
+        let tools = response.result.unwrap()["tools"].as_array().unwrap().clone();
+        assert_eq!(tools.len(), 1, "non-disabled tool should remain visible");
+        assert_eq!(tools[0]["name"], "test_tool");
     }
 
     #[tokio::test]

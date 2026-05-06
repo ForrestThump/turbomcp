@@ -494,13 +494,14 @@ async fn handle_websocket<H: McpHandler>(
                     Arc::clone(&pending_handlers),
                     cancel_key,
                 );
+                let config_clone = config.clone();
 
                 tokio::spawn(async move {
                     // RAII cleanup runs on every exit path, including handler
                     // panic.
                     let _guard = guard;
                     let response = router::route_request_versioned(
-                        &handler_clone, parsed, &ctx, &version,
+                        &handler_clone, parsed, &ctx, &version, config_clone.as_ref(),
                     )
                     .await;
                     let _ = resp_tx.send(response).await;

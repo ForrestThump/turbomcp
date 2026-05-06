@@ -423,6 +423,7 @@ impl<H: McpHandler> LineTransportRunner<H> {
                                         Arc::clone(&pending_handlers),
                                         cancel_key,
                                     );
+                                    let config = self.config.clone();
 
                                     tokio::spawn(async move {
                                         // RAII: the guard removes the registry
@@ -430,7 +431,7 @@ impl<H: McpHandler> LineTransportRunner<H> {
                                         // panic in the handler.
                                         let _guard = guard;
                                         let response = router::route_request_versioned(
-                                            &handler, request, &ctx, &version,
+                                            &handler, request, &ctx, &version, config.as_ref(),
                                         )
                                         .await;
                                         // If channel is closed the transport loop has exited; ignore.

@@ -479,7 +479,7 @@ async fn run_server_loop<H: McpHandler>(
                                     // including handler panic.
                                     let _guard = guard;
                                     let response = router::route_request_versioned(
-                                        &h, request, &ctx, &version,
+                                        &h, request, &ctx, &version, None,
                                     )
                                     .await;
                                     let _ = resp_tx.send(response).await;

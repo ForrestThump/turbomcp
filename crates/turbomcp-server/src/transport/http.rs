@@ -713,7 +713,7 @@ async fn route_with_version_tracking<H: McpHandler>(
     if let Some(sid) = session_id
         && let Some(version) = session_manager.get_protocol_version(sid).await
     {
-        return router::route_request_versioned(handler, request, &ctx, &version).await;
+        return router::route_request_versioned(handler, request, &ctx, &version, config).await;
     }
 
     // Pre-initialize or sessionless: route with config for proper validation.

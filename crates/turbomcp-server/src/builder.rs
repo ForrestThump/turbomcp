@@ -372,6 +372,40 @@ impl<H: McpHandler> ServerBuilder<H> {
         self
     }
 
+    /// Disable a single tool by name.
+    ///
+    /// The tool is filtered from `tools/list` responses and blocked at
+    /// `tools/call`. It remains compiled into the binary and can be
+    /// re-enabled by removing it from the disabled set without recompiling.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// builder.with_disabled_tool("debug_inspector")
+    /// ```
+    #[must_use]
+    pub fn with_disabled_tool(mut self, name: impl Into<String>) -> Self {
+        self.config = self.config.disable_tool(name);
+        self
+    }
+
+    /// Disable multiple tools by name.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// builder.with_disabled_tools(["debug_inspector", "admin_reset"])
+    /// ```
+    #[must_use]
+    pub fn with_disabled_tools<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.config = self.config.disable_tools(names);
+        self
+    }
+
     /// Apply a custom server configuration.
     ///
     /// This replaces any previously set configuration options.
@@ -397,6 +431,10 @@ impl<H: McpHandler> ServerBuilder<H> {
 
         if let Some(rate_limit) = config.rate_limit {
             builder = builder.rate_limit(rate_limit);
+        }
+
+        if !config.disabled_tools.is_empty() {
+            builder = builder.disable_tools(config.disabled_tools);
         }
 
         self.config = builder;

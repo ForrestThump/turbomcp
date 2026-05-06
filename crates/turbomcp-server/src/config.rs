@@ -81,6 +81,12 @@ pub struct ServerConfig {
     pub max_message_size: usize,
     /// HTTP origin validation policy.
     pub origin_validation: OriginValidationConfig,
+    /// Tool names that are disabled and should not be advertised or callable.
+    ///
+    /// Tools in this set are filtered from `tools/list` responses and blocked
+    /// from `tools/call`. They remain compiled into the binary; only the config
+    /// controls whether they are exposed to clients.
+    pub disabled_tools: HashSet<String>,
 }
 
 impl Default for ServerConfig {
@@ -92,6 +98,7 @@ impl Default for ServerConfig {
             required_capabilities: RequiredCapabilities::default(),
             max_message_size: DEFAULT_MAX_MESSAGE_SIZE,
             origin_validation: OriginValidationConfig::default(),
+            disabled_tools: HashSet::new(),
         }
     }
 }
@@ -119,6 +126,7 @@ pub struct ServerConfigBuilder {
     required_capabilities: Option<RequiredCapabilities>,
     max_message_size: Option<usize>,
     origin_validation: Option<OriginValidationConfig>,
+    disabled_tools: HashSet<String>,
 }
 
 impl ServerConfigBuilder {
@@ -211,6 +219,28 @@ impl ServerConfigBuilder {
         self
     }
 
+    /// Disable a single tool by name.
+    ///
+    /// Disabled tools are filtered from `tools/list` responses and blocked at
+    /// `tools/call`. They remain in the binary; only this config controls
+    /// whether they are visible to clients.
+    #[must_use]
+    pub fn disable_tool(mut self, name: impl Into<String>) -> Self {
+        self.disabled_tools.insert(name.into());
+        self
+    }
+
+    /// Disable multiple tools by name.
+    #[must_use]
+    pub fn disable_tools<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.disabled_tools.extend(names.into_iter().map(Into::into));
+        self
+    }
+
     /// Build the server configuration with sensible defaults.
     ///
     /// This method always succeeds and uses defaults for any unset fields.
@@ -224,6 +254,7 @@ impl ServerConfigBuilder {
             required_capabilities: self.required_capabilities.unwrap_or_default(),
             max_message_size: self.max_message_size.unwrap_or(DEFAULT_MAX_MESSAGE_SIZE),
             origin_validation: self.origin_validation.unwrap_or_default(),
+            disabled_tools: self.disabled_tools,
         }
     }
 
@@ -296,6 +327,7 @@ impl ServerConfigBuilder {
             required_capabilities: self.required_capabilities.unwrap_or_default(),
             max_message_size,
             origin_validation: self.origin_validation.unwrap_or_default(),
+            disabled_tools: self.disabled_tools,
         })
     }
 }
@@ -983,6 +1015,41 @@ mod tests {
         assert_eq!(config.max_message_size, DEFAULT_MAX_MESSAGE_SIZE);
         assert!(config.origin_validation.allow_localhost);
         assert!(config.origin_validation.allowed_origins.is_empty());
+        assert!(config.disabled_tools.is_empty());
+    }
+
+    #[test]
+    fn test_builder_disable_tool() {
+        let config = ServerConfig::builder()
+            .disable_tool("debug_tool")
+            .disable_tool("admin_tool")
+            .build();
+
+        assert!(config.disabled_tools.contains("debug_tool"));
+        assert!(config.disabled_tools.contains("admin_tool"));
+        assert!(!config.disabled_tools.contains("regular_tool"));
+    }
+
+    #[test]
+    fn test_builder_disable_tools_batch() {
+        let config = ServerConfig::builder()
+            .disable_tools(["tool_a", "tool_b", "tool_c"])
+            .build();
+
+        assert_eq!(config.disabled_tools.len(), 3);
+        assert!(config.disabled_tools.contains("tool_a"));
+        assert!(config.disabled_tools.contains("tool_b"));
+        assert!(config.disabled_tools.contains("tool_c"));
+    }
+
+    #[test]
+    fn test_builder_disabled_tools_in_try_build() {
+        let config = ServerConfig::builder()
+            .disable_tool("expensive_tool")
+            .try_build()
+            .expect("valid config");
+
+        assert!(config.disabled_tools.contains("expensive_tool"));
     }
 
     #[test]
