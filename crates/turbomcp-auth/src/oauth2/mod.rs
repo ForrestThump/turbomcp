@@ -33,6 +33,10 @@ pub use client::OAuth2Client;
 // Re-export HTTP client adapter
 pub use http_client::OAuth2HttpClient;
 
+// DPoP binding (RFC 9449) — only when the `dpop` feature is enabled.
+#[cfg(feature = "dpop")]
+pub use http_client::DpopBinding;
+
 // Re-export DCR types (RFC 7591)
 pub use dcr::{DcrBuilder, DcrClient, RegistrationRequest, RegistrationResponse};
 

@@ -25,8 +25,9 @@ fn turbomcp_crate() -> TokenStream {
 }
 
 use super::tool::{
-    ToolAttrs, ToolInfo, generate_call_args, generate_extraction_code, generate_schema_code,
-    parse_quoted_value, parse_tags_array,
+    ToolAttrs, ToolInfo, generate_annotations_code, generate_call_args, generate_extraction_code,
+    generate_icons_code, generate_output_schema_code, generate_schema_code, parse_quoted_value,
+    parse_string_array, parse_tags_array,
 };
 
 /// Information collected from analyzing the impl block.
@@ -64,6 +65,10 @@ pub struct ResourceInfo {
     pub tags: Vec<String>,
     /// Version string
     pub version: Option<String>,
+    /// Human-readable title (SEP-973).
+    pub title: Option<String>,
+    /// Icon URIs (SEP-973).
+    pub icons: Vec<String>,
 }
 
 /// Prompt handler info.
@@ -81,6 +86,10 @@ pub struct PromptInfo {
     pub tags: Vec<String>,
     /// Version string
     pub version: Option<String>,
+    /// Human-readable title (SEP-973).
+    pub title: Option<String>,
+    /// Icon URIs (SEP-973).
+    pub icons: Vec<String>,
 }
 
 /// Prompt argument info (HIGH-002).
@@ -220,6 +229,8 @@ pub fn analyze_impl(impl_block: &ItemImpl, attrs: &ServerAttrs) -> Result<Server
                         fn_name,
                         tags: resource_attrs.tags,
                         version: resource_attrs.version,
+                        title: resource_attrs.title,
+                        icons: resource_attrs.icons,
                     });
                     break;
                 } else if attr.path().is_ident("prompt") {
@@ -235,6 +246,8 @@ pub fn analyze_impl(impl_block: &ItemImpl, attrs: &ServerAttrs) -> Result<Server
                         fn_name,
                         tags: prompt_attrs.tags,
                         version: prompt_attrs.version,
+                        title: prompt_attrs.title,
+                        icons: prompt_attrs.icons,
                     });
                     break;
                 }
@@ -261,6 +274,10 @@ pub struct ResourceAttrInfo {
     pub tags: Vec<String>,
     /// Version string
     pub version: Option<String>,
+    /// Human-readable title (SEP-973).
+    pub title: Option<String>,
+    /// Icon URIs (SEP-973).
+    pub icons: Vec<String>,
 }
 
 /// Extract resource URI and optional mime_type, tags, version from attribute.
@@ -286,6 +303,8 @@ fn extract_resource_attrs(attr: &syn::Attribute) -> Result<ResourceAttrInfo, syn
             mime_type: None,
             tags: Vec::new(),
             version: None,
+            title: None,
+            icons: Vec::new(),
         });
     }
 
@@ -317,12 +336,16 @@ fn extract_resource_attrs(attr: &syn::Attribute) -> Result<ResourceAttrInfo, syn
     let mime_type = parse_quoted_value(&rest_str, "mime_type");
     let version = parse_quoted_value(&rest_str, "version");
     let tags = parse_tags_array(&rest_str);
+    let title = parse_quoted_value(&rest_str, "title");
+    let icons = parse_string_array(&rest_str, "icons");
 
     Ok(ResourceAttrInfo {
         uri_template,
         mime_type,
         tags,
         version,
+        title,
+        icons,
     })
 }
 
@@ -355,6 +378,8 @@ struct PromptAttrs {
     description: Option<String>,
     tags: Vec<String>,
     version: Option<String>,
+    title: Option<String>,
+    icons: Vec<String>,
 }
 
 /// Extract prompt attributes from #[prompt(...)] attribute.
@@ -377,6 +402,8 @@ fn extract_prompt_attrs(attr: &syn::Attribute) -> PromptAttrs {
     attrs.description = parse_quoted_value(&token_str, "description");
     attrs.version = parse_quoted_value(&token_str, "version");
     attrs.tags = parse_tags_array(&token_str);
+    attrs.title = parse_quoted_value(&token_str, "title");
+    attrs.icons = parse_string_array(&token_str, "icons");
 
     attrs
 }
@@ -571,16 +598,25 @@ pub fn generate_mcp_handler(info: &ServerInfo, impl_block: &ItemImpl) -> TokenSt
             quote! { Some(#desc.to_string()) }
         };
 
+        // SEP-973 / 2025-11-25 surface fields from #[tool(...)] attributes.
+        let title_code = match &tool.title {
+            Some(t) => quote! { Some(#t.to_string()) },
+            None => quote! { None },
+        };
+        let icons_code = generate_icons_code(&tool.icons, &turbomcp);
+        let annotations_code = generate_annotations_code(&tool.annotations, &tool.title, &turbomcp);
+        let output_schema_code = generate_output_schema_code(&tool.output_schema, &turbomcp);
+
         quote! {
             #turbomcp::__macro_support::turbomcp_types::Tool {
                 name: #tool_name.to_string(),
                 description: #description_code,
                 input_schema: #schema_code,
-                title: None,
-                icons: None,
-                annotations: None,
+                title: #title_code,
+                icons: #icons_code,
+                annotations: #annotations_code,
                 execution: None,
-                output_schema: None,
+                output_schema: #output_schema_code,
                 meta: #meta_code,
             }
         }
@@ -601,13 +637,18 @@ pub fn generate_mcp_handler(info: &ServerInfo, impl_block: &ItemImpl) -> TokenSt
             Some(desc) if !desc.is_empty() => quote! { Some(#desc.to_string()) },
             _ => quote! { None },
         };
+        let title_code = match &resource.title {
+            Some(t) => quote! { Some(#t.to_string()) },
+            None => quote! { None },
+        };
+        let icons_code = generate_icons_code(&resource.icons, &turbomcp);
         quote! {
             #turbomcp::__macro_support::turbomcp_types::Resource {
                 uri: #uri.to_string(),
                 name: #name.to_string(),
                 description: #description_code,
-                title: None,
-                icons: None,
+                title: #title_code,
+                icons: #icons_code,
                 mime_type: #mime_type_code,
                 annotations: None,
                 size: None,
@@ -650,19 +691,33 @@ pub fn generate_mcp_handler(info: &ServerInfo, impl_block: &ItemImpl) -> TokenSt
             quote! { Some(vec![#(#arg_structs),*]) }
         };
 
+        let title_code = match &prompt.title {
+            Some(t) => quote! { Some(#t.to_string()) },
+            None => quote! { None },
+        };
+        let icons_code = generate_icons_code(&prompt.icons, &turbomcp);
+
         quote! {
             #turbomcp::__macro_support::turbomcp_types::Prompt {
                 name: #name.to_string(),
                 description: #description_code,
-                title: None,
-                icons: None,
+                title: #title_code,
+                icons: #icons_code,
                 arguments: #args_code,
                 meta: #meta_code,
             }
         }
     });
 
-    // Generate tool dispatch code
+    // Generate tool dispatch code.
+    //
+    // SEP-1303 (MCP 2025-11-25): "Clarify that input validation errors should
+    // be returned as Tool Execution Errors rather than Protocol Errors to
+    // enable model self-correction." We wrap argument extraction in an async
+    // block so a `McpError::invalid_params(...)` from the parser surfaces as
+    // `CallToolResult { isError: true, content: [text(...)] }` rather than a
+    // JSON-RPC -32602. Other error kinds (internal, transport, etc.) continue
+    // to bubble up as protocol errors.
     let tool_dispatch_code = info.tools.iter().map(|tool| {
         let tool_name = &tool.name;
         let fn_name = syn::Ident::new(&tool.name, proc_macro2::Span::call_site());
@@ -671,9 +726,21 @@ pub fn generate_mcp_handler(info: &ServerInfo, impl_block: &ItemImpl) -> TokenSt
 
         quote! {
             #tool_name => {
-                #extraction
-                let result = self.#fn_name(#call_args).await;
-                Ok(#turbomcp::__macro_support::turbomcp_types::IntoToolResult::into_tool_result(result))
+                let outcome: ::std::result::Result<_, #turbomcp::__macro_support::turbomcp_core::error::McpError> = async {
+                    #extraction
+                    Ok(self.#fn_name(#call_args).await)
+                }.await;
+
+                match outcome {
+                    Ok(result) => Ok(
+                        #turbomcp::__macro_support::turbomcp_types::IntoToolResult::into_tool_result(result)
+                    ),
+                    Err(e) if e.kind == #turbomcp::__macro_support::turbomcp_core::error::ErrorKind::InvalidParams => {
+                        // SEP-1303: validation failure → tool execution error.
+                        Ok(#turbomcp::__macro_support::turbomcp_types::ToolResult::error(e.message.clone()))
+                    }
+                    Err(e) => Err(e),
+                }
             }
         }
     });

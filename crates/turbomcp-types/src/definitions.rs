@@ -274,6 +274,24 @@ impl core::fmt::Display for TaskSupportLevel {
     }
 }
 
+/// JSON Schema dialect URI defaulted by MCP 2025-11-25 (SEP-1613).
+///
+/// Spec language: "Establish JSON Schema 2020-12 as the default dialect for
+/// MCP schema definitions." Tools, resources, prompts, and elicitation
+/// schemas should advertise this `$schema` value unless they intentionally
+/// declare a different dialect.
+pub const JSON_SCHEMA_DIALECT_2020_12: &str = "https://json-schema.org/draft/2020-12/schema";
+
+/// Build the default `extra_keywords` map containing the SEP-1613 dialect.
+fn default_schema_extras() -> HashMap<String, Value> {
+    let mut m = HashMap::new();
+    m.insert(
+        "$schema".to_string(),
+        Value::String(JSON_SCHEMA_DIALECT_2020_12.to_string()),
+    );
+    m
+}
+
 /// JSON Schema for tool input parameters.
 ///
 /// `properties` is stored as a raw `serde_json::Value` (typically an object) to
@@ -308,7 +326,7 @@ impl Default for ToolInputSchema {
             properties: None,
             required: None,
             additional_properties: Some(Value::Bool(false)),
-            extra_keywords: HashMap::new(),
+            extra_keywords: default_schema_extras(),
         }
     }
 }
@@ -344,7 +362,7 @@ impl ToolInputSchema {
             properties: Some(Value::Object(obj)),
             required: None,
             additional_properties: None,
-            extra_keywords: HashMap::new(),
+            extra_keywords: default_schema_extras(),
         }
     }
 
@@ -360,7 +378,7 @@ impl ToolInputSchema {
             properties: Some(Value::Object(obj)),
             required: Some(required),
             additional_properties: Some(Value::Bool(false)),
-            extra_keywords: HashMap::new(),
+            extra_keywords: default_schema_extras(),
         }
     }
 
@@ -422,7 +440,7 @@ impl Default for ToolOutputSchema {
             properties: None,
             required: None,
             additional_properties: None,
-            extra_keywords: HashMap::new(),
+            extra_keywords: default_schema_extras(),
         }
     }
 }

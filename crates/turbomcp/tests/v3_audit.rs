@@ -89,6 +89,169 @@ async fn custom_uri_schemes_reach_registered_handlers() {
     assert_eq!(result.contents.len(), 1);
 }
 
+// SEP-973 / MCP 2025-11-25 surface fields plumbed through #[tool], #[resource],
+// #[prompt]: title, icons, ToolAnnotations hints, and outputSchema.
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct GreetingOut {
+    greeting: String,
+}
+
+#[derive(Clone)]
+struct AnnotatedServer;
+
+#[server(name = "annotated", version = "1.0.0")]
+impl AnnotatedServer {
+    /// Greet a user
+    #[tool(
+        title = "Greet",
+        icons = ["https://example.com/wave.svg"],
+        read_only = true,
+        idempotent = true,
+        output_schema = GreetingOut,
+    )]
+    async fn greet(&self, name: String) -> String {
+        format!("hi {name}")
+    }
+
+    #[resource(
+        "config://app",
+        title = "App config",
+        icons = ["https://example.com/cog.png"],
+        mime_type = "application/json"
+    )]
+    async fn config(&self, _uri: String, _ctx: &RequestContext) -> McpResult<String> {
+        Ok("{}".into())
+    }
+
+    #[prompt(title = "Summarize", icons = ["https://example.com/doc.svg"])]
+    async fn summarize(&self, text: String, _ctx: &RequestContext) -> McpResult<PromptResult> {
+        Ok(PromptResult::user(format!("Summarize: {text}")))
+    }
+}
+
+#[test]
+fn tool_attributes_emit_2025_11_25_metadata() {
+    let server = AnnotatedServer;
+
+    let tools = server.list_tools();
+    let tool = tools
+        .iter()
+        .find(|t| t.name == "greet")
+        .expect("greet tool");
+    assert_eq!(tool.title.as_deref(), Some("Greet"));
+    let icons = tool.icons.as_ref().expect("icons populated");
+    assert_eq!(icons.len(), 1);
+    assert_eq!(icons[0].src, "https://example.com/wave.svg");
+
+    let ann = tool.annotations.as_ref().expect("annotations populated");
+    assert_eq!(ann.read_only_hint, Some(true));
+    assert_eq!(ann.idempotent_hint, Some(true));
+    assert_eq!(ann.destructive_hint, None);
+    assert_eq!(ann.title.as_deref(), Some("Greet"));
+
+    let out = tool
+        .output_schema
+        .as_ref()
+        .expect("output_schema populated");
+    let json = serde_json::to_value(out).unwrap();
+    // schemars 1.x emits the schema dialect at the root.
+    let dialect = json
+        .get("$schema")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    assert!(
+        dialect.contains("2020-12") || dialect.contains("draft-07"),
+        "outputSchema should advertise a JSON Schema dialect, got: {dialect}"
+    );
+    // Sanity-check that the schema actually describes `GreetingOut` rather
+    // than collapsing to the default empty object — the `greeting: String`
+    // property must be present.
+    let greeting_prop = json.get("properties").and_then(|p| p.get("greeting"));
+    assert!(
+        greeting_prop.is_some(),
+        "outputSchema must reflect the `greeting` field of GreetingOut, got: {json}"
+    );
+    assert_eq!(
+        greeting_prop
+            .and_then(|p| p.get("type"))
+            .and_then(|t| t.as_str()),
+        Some("string"),
+        "outputSchema's `greeting` field should be typed as string"
+    );
+
+    let resources = server.list_resources();
+    let res = resources
+        .iter()
+        .find(|r| r.name == "config")
+        .expect("config resource");
+    assert_eq!(res.title.as_deref(), Some("App config"));
+    assert_eq!(res.icons.as_ref().expect("res icons").len(), 1);
+    assert_eq!(res.mime_type.as_deref(), Some("application/json"));
+
+    let prompts = server.list_prompts();
+    let pr = prompts
+        .iter()
+        .find(|p| p.name == "summarize")
+        .expect("summarize prompt");
+    assert_eq!(pr.title.as_deref(), Some("Summarize"));
+    assert_eq!(pr.icons.as_ref().expect("prompt icons").len(), 1);
+}
+
+// SEP-1613: every macro-generated tool schema must declare the JSON Schema
+// 2020-12 dialect via `$schema`. Clients use this to pick the right validator.
+#[test]
+fn macro_schemas_declare_2020_12_dialect() {
+    let server = AnnotatedServer;
+    let tools = server.list_tools();
+    let tool = tools
+        .iter()
+        .find(|t| t.name == "greet")
+        .expect("greet tool");
+
+    let json = serde_json::to_value(&tool.input_schema).expect("inputSchema serializable");
+    let dialect = json
+        .get("$schema")
+        .and_then(|v| v.as_str())
+        .expect("inputSchema must declare $schema");
+    assert_eq!(
+        dialect, "https://json-schema.org/draft/2020-12/schema",
+        "inputSchema $schema must be the 2020-12 dialect URI"
+    );
+}
+
+// SEP-1303 (MCP 2025-11-25): tool input validation failures must surface as
+// `CallToolResult { isError: true, content: [...] }` so the model can
+// self-correct, NOT as JSON-RPC -32602 protocol errors.
+#[tokio::test]
+async fn invalid_args_return_tool_execution_error() {
+    let server = AnnotatedServer;
+    let ctx = RequestContext::stdio();
+
+    // Missing required `name` parameter — historically this returned
+    // Err(McpError::invalid_params(...)). After SEP-1303 it must come back as
+    // an Ok result with isError = true.
+    let result = server
+        .call_tool("greet", serde_json::json!({}), &ctx)
+        .await
+        .expect("validation failure must surface as Ok(ToolResult), not Err");
+    assert!(
+        result.is_error(),
+        "result must carry isError = true to signal a tool execution error"
+    );
+    let text = result.first_text().unwrap_or_default();
+    assert!(
+        text.to_lowercase().contains("name"),
+        "execution error message should reference the offending parameter, got: {text}"
+    );
+
+    // Wrong-type argument also routes through SEP-1303.
+    let result = server
+        .call_tool("greet", serde_json::json!({ "name": 42 }), &ctx)
+        .await
+        .expect("type-coercion failure must surface as Ok(ToolResult), not Err");
+    assert!(result.is_error());
+}
+
 #[tokio::test]
 async fn dangerous_uri_schemes_are_still_rejected() {
     let server = CustomSchemeServer;

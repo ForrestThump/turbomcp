@@ -89,6 +89,8 @@ impl OpenApiHandler {
             required.push("body".to_string());
         }
 
+        // Carry the SEP-1613 default dialect by deferring to `Default::default`
+        // for `extra_keywords`, which now contains `$schema = 2020-12`.
         ToolInputSchema {
             schema_type: Some("object".into()),
             properties: Some(Value::Object(properties)),
@@ -98,7 +100,7 @@ impl OpenApiHandler {
                 Some(required)
             },
             additional_properties: None,
-            extra_keywords: std::collections::HashMap::new(),
+            ..ToolInputSchema::default()
         }
     }
 

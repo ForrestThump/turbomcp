@@ -831,11 +831,22 @@ async fn handle_sse<H: McpHandler>(
         return empty_response(StatusCode::NOT_FOUND);
     };
 
-    // Create the SSE stream. Per MCP spec:
+    // Create the SSE stream. Per MCP spec (2025-11-25, SEP-1699 clarification):
     //   "The server SHOULD immediately send an SSE event consisting of an
     //    event ID and an empty data field in order to prime the client to
     //    reconnect (using that event ID as Last-Event-ID)."
-    let primer_id = format!("{}-0", session_id);
+    //   "Event IDs SHOULD encode sufficient information to identify the
+    //    originating stream."
+    //
+    // Each GET subscription gets its own `stream_id` (UUID short form) so
+    // concurrent streams on the same session produce distinguishable event
+    // IDs. Format: `{session_id}-{stream_id}-{seq}`. Seq 0 is the primer;
+    // each subsequent message increments. A future replay buffer can use
+    // the (stream_id, seq) tuple to resume from an arbitrary Last-Event-ID.
+    let stream_id = Uuid::new_v4().simple().to_string();
+    let primer_id = format!("{}-{}-0", session_id, stream_id);
+    let session_id_for_events = session_id.clone();
+    let stream_id_for_events = stream_id;
     let stream = async_stream::stream! {
         yield Ok::<_, std::convert::Infallible>(
             Event::default().id(primer_id).data(""),
@@ -845,11 +856,20 @@ async fn handle_sse<H: McpHandler>(
         // only see messages that the server explicitly chose to send to
         // this stream; other concurrent streams on the same session have
         // their own receivers.
+        let mut seq: u64 = 1;
         loop {
             match rx.recv().await {
                 Some(message) => {
+                    let event_id = format!(
+                        "{}-{}-{}",
+                        session_id_for_events, stream_id_for_events, seq
+                    );
+                    seq = seq.saturating_add(1);
                     yield Ok::<_, std::convert::Infallible>(
-                        Event::default().event("message").data(message),
+                        Event::default()
+                            .id(event_id)
+                            .event("message")
+                            .data(message),
                     );
                 }
                 None => {

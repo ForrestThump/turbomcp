@@ -266,6 +266,86 @@ async fn sse_sends_primer_event_with_id() {
     handle.abort();
 }
 
+// SEP-1699 clarification: "Event IDs SHOULD encode sufficient information to
+// identify the originating stream." Two concurrent GET subscriptions on the
+// same session must therefore get distinct primer event IDs so a client can
+// resume the right stream after a disconnect.
+#[tokio::test]
+async fn concurrent_sse_streams_have_distinct_event_ids() {
+    use tokio::io::AsyncReadExt;
+
+    async fn read_first_event_id(client: &Client, base_url: &str, session_id: &str) -> String {
+        let response = client
+            .get(format!("{}/mcp", base_url))
+            .header(header::ACCEPT, "text/event-stream")
+            .header("Mcp-Session-Id", session_id)
+            .header("MCP-Protocol-Version", "2025-11-25")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let mut stream = tokio_util::io::StreamReader::new(
+            response
+                .bytes_stream()
+                .map(|r| r.map_err(std::io::Error::other)),
+        );
+        let mut buf = vec![0u8; 512];
+        let mut collected = String::new();
+        for _ in 0..8 {
+            let n = tokio::time::timeout(Duration::from_secs(1), stream.read(&mut buf))
+                .await
+                .expect("read timed out")
+                .expect("read error");
+            if n == 0 {
+                break;
+            }
+            collected.push_str(std::str::from_utf8(&buf[..n]).unwrap());
+            if collected.contains("\n\n") {
+                break;
+            }
+        }
+
+        collected
+            .split("\n\n")
+            .next()
+            .unwrap_or("")
+            .lines()
+            .find_map(|line| line.strip_prefix("id:").map(|s| s.trim().to_string()))
+            .unwrap_or_default()
+    }
+
+    let (base_url, handle) = spawn_server().await;
+    let client = Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let session_id = initialize_session(&client, &base_url).await;
+
+    let id_a = read_first_event_id(&client, &base_url, &session_id).await;
+    let id_b = read_first_event_id(&client, &base_url, &session_id).await;
+
+    assert!(!id_a.is_empty(), "first stream must emit a primer id");
+    assert!(!id_b.is_empty(), "second stream must emit a primer id");
+    assert_ne!(
+        id_a, id_b,
+        "concurrent streams on the same session must have distinct event IDs (got {id_a} == {id_b})"
+    );
+    // Both IDs must be scoped to this session — the encoding starts with
+    // `{session_id}-` so a client can resume the right session.
+    let prefix = format!("{}-", session_id);
+    assert!(
+        id_a.starts_with(&prefix),
+        "event id should start with `{prefix}`, got: {id_a}"
+    );
+    assert!(
+        id_b.starts_with(&prefix),
+        "event id should start with `{prefix}`, got: {id_b}"
+    );
+
+    handle.abort();
+}
+
 #[tokio::test]
 async fn get_and_delete_use_same_endpoint_session() {
     let (base_url, handle) = spawn_server().await;

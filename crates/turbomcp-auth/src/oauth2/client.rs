@@ -22,6 +22,8 @@ use turbomcp_protocol::{Error as McpError, Result as McpResult};
 
 use super::super::config::{OAuth2Config, ProviderConfig, ProviderType, RefreshBehavior};
 use super::super::types::TokenInfo;
+#[cfg(feature = "dpop")]
+use super::http_client::DpopBinding;
 use super::http_client::OAuth2HttpClient;
 
 /// OAuth 2.1 client wrapper supporting all modern flows
@@ -148,6 +150,21 @@ impl OAuth2Client {
             provider_config,
             http_client,
         })
+    }
+
+    /// Attach a DPoP binding so token-endpoint requests are signed with a
+    /// fresh DPoP proof per RFC 9449.
+    ///
+    /// Without this, `exchange_code_for_token` and `refresh_access_token`
+    /// issue plain bearer requests even when `OAuth2Config::dpop_config` is
+    /// `Some`. Pass a generator built from `turbomcp_dpop::DpopProofGenerator`
+    /// (and optionally pin a key pair so the same key is used at the resource
+    /// server).
+    #[cfg(feature = "dpop")]
+    #[must_use]
+    pub fn with_dpop_binding(mut self, binding: DpopBinding) -> Self {
+        self.http_client = self.http_client.with_dpop(binding);
+        self
     }
 
     /// Build provider-specific configuration
