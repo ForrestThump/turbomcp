@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[cfg(not(feature = "std"))]
-use alloc::{collections::BTreeMap as HashMap, string::String, vec::Vec};
+use alloc::{collections::BTreeMap as HashMap, format, string::String, vec::Vec};
 #[cfg(feature = "std")]
 use std::collections::HashMap;
 
@@ -210,20 +210,29 @@ impl Serialize for ElicitRequestParams {
 impl<'de> Deserialize<'de> for ElicitRequestParams {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = Value::deserialize(deserializer)?;
-        let mode = value.get("mode").and_then(|v| v.as_str()).unwrap_or("form");
 
-        match mode {
-            "url" => {
-                let params: ElicitRequestURLParams =
-                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
-                Ok(Self::Url(params))
-            }
-            _ => {
-                // Default to "form" when mode is absent or explicitly "form"
+        match value.get("mode") {
+            None => {
                 let params: ElicitRequestFormParams =
                     serde_json::from_value(value).map_err(serde::de::Error::custom)?;
                 Ok(Self::Form(params))
             }
+            Some(Value::String(mode)) if mode == "form" => {
+                let params: ElicitRequestFormParams =
+                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+                Ok(Self::Form(params))
+            }
+            Some(Value::String(mode)) if mode == "url" => {
+                let params: ElicitRequestURLParams =
+                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+                Ok(Self::Url(params))
+            }
+            Some(Value::String(mode)) => Err(serde::de::Error::custom(format!(
+                "unsupported elicitation mode `{mode}`"
+            ))),
+            Some(_) => Err(serde::de::Error::custom(
+                "elicitation mode must be a string when present",
+            )),
         }
     }
 }
@@ -1065,6 +1074,21 @@ mod tests {
             }
             ElicitRequestParams::Form(_) => panic!("expected Url variant"),
         }
+    }
+
+    #[test]
+    fn test_elicit_request_params_rejects_unknown_mode() {
+        let json =
+            r#"{"mode":"unknown","message":"Enter name","requestedSchema":{"type":"object"}}"#;
+        let err = serde_json::from_str::<ElicitRequestParams>(json).unwrap_err();
+        assert!(err.to_string().contains("unsupported elicitation mode"));
+    }
+
+    #[test]
+    fn test_elicit_request_params_rejects_non_string_mode() {
+        let json = r#"{"mode":true,"message":"Enter name","requestedSchema":{"type":"object"}}"#;
+        let err = serde_json::from_str::<ElicitRequestParams>(json).unwrap_err();
+        assert!(err.to_string().contains("mode must be a string"));
     }
 
     #[test]

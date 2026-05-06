@@ -443,7 +443,10 @@ impl<S: SessionStore> StreamableHandler<S> {
     async fn handle_get(&self, req: &StreamableRequest) -> StreamableResponse {
         // GET requires a session ID
         let session_id = match &req.session_id {
-            Some(id) => SessionId::from_string(id.clone()),
+            Some(id) => match SessionId::try_from_string(id.clone()) {
+                Some(session_id) => session_id,
+                None => return StreamableResponse::bad_request("Invalid Mcp-Session-Id header"),
+            },
             None => {
                 return StreamableResponse::bad_request("Mcp-Session-Id header required for GET");
             }
@@ -530,7 +533,10 @@ impl<S: SessionStore> StreamableHandler<S> {
             }
         } else if let Some(id) = &req.session_id {
             // Use existing session
-            let session_id = SessionId::from_string(id.clone());
+            let session_id = match SessionId::try_from_string(id.clone()) {
+                Some(session_id) => session_id,
+                None => return StreamableResponse::bad_request("Invalid Mcp-Session-Id header"),
+            };
             match self.session_store.get(&session_id).await {
                 Ok(Some(s)) if s.can_accept_requests() => (Some(session_id), false),
                 Ok(Some(_)) => {
@@ -576,7 +582,10 @@ impl<S: SessionStore> StreamableHandler<S> {
     async fn handle_delete(&self, req: &StreamableRequest) -> StreamableResponse {
         // DELETE requires a session ID
         let session_id = match &req.session_id {
-            Some(id) => SessionId::from_string(id.clone()),
+            Some(id) => match SessionId::try_from_string(id.clone()) {
+                Some(session_id) => session_id,
+                None => return StreamableResponse::bad_request("Invalid Mcp-Session-Id header"),
+            },
             None => {
                 return StreamableResponse::bad_request(
                     "Mcp-Session-Id header required for DELETE",

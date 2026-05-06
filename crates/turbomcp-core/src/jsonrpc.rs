@@ -289,22 +289,24 @@ impl<'de> Deserialize<'de> for JsonRpcResponsePayload {
     where
         D: Deserializer<'de>,
     {
-        #[derive(Deserialize)]
-        struct Helper {
-            #[serde(default)]
-            result: Option<Value>,
-            #[serde(default)]
-            error: Option<JsonRpcError>,
-        }
+        let mut object = serde_json::Map::<String, Value>::deserialize(deserializer)?;
+        let result_present = object.contains_key("result");
+        let error_present = object.contains_key("error");
 
-        let h = Helper::deserialize(deserializer)?;
-        match (h.result, h.error) {
-            (Some(result), None) => Ok(Self::Success { result }),
-            (None, Some(error)) => Ok(Self::Error { error }),
-            (Some(_), Some(_)) => Err(serde::de::Error::custom(
+        match (result_present, error_present) {
+            (true, false) => Ok(Self::Success {
+                result: object.remove("result").unwrap_or(Value::Null),
+            }),
+            (false, true) => {
+                let error_value = object.remove("error").unwrap_or(Value::Null);
+                let error =
+                    JsonRpcError::deserialize(error_value).map_err(serde::de::Error::custom)?;
+                Ok(Self::Error { error })
+            }
+            (true, true) => Err(serde::de::Error::custom(
                 "JSON-RPC response must contain exactly one of `result` or `error`, not both",
             )),
-            (None, None) => Err(serde::de::Error::custom(
+            (false, false) => Err(serde::de::Error::custom(
                 "JSON-RPC response must contain exactly one of `result` or `error`",
             )),
         }
@@ -469,7 +471,8 @@ impl From<JsonRpcErrorCode> for JsonRpcError {
 // ============================================================================
 // These types handle the practical case of deserializing incoming JSON-RPC
 // messages where we don't know upfront if it's a request or notification.
-// They use Option<Value> for ID to handle both cases uniformly.
+// Request IDs are validated at this boundary so routers can rely on
+// `id: None` meaning "field absent", not "null or malformed".
 
 /// Incoming JSON-RPC message - can be request or notification.
 ///
@@ -494,7 +497,7 @@ impl From<JsonRpcErrorCode> for JsonRpcError {
 /// ).unwrap();
 /// assert!(notification.is_notification());
 /// ```
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct JsonRpcIncoming {
     /// JSON-RPC version. Required to be "2.0" per JSON-RPC 2.0 §4.
     /// Parsed by [`Self::parse`] and checked with [`Self::is_valid_version`]; raw
@@ -502,13 +505,67 @@ pub struct JsonRpcIncoming {
     /// report a 1.0/missing-version error).
     pub jsonrpc: String,
     /// Request ID (None for notifications)
-    #[serde(default)]
     pub id: Option<Value>,
     /// Method name
     pub method: String,
     /// Method parameters
-    #[serde(default)]
     pub params: Option<Value>,
+}
+
+impl<'de> Deserialize<'de> for JsonRpcIncoming {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let mut object = serde_json::Map::<String, Value>::deserialize(deserializer)?;
+
+        let jsonrpc = match object.remove("jsonrpc") {
+            Some(Value::String(version)) => version,
+            Some(_) => {
+                return Err(serde::de::Error::custom(
+                    "JSON-RPC request field `jsonrpc` must be a string",
+                ));
+            }
+            None => return Err(serde::de::Error::missing_field("jsonrpc")),
+        };
+
+        let method = match object.remove("method") {
+            Some(Value::String(method)) => method,
+            Some(_) => {
+                return Err(serde::de::Error::custom(
+                    "JSON-RPC request field `method` must be a string",
+                ));
+            }
+            None => return Err(serde::de::Error::missing_field("method")),
+        };
+
+        let id = match object.remove("id") {
+            Some(value) => {
+                Some(validate_incoming_request_id(value).map_err(serde::de::Error::custom)?)
+            }
+            None => None,
+        };
+
+        Ok(Self {
+            jsonrpc,
+            id,
+            method,
+            params: match object.remove("params") {
+                Some(Value::Null) | None => None,
+                Some(params) => Some(params),
+            },
+        })
+    }
+}
+
+fn validate_incoming_request_id(value: Value) -> Result<Value, &'static str> {
+    match &value {
+        Value::String(_) => Ok(value),
+        Value::Number(number) if number.as_i64().is_some() => Ok(value),
+        Value::Null => Err("MCP request `id` must not be null"),
+        Value::Number(_) => Err("MCP request `id` must be an integer"),
+        _ => Err("MCP request `id` must be a string or integer"),
+    }
 }
 
 impl JsonRpcIncoming {
@@ -621,10 +678,9 @@ impl JsonRpcOutgoing {
     /// receive responses. This method returns false for such cases.
     #[must_use]
     pub fn should_send(&self) -> bool {
-        // A response should be sent if:
-        // 1. It has an id (normal request-response)
-        // 2. It has a result or error (explicit response content)
-        self.id.is_some() || self.result.is_some() || self.error.is_some()
+        // Normal request/response messages have an id. Parse and invalid-request
+        // errors may not have a readable id but still carry an error payload.
+        self.id.is_some() || self.error.is_some()
     }
 
     /// Serialize to JSON string
@@ -698,11 +754,31 @@ mod tests {
     }
 
     #[test]
+    fn test_incoming_rejects_null_id() {
+        let input = r#"{"jsonrpc": "2.0", "id": null, "method": "ping"}"#;
+        let err = JsonRpcIncoming::parse(input).unwrap_err();
+        assert!(err.to_string().contains("must not be null"));
+    }
+
+    #[test]
+    fn test_incoming_rejects_non_integer_number_id() {
+        let input = r#"{"jsonrpc": "2.0", "id": 1.25, "method": "ping"}"#;
+        let err = JsonRpcIncoming::parse(input).unwrap_err();
+        assert!(err.to_string().contains("must be an integer"));
+    }
+
+    #[test]
     fn test_outgoing_success() {
         let response = JsonRpcOutgoing::success(Some(serde_json::json!(1)), serde_json::json!({}));
         assert!(response.should_send());
         assert!(response.result.is_some());
         assert!(response.error.is_none());
+    }
+
+    #[test]
+    fn test_outgoing_success_without_id_is_not_sent() {
+        let response = JsonRpcOutgoing::success(None, serde_json::json!({}));
+        assert!(!response.should_send());
     }
 
     #[test]
@@ -736,5 +812,13 @@ mod tests {
         let resp: JsonRpcResponse = serde_json::from_str(raw).unwrap();
         assert!(resp.is_error());
         assert_eq!(resp.error().unwrap().code, -32601);
+    }
+
+    #[test]
+    fn test_response_payload_accepts_null_result() {
+        let raw = r#"{"jsonrpc":"2.0","id":1,"result":null}"#;
+        let resp: JsonRpcResponse = serde_json::from_str(raw).unwrap();
+        assert!(resp.is_success());
+        assert_eq!(resp.result(), Some(&Value::Null));
     }
 }

@@ -111,10 +111,10 @@ schemars = { version = "1.2.1", features = ["chrono04", "uuid1"] }
 jsonschema = { version = "0.46", default-features = false }
 
 # HTTP/WebSocket/Network
-reqwest = { version = "0.13.2", default-features = false, features = ["json", "stream", "rustls", "http2", "brotli", "gzip", "form", "query"] }
+reqwest = { version = "0.13.3", default-features = false, features = ["json", "stream", "rustls", "http2", "brotli", "gzip", "form", "query"] }
 axum = { version = "0.8.9", features = ["ws", "tracing", "macros"] }
 tower = { version = "0.5.3", features = ["util", "retry", "timeout"] }
-tower-http = { version = "0.6.8", features = ["compression-br", "compression-gzip", "cors", "timeout", "trace", "limit"] }
+tower-http = { version = "0.6.9", features = ["compression-br", "compression-gzip", "cors", "timeout", "trace", "limit"] }
 hyper = { version = "1.9", features = ["http1", "http2", "server", "client"] }
 hyper-util = { version = "0.1.20", features = ["tokio", "server-auto", "client-legacy"] }
 tokio-tungstenite = { version = "0.29.0", features = ["rustls-tls-native-roots"] }
@@ -133,8 +133,8 @@ tracing-appender = "0.2"  # File-based logging with non-blocking I/O
 opentelemetry = "0.31"
 opentelemetry-otlp = { version = "0.31", features = ["tonic", "metrics", "logs"] }
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
-metrics = "0.24.3"
-metrics-exporter-prometheus = "0.18.1"
+metrics = "0.24.5"
+metrics-exporter-prometheus = "0.18.3"
 
 # Concurrency and synchronization
 parking_lot = "0.12.5"
@@ -182,7 +182,7 @@ governor = "0.10.4"
 backon = { version = "1.6.0", features = ["tokio-sleep"] }
 
 # Serde extensions
-serde_with = "3.18"
+serde_with = "3.19"
 
 # Development and testing
 criterion = { version = "0.8.2", features = ["html_reports"] }

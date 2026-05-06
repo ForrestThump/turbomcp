@@ -374,7 +374,7 @@ pub enum EnumSchema {
 
 /// Server-to-client error payload indicating that URL-mode elicitation is
 /// required instead of form-mode. Carry this as the `data` field of a
-/// JSON-RPC error (code `-32001`) per MCP 2025-11-25 / SEP-1036.
+/// JSON-RPC error (code `-32042`) per MCP 2025-11-25 / SEP-1036.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct URLElicitationRequiredError {
     /// The URL the user should open out-of-band.
@@ -412,8 +412,8 @@ impl URLElicitationRequiredError {
         self
     }
 
-    /// Suggested JSON-RPC error code for URL-elicitation-required.
-    pub const ERROR_CODE: i32 = -32001;
+    /// JSON-RPC error code for URL-elicitation-required.
+    pub const ERROR_CODE: i32 = -32042;
 }
 
 #[cfg(test)]
@@ -518,6 +518,6 @@ mod tests {
         assert!(json.contains("\"elicitationId\":\"e-123\""));
         let back: URLElicitationRequiredError = serde_json::from_str(&json).unwrap();
         assert_eq!(err, back);
-        assert_eq!(URLElicitationRequiredError::ERROR_CODE, -32001);
+        assert_eq!(URLElicitationRequiredError::ERROR_CODE, -32042);
     }
 }

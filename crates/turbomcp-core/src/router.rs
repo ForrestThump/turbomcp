@@ -82,6 +82,10 @@ pub async fn route_request<H: McpHandler>(
     ctx: &RequestContext,
     config: &RouteConfig<'_>,
 ) -> JsonRpcOutgoing {
+    if request.is_notification() {
+        return JsonRpcOutgoing::notification_ack();
+    }
+
     let id = request.id.clone();
 
     match request.method.as_str() {
@@ -114,13 +118,8 @@ pub async fn route_request<H: McpHandler>(
         }
 
         // Handle both "initialized" and "notifications/initialized"
-        // Per JSON-RPC 2.0, notifications (no id) should not receive responses
         "initialized" | "notifications/initialized" => {
-            if id.is_some() {
-                JsonRpcOutgoing::success(id, serde_json::json!({}))
-            } else {
-                JsonRpcOutgoing::notification_ack()
-            }
+            JsonRpcOutgoing::success(id, serde_json::json!({}))
         }
 
         // Tool methods
@@ -370,14 +369,9 @@ fn build_initialize_result<H: McpHandler>(
 ///
 /// This is a convenience function for parsing incoming messages.
 pub fn parse_request(input: &str) -> Result<JsonRpcIncoming, McpError> {
-    let request =
-        JsonRpcIncoming::parse(input).map_err(|e| McpError::parse_error(e.to_string()))?;
-    if !request.is_valid_version() {
-        return Err(McpError::invalid_request(
-            "jsonrpc field must be exactly \"2.0\"",
-        ));
-    }
-    Ok(request)
+    let value: serde_json::Value =
+        serde_json::from_str(input).map_err(|e| McpError::parse_error(e.to_string()))?;
+    parse_request_from_value(value)
 }
 
 /// Parse a pre-parsed `serde_json::Value` into a JSON-RPC incoming request.
@@ -386,7 +380,7 @@ pub fn parse_request(input: &str) -> Result<JsonRpcIncoming, McpError> {
 /// to convert into the typed request without re-parsing the source string.
 pub fn parse_request_from_value(value: serde_json::Value) -> Result<JsonRpcIncoming, McpError> {
     let request: JsonRpcIncoming =
-        serde_json::from_value(value).map_err(|e| McpError::parse_error(e.to_string()))?;
+        serde_json::from_value(value).map_err(|e| McpError::invalid_request(e.to_string()))?;
     if !request.is_valid_version() {
         return Err(McpError::invalid_request(
             "jsonrpc field must be exactly \"2.0\"",
@@ -487,6 +481,13 @@ mod tests {
     #[test]
     fn test_parse_request_rejects_invalid_jsonrpc_version() {
         let input = r#"{"jsonrpc": "1.0", "id": 1, "method": "ping"}"#;
+        let error = parse_request(input).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::InvalidRequest);
+    }
+
+    #[test]
+    fn test_parse_request_rejects_invalid_id_as_invalid_request() {
+        let input = r#"{"jsonrpc": "2.0", "id": null, "method": "ping"}"#;
         let error = parse_request(input).unwrap_err();
         assert_eq!(error.kind, ErrorKind::InvalidRequest);
     }
@@ -797,6 +798,22 @@ mod tests {
             jsonrpc: "2.0".to_string(),
             id: None,
             method: "notifications/initialized".to_string(),
+            params: None,
+        };
+
+        let response = route_request(&handler, request, &ctx, &config).await;
+        assert!(!response.should_send());
+    }
+
+    #[tokio::test]
+    async fn test_route_request_method_without_id_is_not_sent() {
+        let handler = TestHandler;
+        let ctx = RequestContext::stdio();
+        let config = RouteConfig::default();
+        let request = JsonRpcIncoming {
+            jsonrpc: "2.0".to_string(),
+            id: None,
+            method: "tools/list".to_string(),
             params: None,
         };
 

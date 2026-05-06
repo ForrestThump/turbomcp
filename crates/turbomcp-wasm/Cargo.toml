@@ -64,9 +64,9 @@ base64 = { workspace = true }
 subtle = { workspace = true }
 
 # Browser dependencies (optional)
-wasm-bindgen = { version = "0.2.118", optional = true }
+wasm-bindgen = { version = "0.2.120", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
-js-sys = { version = "0.3.95", optional = true }
+js-sys = { version = "0.3.97", optional = true }
 serde-wasm-bindgen = { version = "0.6", optional = true }
 
 # Async channel for WebSocket
@@ -104,7 +104,7 @@ turbomcp-transport-streamable = { workspace = true, optional = true, features = 
 turbomcp = { workspace = true, optional = true }
 
 [dependencies.web-sys]
-version = "0.3.95"
+version = "0.3.97"
 optional = true
 features = [
     "console",

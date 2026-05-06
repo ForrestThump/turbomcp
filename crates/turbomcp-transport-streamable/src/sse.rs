@@ -18,14 +18,12 @@
 use alloc::{
     format,
     string::{String, ToString},
-    vec,
     vec::Vec,
 };
 #[cfg(feature = "std")]
 use std::{
     format,
     string::{String, ToString},
-    vec,
     vec::Vec,
 };
 
@@ -216,6 +214,7 @@ impl SseEncoder {
 
 /// SSE parser for decoding events from wire format.
 pub struct SseParser {
+    pending_bytes: Vec<u8>,
     buffer: String,
     current_id: Option<String>,
     current_event: Option<String>,
@@ -228,6 +227,7 @@ impl SseParser {
     /// Create a new SSE parser.
     pub fn new() -> Self {
         Self {
+            pending_bytes: Vec::new(),
             buffer: String::new(),
             current_id: None,
             current_event: None,
@@ -239,13 +239,8 @@ impl SseParser {
 
     /// Feed data to the parser and extract any complete events.
     pub fn feed(&mut self, data: &[u8]) -> Vec<SseEvent> {
-        // Append new data to buffer
-        if let Ok(s) = core::str::from_utf8(data) {
-            self.buffer.push_str(s);
-        } else {
-            // Invalid UTF-8, skip
-            return vec![];
-        }
+        self.pending_bytes.extend_from_slice(data);
+        self.drain_valid_utf8();
 
         let mut events = Vec::new();
 
@@ -295,6 +290,38 @@ impl SseParser {
         events
     }
 
+    fn drain_valid_utf8(&mut self) {
+        loop {
+            match core::str::from_utf8(&self.pending_bytes) {
+                Ok(s) => {
+                    self.buffer.push_str(s);
+                    self.pending_bytes.clear();
+                    break;
+                }
+                Err(err) if err.error_len().is_none() => {
+                    let valid_up_to = err.valid_up_to();
+                    if valid_up_to > 0 {
+                        if let Ok(s) = core::str::from_utf8(&self.pending_bytes[..valid_up_to]) {
+                            self.buffer.push_str(s);
+                        }
+                        self.pending_bytes.drain(..valid_up_to);
+                    }
+                    break;
+                }
+                Err(err) => {
+                    let valid_up_to = err.valid_up_to();
+                    if valid_up_to > 0
+                        && let Ok(s) = core::str::from_utf8(&self.pending_bytes[..valid_up_to])
+                    {
+                        self.buffer.push_str(s);
+                    }
+                    let invalid_len = err.error_len().unwrap_or(1);
+                    self.pending_bytes.drain(..valid_up_to + invalid_len);
+                }
+            }
+        }
+    }
+
     /// Emit the current event if data is present.
     fn emit_event(&mut self) -> Option<SseEvent> {
         if self.current_data.is_empty() {
@@ -326,6 +353,7 @@ impl SseParser {
 
     /// Reset the parser state.
     pub fn reset(&mut self) {
+        self.pending_bytes.clear();
         self.buffer.clear();
         self.current_id = None;
         self.current_event = None;
@@ -552,6 +580,24 @@ mod tests {
         assert_eq!(events3.len(), 1);
         assert_eq!(events3[0].id, Some("1".to_string()));
         assert_eq!(events3[0].data, "partial");
+    }
+
+    #[test]
+    fn test_sse_parser_buffers_split_utf8() {
+        let mut parser = SseParser::new();
+        let bytes = "data: hello \u{1f680}\n\n".as_bytes();
+        let split = bytes
+            .windows(2)
+            .position(|window| window[0] == 0xf0 && window[1] == 0x9f)
+            .expect("emoji bytes should be present")
+            + 2;
+
+        let events1 = parser.feed(&bytes[..split]);
+        assert!(events1.is_empty());
+
+        let events2 = parser.feed(&bytes[split..]);
+        assert_eq!(events2.len(), 1);
+        assert_eq!(events2[0].data, "hello \u{1f680}");
     }
 
     #[test]

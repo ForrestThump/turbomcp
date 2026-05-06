@@ -38,19 +38,20 @@ impl TransportsServer {
     /// Get available transports at runtime
     #[tool(description = "List available transports")]
     async fn list_transports(&self) -> McpResult<Vec<String>> {
-        let mut transports = vec!["stdio".to_string()];
-
-        #[cfg(feature = "http")]
-        transports.push("http".to_string());
-
-        #[cfg(feature = "tcp")]
-        transports.push("tcp".to_string());
-
-        #[cfg(feature = "websocket")]
-        transports.push("websocket".to_string());
-
-        #[cfg(feature = "unix")]
-        transports.push("unix".to_string());
+        let transports = [
+            "stdio",
+            #[cfg(feature = "http")]
+            "http",
+            #[cfg(feature = "tcp")]
+            "tcp",
+            #[cfg(feature = "websocket")]
+            "websocket",
+            #[cfg(feature = "unix")]
+            "unix",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
 
         Ok(transports)
     }

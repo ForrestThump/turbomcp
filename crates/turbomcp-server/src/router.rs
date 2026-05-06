@@ -56,6 +56,10 @@ pub async fn route_request_with_config<H: McpHandler>(
     ctx: &RequestContext,
     config: Option<&ServerConfig>,
 ) -> JsonRpcOutgoing {
+    if request.is_notification() {
+        return JsonRpcOutgoing::notification_ack();
+    }
+
     let id = request.id.clone();
 
     // Validate message size against configured limit
@@ -212,6 +216,10 @@ pub async fn route_request_versioned<H: McpHandler>(
     ctx: &RequestContext,
     negotiated_version: &turbomcp_types::ProtocolVersion,
 ) -> JsonRpcOutgoing {
+    if request.is_notification() {
+        return JsonRpcOutgoing::notification_ack();
+    }
+
     let adapter = adapter_for_version(negotiated_version);
     let method = request.method.clone();
 
@@ -402,6 +410,21 @@ mod tests {
 
         let response = route_request(&handler, request, &ctx).await;
         // Notification responses should not be sent
+        assert!(!response.should_send());
+    }
+
+    #[tokio::test]
+    async fn test_route_request_method_without_id_is_not_sent() {
+        let handler = TestHandler;
+        let ctx = RequestContext::stdio();
+        let request = JsonRpcIncoming {
+            jsonrpc: "2.0".to_string(),
+            id: None,
+            method: "tools/list".to_string(),
+            params: None,
+        };
+
+        let response = route_request(&handler, request, &ctx).await;
         assert!(!response.should_send());
     }
 

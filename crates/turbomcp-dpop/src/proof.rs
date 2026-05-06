@@ -690,6 +690,10 @@ impl NonceTracker for MemoryNonceTracker {
         Box::pin(async move {
             let mut nonces = self.used_nonces.write().await;
 
+            if nonces.contains_key(&nonce) {
+                return Err(DpopError::ReplayAttackDetected { nonce });
+            }
+
             // High-water cleanup at 80% so steady-state insertions amortize the work
             // across many calls instead of stalling at the boundary.
             if nonces.len() * 5 >= capacity * 4 {
@@ -883,9 +887,7 @@ impl NonceTracker for RedisNonceTracker {
                 .await?;
 
             if !stored {
-                return Err(DpopError::ProofValidationFailed {
-                    reason: format!("Nonce replay detected: {}", nonce),
-                });
+                return Err(DpopError::ReplayAttackDetected { nonce });
             }
 
             Ok(())
@@ -1172,6 +1174,44 @@ mod tests {
             .await
             .unwrap();
         assert!(result3.valid);
+    }
+
+    #[tokio::test]
+    async fn test_nonce_tracker_rejects_replay_before_capacity_eviction() {
+        let tracker = MemoryNonceTracker::with_capacity(1);
+
+        tracker.track_nonce("replayed-jti", 1).await.unwrap();
+        let result = tracker.track_nonce("replayed-jti", 1).await;
+
+        assert!(matches!(
+            result,
+            Err(DpopError::ReplayAttackDetected { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_replay_allows_only_one_validation() {
+        let key_manager = Arc::new(DpopKeyManager::new_memory().await.unwrap());
+        let nonce_tracker = Arc::new(MemoryNonceTracker::new());
+        let proof_gen = DpopProofGenerator::with_nonce_tracker(key_manager, nonce_tracker);
+
+        let uri = "https://api.example.com/token";
+        let proof = proof_gen.generate_proof("POST", uri, None).await.unwrap();
+
+        let (first, second) = tokio::join!(
+            proof_gen.validate_proof(&proof, "POST", uri, None, ProofContext::TokenEndpoint),
+            proof_gen.validate_proof(&proof, "POST", uri, None, ProofContext::TokenEndpoint),
+        );
+
+        let successes = usize::from(first.is_ok()) + usize::from(second.is_ok());
+        let replays = usize::from(matches!(first, Err(DpopError::ReplayAttackDetected { .. })))
+            + usize::from(matches!(
+                second,
+                Err(DpopError::ReplayAttackDetected { .. })
+            ));
+
+        assert_eq!(successes, 1);
+        assert_eq!(replays, 1);
     }
 
     #[tokio::test]

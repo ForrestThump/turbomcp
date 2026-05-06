@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Patch release: follow-on exhaustive audit of lower-to-upper layers, focusing on
 JSON-RPC correctness, stream framing robustness, deprecated transport surface
-removal, and active documentation/scaffold alignment.
+removal, dependency freshness, and active documentation/scaffold alignment.
 
 ### Security
 
@@ -25,6 +25,16 @@ removal, and active documentation/scaffold alignment.
   origin checks** — HTTP request bodies honor `ServerConfig.max_message_size`,
   WebSocket upgrade paths validate `Origin`, and proxy browser frontends retain
   auth/origin enforcement after migrating off deprecated adapters.
+- **DPoP replay detection now rejects duplicates before cache eviction** — the
+  in-memory nonce tracker checks for replay while holding the write lock, so a
+  saturated cache cannot evict the duplicate before detection. Redis-backed
+  duplicate nonce detection now maps to the dedicated replay error as well.
+- **DPoP JWK validation rejects private key material** — public JWK headers
+  containing a private `d` member are rejected, while interoperable public EC
+  JWKs that omit `use` are accepted as signature keys.
+- **WASM streamable HTTP session headers validate without panicking** — invalid
+  `Mcp-Session-Id` headers now return `400 Bad Request` instead of constructing
+  unchecked session IDs.
 
 ### Changed
 
@@ -38,6 +48,13 @@ removal, and active documentation/scaffold alignment.
 - **Release-facing metadata now targets 3.1.3** — workspace manifests, internal
   crate dependency pins, lockfile entries, install snippets, README examples,
   and package-facing migration docs identify the patch release consistently.
+- **Declared dependencies refreshed to latest available releases** — workspace
+  manifests now target current direct dependency versions, including `reqwest`
+  0.13.3, `tower-http` 0.6.9, `metrics` 0.24.5,
+  `metrics-exporter-prometheus` 0.18.3, `serde_with` 3.19, `redis` 1.2.1,
+  `signature` 3.0, `utoipa` 5.5, `wasm-bindgen` 0.2.120, and
+  `js-sys`/`web-sys` 0.3.97. `cargo outdated --workspace --root-deps-only`
+  reports all direct dependencies current after the refresh.
 
 ### Removed
 
@@ -54,13 +71,36 @@ removal, and active documentation/scaffold alignment.
 - **SSE and streaming decoders handle edge framing cases** — CRLF events,
   whitespace-only lines, trailing newlines, empty `data:` events, sticky
   overflow states, and `last_event_id` propagation now behave consistently.
+- **SSE incremental parsing handles split UTF-8 sequences** — partial multibyte
+  code points are buffered across `feed()` calls instead of being dropped or
+  corrupting subsequent events.
 - **JSON-RPC error classification and capping tightened** — `standard_kind()`
   only reports the five JSON-RPC standard errors, while error `data` capping now
   recurses through arrays as well as objects.
+- **JSON-RPC response payload validation is presence-aware** — `result: null`
+  is now accepted as a valid success response, while responses with both
+  `result` and `error` or neither member are rejected.
+- **JSON-RPC request parsing validates IDs and preserves notification
+  semantics** — inbound request IDs must be strings or integer numbers; `null`,
+  fractional, boolean, array, and object IDs are rejected as invalid requests.
+  Successful method notifications no longer produce JSON-RPC success responses,
+  while parse/invalid-request errors with unknown IDs still serialize correctly.
+- **`params: null` remains compatible with absent params** — explicit JSON
+  `null` params deserialize as `None` rather than a structured parameter value.
 - **Spec optional fields are represented accurately** — cancellation
   notifications accept missing `requestId`, resource subscribe/unsubscribe/update
   notifications include optional `_meta`, and client logging no longer assumes a
   cancellation id is always present.
+- **Elicitation mode parsing is strict and URL error codes are consistent** —
+  unknown or non-string modes now fail deserialization, and
+  `URLElicitationRequiredError` uses the same `-32042` code as the core error
+  taxonomy.
+- **`alloc`-only builds keep compiling** — missing `alloc` imports in the
+  bottom-level type crates were restored and checked under no-default-features
+  configurations.
+- **The transports demo is warning-free across feature sets** — transport list
+  construction no longer requires a mutable binding when only the base transport
+  is enabled.
 - **Validation utilities avoid duplicate work and retry edge cases** —
   validation dispatch no longer runs duplicate checks for the same value, and
   `retry_with_backoff(max_attempts = 0)` now performs the initial attempt.

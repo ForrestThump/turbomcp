@@ -83,22 +83,24 @@ impl<'de> Deserialize<'de> for JsonRpcResponsePayload {
     where
         D: serde::Deserializer<'de>,
     {
-        #[derive(Deserialize)]
-        struct Helper {
-            #[serde(default)]
-            result: Option<Value>,
-            #[serde(default)]
-            error: Option<JsonRpcError>,
-        }
+        let mut object = serde_json::Map::<String, Value>::deserialize(deserializer)?;
+        let result_present = object.contains_key("result");
+        let error_present = object.contains_key("error");
 
-        let h = Helper::deserialize(deserializer)?;
-        match (h.result, h.error) {
-            (Some(result), None) => Ok(Self::Success { result }),
-            (None, Some(error)) => Ok(Self::Error { error }),
-            (Some(_), Some(_)) => Err(serde::de::Error::custom(
+        match (result_present, error_present) {
+            (true, false) => Ok(Self::Success {
+                result: object.remove("result").unwrap_or(Value::Null),
+            }),
+            (false, true) => {
+                let error_value = object.remove("error").unwrap_or(Value::Null);
+                let error =
+                    JsonRpcError::deserialize(error_value).map_err(serde::de::Error::custom)?;
+                Ok(Self::Error { error })
+            }
+            (true, true) => Err(serde::de::Error::custom(
                 "JSON-RPC response must contain exactly one of `result` or `error`, not both",
             )),
-            (None, None) => Err(serde::de::Error::custom(
+            (false, false) => Err(serde::de::Error::custom(
                 "JSON-RPC response must contain exactly one of `result` or `error`",
             )),
         }
@@ -952,6 +954,14 @@ mod tests {
         assert!(response.result().is_none());
         assert!(response.error().is_some());
         assert!(!response.is_parse_error());
+    }
+
+    #[test]
+    fn test_response_payload_accepts_null_result() {
+        let raw = r#"{"jsonrpc":"2.0","id":1,"result":null}"#;
+        let response: JsonRpcResponse = serde_json::from_str(raw).unwrap();
+        assert!(response.is_success());
+        assert_eq!(response.result(), Some(&Value::Null));
     }
 
     #[test]

@@ -9,7 +9,7 @@ use std::future::Future;
 use std::time::{Duration, SystemTime};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 use zeroize::Zeroize;
 
@@ -294,13 +294,16 @@ pub struct DpopPayload {
 ///
 /// This implementation only supports ECDSA P-256 keys for maximum security.
 /// RSA support has been removed due to timing attack vulnerabilities (RUSTSEC-2023-0071).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(tag = "kty")]
 pub enum DpopJwk {
     /// Elliptic Curve public key in JWK format
     #[serde(rename = "EC")]
     Ec {
-        /// Key usage - always "sig" for DPoP
+        /// Key usage. Optional in JWK; when present for DPoP it must be "sig".
+        ///
+        /// Missing `use` values deserialize as "sig" to preserve the public
+        /// API shape while accepting interoperable public JWK headers.
         #[serde(rename = "use")]
         use_: String,
 
@@ -313,6 +316,66 @@ pub enum DpopJwk {
         /// Y coordinate (base64url-encoded)
         y: String,
     },
+}
+
+impl<'de> Deserialize<'de> for DpopJwk {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let object = serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
+
+        if object.contains_key("d") {
+            return Err(serde::de::Error::custom(
+                "DPoP JWK header must not contain private key material (`d`)",
+            ));
+        }
+
+        match object.get("kty").and_then(serde_json::Value::as_str) {
+            Some("EC") => {
+                let use_ = match object.get("use") {
+                    None => "sig".to_string(),
+                    Some(serde_json::Value::String(value)) if value == "sig" => value.clone(),
+                    Some(serde_json::Value::String(_)) => {
+                        return Err(serde::de::Error::custom(
+                            "DPoP EC JWK `use`, when present, must be `sig`",
+                        ));
+                    }
+                    Some(_) => {
+                        return Err(serde::de::Error::custom(
+                            "DPoP EC JWK `use` must be a string when present",
+                        ));
+                    }
+                };
+
+                let crv = required_jwk_string::<D::Error>(&object, "crv")?;
+                let x = required_jwk_string::<D::Error>(&object, "x")?;
+                let y = required_jwk_string::<D::Error>(&object, "y")?;
+
+                Ok(Self::Ec { use_, crv, x, y })
+            }
+            Some(other) => Err(serde::de::Error::custom(format!(
+                "unsupported DPoP JWK key type `{other}`"
+            ))),
+            None => Err(serde::de::Error::missing_field("kty")),
+        }
+    }
+}
+
+fn required_jwk_string<E>(
+    object: &serde_json::Map<String, serde_json::Value>,
+    field: &'static str,
+) -> std::result::Result<String, E>
+where
+    E: serde::de::Error,
+{
+    match object.get(field) {
+        Some(serde_json::Value::String(value)) => Ok(value.clone()),
+        Some(_) => Err(serde::de::Error::custom(format!(
+            "DPoP EC JWK `{field}` must be a string"
+        ))),
+        None => Err(serde::de::Error::missing_field(field)),
+    }
 }
 
 /// Complete DPoP proof JWT
@@ -542,10 +605,12 @@ impl DpopProof {
             });
         }
 
-        // Validate JTI format (should be UUID)
-        if Uuid::parse_str(&self.payload.jti).is_err() {
+        // RFC 9449 requires `jti` to be a unique string. UUIDs are a good
+        // locally generated default, but valid interoperable proofs may use
+        // any non-empty collision-resistant string.
+        if self.payload.jti.is_empty() {
             return Err(super::DpopError::InvalidProofStructure {
-                reason: "Invalid JTI format - must be UUID".to_string(),
+                reason: "Missing jti claim".to_string(),
             });
         }
 
@@ -786,6 +851,62 @@ mod tests {
         assert!(is_valid_http_uri("http://localhost:8080/auth"));
         assert!(!is_valid_http_uri("ftp://example.com"));
         assert!(!is_valid_http_uri("invalid-uri"));
+    }
+
+    #[test]
+    fn test_jwk_use_is_optional() {
+        let jwk: DpopJwk = serde_json::from_value(serde_json::json!({
+            "kty": "EC",
+            "crv": "P-256",
+            "x": "abc",
+            "y": "def"
+        }))
+        .unwrap();
+
+        match jwk {
+            DpopJwk::Ec { use_, .. } => assert_eq!(use_, "sig"),
+        }
+    }
+
+    #[test]
+    fn test_jwk_rejects_private_key_material() {
+        let err = serde_json::from_value::<DpopJwk>(serde_json::json!({
+            "kty": "EC",
+            "crv": "P-256",
+            "x": "abc",
+            "y": "def",
+            "d": "private"
+        }))
+        .unwrap_err();
+
+        assert!(err.to_string().contains("private key material"));
+    }
+
+    #[test]
+    fn test_proof_structure_allows_non_uuid_jti() {
+        let proof = DpopProof::new(
+            DpopHeader {
+                typ: crate::DPOP_JWT_TYPE.to_string(),
+                algorithm: DpopAlgorithm::ES256,
+                jwk: DpopJwk::Ec {
+                    use_: "sig".to_string(),
+                    crv: "P-256".to_string(),
+                    x: "abc".to_string(),
+                    y: "def".to_string(),
+                },
+            },
+            DpopPayload {
+                jti: "opaque-nonce-123".to_string(),
+                htm: "POST".to_string(),
+                htu: "https://api.example.com/token".to_string(),
+                iat: 1,
+                ath: None,
+                nonce: None,
+            },
+            "signature".to_string(),
+        );
+
+        proof.validate_structure().unwrap();
     }
 
     #[test]

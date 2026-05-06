@@ -129,7 +129,8 @@ fn value_after(args: &[String], flag: &str) -> Option<String> {
 
 fn values_after(args: &[String], flag: &str) -> Vec<String> {
     args.windows(2)
-        .filter_map(|pair| (pair[0] == flag).then(|| pair[1].clone()))
+        .filter(|pair| pair[0] == flag)
+        .map(|pair| pair[1].clone())
         .collect()
 }
 
