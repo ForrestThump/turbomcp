@@ -49,8 +49,8 @@ use turbomcp_core::context::RequestContext;
 use turbomcp_core::error::{McpError, McpResult};
 use turbomcp_core::handler::McpHandler;
 use turbomcp_types::{
-    ComponentFilter, ComponentMeta, Prompt, PromptResult, Resource, ResourceResult, Tool,
-    ToolResult,
+    ComponentFilter, ComponentMeta, Prompt, PromptResult, Resource, ResourceResult,
+    ResourceTemplate, Tool, ToolResult,
 };
 
 /// Type alias for session visibility maps to reduce complexity.
@@ -304,6 +304,17 @@ impl<H: McpHandler> McpHandler for VisibilityLayer<H> {
             .into_iter()
             .filter(|resource| {
                 let meta = ComponentMeta::from_meta_value(resource.meta.as_ref());
+                self.is_visible(&meta, None)
+            })
+            .collect()
+    }
+
+    fn list_resource_templates(&self) -> Vec<ResourceTemplate> {
+        self.inner
+            .list_resource_templates()
+            .into_iter()
+            .filter(|template| {
+                let meta = ComponentMeta::from_meta_value(template.meta.as_ref());
                 self.is_visible(&meta, None)
             })
             .collect()

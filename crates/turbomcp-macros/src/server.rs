@@ -623,39 +623,79 @@ pub fn generate_mcp_handler(info: &ServerInfo, impl_block: &ItemImpl) -> TokenSt
     });
 
     // Generate resource listing code (HIGH-001: includes mimeType)
-    let resource_list_code = info.resources.iter().map(|resource| {
-        let uri = &resource.uri_template;
-        let name = &resource.name;
-        let meta_code = generate_meta_code(&resource.tags, &resource.version, &turbomcp);
-        let mime_type_code = if let Some(mime) = &resource.mime_type {
-            quote! { Some(#mime.to_string()) }
-        } else {
-            quote! { None }
-        };
-        // Per MCP spec, omit description rather than emit an empty string.
-        let description_code = match resource.description.as_deref() {
-            Some(desc) if !desc.is_empty() => quote! { Some(#desc.to_string()) },
-            _ => quote! { None },
-        };
-        let title_code = match &resource.title {
-            Some(t) => quote! { Some(#t.to_string()) },
-            None => quote! { None },
-        };
-        let icons_code = generate_icons_code(&resource.icons, &turbomcp);
-        quote! {
-            #turbomcp::__macro_support::turbomcp_types::Resource {
-                uri: #uri.to_string(),
-                name: #name.to_string(),
-                description: #description_code,
-                title: #title_code,
-                icons: #icons_code,
-                mime_type: #mime_type_code,
-                annotations: None,
-                size: None,
-                meta: #meta_code,
+    let resource_list_code = info
+        .resources
+        .iter()
+        .filter(|resource| !resource.uri_template.contains('{'))
+        .map(|resource| {
+            let uri = &resource.uri_template;
+            let name = &resource.name;
+            let meta_code = generate_meta_code(&resource.tags, &resource.version, &turbomcp);
+            let mime_type_code = if let Some(mime) = &resource.mime_type {
+                quote! { Some(#mime.to_string()) }
+            } else {
+                quote! { None }
+            };
+            // Per MCP spec, omit description rather than emit an empty string.
+            let description_code = match resource.description.as_deref() {
+                Some(desc) if !desc.is_empty() => quote! { Some(#desc.to_string()) },
+                _ => quote! { None },
+            };
+            let title_code = match &resource.title {
+                Some(t) => quote! { Some(#t.to_string()) },
+                None => quote! { None },
+            };
+            let icons_code = generate_icons_code(&resource.icons, &turbomcp);
+            quote! {
+                #turbomcp::__macro_support::turbomcp_types::Resource {
+                    uri: #uri.to_string(),
+                    name: #name.to_string(),
+                    description: #description_code,
+                    title: #title_code,
+                    icons: #icons_code,
+                    mime_type: #mime_type_code,
+                    annotations: None,
+                    size: None,
+                    meta: #meta_code,
+                }
             }
-        }
-    });
+        });
+
+    let resource_template_list_code = info
+        .resources
+        .iter()
+        .filter(|resource| resource.uri_template.contains('{'))
+        .map(|resource| {
+            let uri_template = &resource.uri_template;
+            let name = &resource.name;
+            let meta_code = generate_meta_code(&resource.tags, &resource.version, &turbomcp);
+            let mime_type_code = if let Some(mime) = &resource.mime_type {
+                quote! { Some(#mime.to_string()) }
+            } else {
+                quote! { None }
+            };
+            let description_code = match resource.description.as_deref() {
+                Some(desc) if !desc.is_empty() => quote! { Some(#desc.to_string()) },
+                _ => quote! { None },
+            };
+            let title_code = match &resource.title {
+                Some(t) => quote! { Some(#t.to_string()) },
+                None => quote! { None },
+            };
+            let icons_code = generate_icons_code(&resource.icons, &turbomcp);
+            quote! {
+                #turbomcp::__macro_support::turbomcp_types::ResourceTemplate {
+                    uri_template: #uri_template.to_string(),
+                    name: #name.to_string(),
+                    description: #description_code,
+                    title: #title_code,
+                    icons: #icons_code,
+                    mime_type: #mime_type_code,
+                    annotations: None,
+                    meta: #meta_code,
+                }
+            }
+        });
 
     // Generate prompt listing code (HIGH-002: includes arguments)
     let prompt_list_code = info.prompts.iter().map(|prompt| {
@@ -860,6 +900,10 @@ pub fn generate_mcp_handler(info: &ServerInfo, impl_block: &ItemImpl) -> TokenSt
 
             fn list_resources(&self) -> Vec<#turbomcp::__macro_support::turbomcp_types::Resource> {
                 vec![#(#resource_list_code),*]
+            }
+
+            fn list_resource_templates(&self) -> Vec<#turbomcp::__macro_support::turbomcp_types::ResourceTemplate> {
+                vec![#(#resource_template_list_code),*]
             }
 
             fn list_prompts(&self) -> Vec<#turbomcp::__macro_support::turbomcp_types::Prompt> {

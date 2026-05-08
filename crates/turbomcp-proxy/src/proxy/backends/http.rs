@@ -295,6 +295,16 @@ impl HttpBackend {
         self.send_request("resources/list", Value::Null).await
     }
 
+    /// List available resource templates
+    ///
+    /// # Errors
+    ///
+    /// Returns `ProxyError` if the request fails or the server returns an error.
+    pub async fn list_resource_templates(&self) -> ProxyResult<Value> {
+        self.send_request("resources/templates/list", Value::Null)
+            .await
+    }
+
     /// Read a resource
     ///
     /// # Errors

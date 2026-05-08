@@ -233,6 +233,8 @@ pub mod methods {
     // Resources
     /// List available resources method
     pub const LIST_RESOURCES: &str = "resources/list";
+    /// List available resource templates method
+    pub const LIST_RESOURCE_TEMPLATES: &str = "resources/templates/list";
     /// Read a specific resource method
     pub const READ_RESOURCE: &str = "resources/read";
     /// Subscribe to resource updates method

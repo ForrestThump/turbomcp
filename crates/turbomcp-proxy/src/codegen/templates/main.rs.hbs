@@ -202,6 +202,9 @@ async fn handle_mcp_request(
         "resources/list" => {
             proxy::list_resources(router.backend()).await
         }
+        "resources/templates/list" => {
+            proxy::list_resource_templates(router.backend()).await
+        }
         "resources/read" => {
             let params = match params {
                 Some(p) => p,
@@ -363,6 +366,7 @@ async fn start_stdio_frontend(router: Arc<ProxyRouter>) -> Result<(), Box<dyn st
                         router.route_tool(tool_name, arguments).await
                     }
                     "resources/list" => proxy::list_resources(router.backend()).await,
+                    "resources/templates/list" => proxy::list_resource_templates(router.backend()).await,
                     "resources/read" => {
                         let uri = params
                             .and_then(|p| p.get("uri"))

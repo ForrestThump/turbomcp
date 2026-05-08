@@ -3,7 +3,8 @@
 This document covers breaking changes and migration steps specific to the `turbomcp-protocol` crate. For workspace-wide migration guidance covering transport, server, client, and macros, see the top-level [MIGRATION.md](../../MIGRATION.md).
 
 Historical note:
-- v3 targets MCP `2025-11-25` only.
+- v3 targets MCP `2025-11-25` as the latest stable protocol; later v3.x
+  releases also include compatibility adapters for `2025-06-18`.
 - References to v1/v2 below are archival migration notes, not active compatibility guidance.
 
 ---
@@ -38,7 +39,9 @@ use turbomcp_protocol::McpResult;
 
 ### Default protocol version updated to 2025-11-25
 
-`PROTOCOL_VERSION` is `"2025-11-25"`. v3 runtime negotiation is exact-match only; the old fallback/multi-version policy no longer applies.
+`PROTOCOL_VERSION` is `"2025-11-25"`. v3.0 initially used exact-match
+negotiation; later v3.x releases expose policy-driven stable-version
+negotiation and field-level adapters for `2025-06-18`.
 
 ### MCP 2025-11-25 features are always enabled
 
@@ -72,7 +75,7 @@ The only experimental feature flag remaining is `experimental-tasks` for the Tas
 To opt out of the default SIMD acceleration:
 
 ```toml
-turbomcp-protocol = { version = "3.1.3", default-features = false, features = ["std"] }
+turbomcp-protocol = { version = "3.1.4", default-features = false, features = ["std"] }
 ```
 
 ---

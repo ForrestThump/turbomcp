@@ -3,7 +3,6 @@
 use futures::StreamExt;
 use reqwest::{Client, StatusCode, header};
 use serde_json::json;
-use std::future::Future;
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
@@ -13,7 +12,8 @@ use turbomcp_server::McpHandler;
 use turbomcp_server::ServerConfig;
 use turbomcp_server::transport::http;
 use turbomcp_types::{
-    Prompt, PromptResult, Resource, ResourceResult, ServerInfo, Tool, ToolResult,
+    CreateMessageRequest, Prompt, PromptResult, Resource, ResourceResult, SamplingContent,
+    SamplingMessage, ServerInfo, Tool, ToolResult,
 };
 
 #[derive(Clone)]
@@ -36,33 +36,99 @@ impl McpHandler for TestHandler {
         Vec::new()
     }
 
-    fn call_tool(
+    async fn call_tool(
         &self,
         name: &str,
         _args: serde_json::Value,
         _ctx: &CoreRequestContext,
-    ) -> impl Future<Output = McpResult<ToolResult>> + Send {
-        let name = name.to_string();
-        async move { Err(McpError::tool_not_found(&name)) }
+    ) -> McpResult<ToolResult> {
+        Err(McpError::tool_not_found(name))
     }
 
-    fn read_resource(
+    async fn read_resource(
         &self,
         uri: &str,
         _ctx: &CoreRequestContext,
-    ) -> impl Future<Output = McpResult<ResourceResult>> + Send {
-        let uri = uri.to_string();
-        async move { Err(McpError::resource_not_found(&uri)) }
+    ) -> McpResult<ResourceResult> {
+        Err(McpError::resource_not_found(uri))
     }
 
-    fn get_prompt(
+    async fn get_prompt(
         &self,
         name: &str,
         _args: Option<serde_json::Value>,
         _ctx: &CoreRequestContext,
-    ) -> impl Future<Output = McpResult<PromptResult>> + Send {
-        let name = name.to_string();
-        async move { Err(McpError::prompt_not_found(&name)) }
+    ) -> McpResult<PromptResult> {
+        Err(McpError::prompt_not_found(name))
+    }
+}
+
+#[derive(Clone)]
+struct SamplingHandler;
+
+impl McpHandler for SamplingHandler {
+    fn server_info(&self) -> ServerInfo {
+        ServerInfo::new("sampling-http-test", "1.0.0")
+    }
+
+    fn list_tools(&self) -> Vec<Tool> {
+        vec![Tool::new("sample_text", "Sample text from the client")]
+    }
+
+    fn list_resources(&self) -> Vec<Resource> {
+        Vec::new()
+    }
+
+    fn list_prompts(&self) -> Vec<Prompt> {
+        Vec::new()
+    }
+
+    async fn call_tool<'a>(
+        &'a self,
+        name: &'a str,
+        _args: serde_json::Value,
+        ctx: &'a CoreRequestContext,
+    ) -> McpResult<ToolResult> {
+        if name != "sample_text" {
+            return Err(McpError::tool_not_found(name));
+        }
+
+        let result = ctx
+            .sample(CreateMessageRequest {
+                messages: vec![SamplingMessage::user("sample a short response")],
+                max_tokens: 32,
+                ..Default::default()
+            })
+            .await?;
+
+        let text = result
+            .content
+            .to_vec()
+            .into_iter()
+            .find_map(|content| match content {
+                SamplingContent::Text(text) => Some(text.text.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| result.model.clone());
+
+        Ok(ToolResult::text(text))
+    }
+
+    async fn read_resource(
+        &self,
+        uri: &str,
+        _ctx: &CoreRequestContext,
+    ) -> McpResult<ResourceResult> {
+        Err(McpError::resource_not_found(uri))
+    }
+
+    async fn get_prompt(
+        &self,
+        name: &str,
+        _args: Option<serde_json::Value>,
+        _ctx: &CoreRequestContext,
+    ) -> McpResult<PromptResult> {
+        Err(McpError::prompt_not_found(name))
     }
 }
 
@@ -74,6 +140,20 @@ async fn spawn_server() -> (String, JoinHandle<()>) {
     let addr_string = addr.to_string();
     let handle = tokio::spawn(async move {
         http::run(&TestHandler, &addr_string).await.unwrap();
+    });
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    (format!("http://{}", addr), handle)
+}
+
+async fn spawn_sampling_server() -> (String, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+
+    let addr_string = addr.to_string();
+    let handle = tokio::spawn(async move {
+        http::run(&SamplingHandler, &addr_string).await.unwrap();
     });
 
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -97,6 +177,10 @@ async fn spawn_server_with_config(config: ServerConfig) -> (String, JoinHandle<(
 }
 
 fn initialize_request() -> serde_json::Value {
+    initialize_request_with_capabilities(json!({}))
+}
+
+fn initialize_request_with_capabilities(capabilities: serde_json::Value) -> serde_json::Value {
     json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -107,16 +191,24 @@ fn initialize_request() -> serde_json::Value {
                 "name": "spec-test-client",
                 "version": "1.0.0"
             },
-            "capabilities": {}
+            "capabilities": capabilities
         }
     })
 }
 
 async fn initialize_session(client: &Client, base_url: &str) -> String {
+    initialize_session_with_capabilities(client, base_url, json!({})).await
+}
+
+async fn initialize_session_with_capabilities(
+    client: &Client,
+    base_url: &str,
+    capabilities: serde_json::Value,
+) -> String {
     let response = client
         .post(format!("{}/mcp", base_url))
         .header(header::ACCEPT, "application/json, text/event-stream")
-        .json(&initialize_request())
+        .json(&initialize_request_with_capabilities(capabilities))
         .send()
         .await
         .unwrap();
@@ -134,6 +226,147 @@ async fn initialize_session(client: &Client, base_url: &str) -> String {
     assert_eq!(body["result"]["protocolVersion"], "2025-11-25");
     assert!(!session_id.is_empty());
     session_id
+}
+
+#[tokio::test]
+async fn ping_before_initialize_is_allowed() {
+    let (base_url, handle) = spawn_server().await;
+    let client = Client::new();
+
+    let response = client
+        .post(format!("{}/mcp", base_url))
+        .header(header::ACCEPT, "application/json, text/event-stream")
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": "ping-1",
+            "method": "ping"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["id"], "ping-1");
+    assert_eq!(body["result"], json!({}));
+
+    handle.abort();
+}
+
+async fn read_next_sse_json(response: reqwest::Response) -> serde_json::Value {
+    use tokio::io::AsyncBufReadExt;
+
+    let mut reader = tokio::io::BufReader::new(tokio_util::io::StreamReader::new(
+        response
+            .bytes_stream()
+            .map(|r| r.map_err(std::io::Error::other)),
+    ));
+    let mut data = String::new();
+
+    loop {
+        let mut line = String::new();
+        let n = tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line))
+            .await
+            .expect("timed out reading SSE line")
+            .expect("SSE read error");
+        assert_ne!(n, 0, "SSE stream closed before a JSON-RPC message");
+
+        let line = line.trim_end_matches(&['\r', '\n'][..]);
+        if line.is_empty() {
+            if !data.is_empty() {
+                return serde_json::from_str(&data).expect("SSE data should be JSON");
+            }
+            continue;
+        }
+
+        if let Some(rest) = line.strip_prefix("data:") {
+            data.push_str(rest.trim_start());
+        }
+    }
+}
+
+async fn run_sampling_round_trip(client_sampling_payload: serde_json::Value) -> serde_json::Value {
+    let (base_url, handle) = spawn_sampling_server().await;
+    let client = Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap();
+    let session_id =
+        initialize_session_with_capabilities(&client, &base_url, json!({ "sampling": {} })).await;
+
+    let sse_response = client
+        .get(format!("{}/mcp", base_url))
+        .header(header::ACCEPT, "text/event-stream")
+        .header("Mcp-Session-Id", &session_id)
+        .header("MCP-Protocol-Version", "2025-11-25")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(sse_response.status(), StatusCode::OK);
+
+    let responder_client = client.clone();
+    let responder_base_url = base_url.clone();
+    let responder_session_id = session_id.clone();
+    let responder = tokio::spawn(async move {
+        let server_request = read_next_sse_json(sse_response).await;
+        assert_eq!(server_request["method"], "sampling/createMessage");
+        assert!(
+            server_request["id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("s-")),
+            "server request id should be string-prefixed: {server_request:?}"
+        );
+
+        let mut response = serde_json::Map::new();
+        response.insert("jsonrpc".to_string(), json!("2.0"));
+        response.insert("id".to_string(), server_request["id"].clone());
+        if let Some(result) = client_sampling_payload.get("result") {
+            response.insert("result".to_string(), result.clone());
+        } else if let Some(error) = client_sampling_payload.get("error") {
+            response.insert("error".to_string(), error.clone());
+        } else {
+            panic!("client sampling payload must contain result or error");
+        }
+
+        let response = responder_client
+            .post(format!("{}/mcp", responder_base_url))
+            .header(header::ACCEPT, "application/json, text/event-stream")
+            .header("Mcp-Session-Id", &responder_session_id)
+            .header("MCP-Protocol-Version", "2025-11-25")
+            .json(&serde_json::Value::Object(response))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+    });
+
+    let tool_response = tokio::time::timeout(
+        Duration::from_secs(5),
+        client
+            .post(format!("{}/mcp", base_url))
+            .header(header::ACCEPT, "application/json, text/event-stream")
+            .header("Mcp-Session-Id", &session_id)
+            .header("MCP-Protocol-Version", "2025-11-25")
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "sample_text",
+                    "arguments": {}
+                }
+            }))
+            .send(),
+    )
+    .await
+    .expect("tool call should complete without waiting for timeout")
+    .unwrap();
+
+    assert_eq!(tool_response.status(), StatusCode::OK);
+    let body = tool_response.json().await.unwrap();
+    responder.await.unwrap();
+    handle.abort();
+    body
 }
 
 #[tokio::test]
@@ -173,7 +406,7 @@ async fn initialized_notification_returns_202_without_body() {
 }
 
 #[tokio::test]
-async fn client_jsonrpc_response_post_returns_202() {
+async fn unknown_client_jsonrpc_response_post_returns_400() {
     let (base_url, handle) = spawn_server().await;
     let client = Client::new();
     let session_id = initialize_session(&client, &base_url).await;
@@ -194,10 +427,82 @@ async fn client_jsonrpc_response_post_returns_202() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert!(response.text().await.unwrap().is_empty());
 
     handle.abort();
+}
+
+#[tokio::test]
+async fn ctx_sample_round_trips_over_streamable_http_sse() {
+    let body = run_sampling_round_trip(json!({
+        "result": {
+            "role": "assistant",
+            "content": {
+                "type": "text",
+                "text": "sampled over sse"
+            },
+            "model": "fake-model",
+            "stopReason": "endTurn"
+        }
+    }))
+    .await;
+
+    assert_eq!(body["result"]["content"][0]["text"], "sampled over sse");
+}
+
+#[tokio::test]
+async fn ctx_sample_requires_declared_client_sampling_capability() {
+    let (base_url, handle) = spawn_sampling_server().await;
+    let client = Client::new();
+    let session_id = initialize_session(&client, &base_url).await;
+
+    let response = client
+        .post(format!("{}/mcp", base_url))
+        .header(header::ACCEPT, "application/json, text/event-stream")
+        .header("Mcp-Session-Id", &session_id)
+        .header("MCP-Protocol-Version", "2025-11-25")
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "sample_text",
+                "arguments": {}
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("sampling capability"))
+    );
+
+    handle.abort();
+}
+
+#[tokio::test]
+async fn rejected_sampling_response_returns_before_timeout() {
+    let started = std::time::Instant::now();
+    let body = run_sampling_round_trip(json!({
+        "error": {
+            "code": -1,
+            "message": "User rejected sampling"
+        }
+    }))
+    .await;
+
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "rejected sampling should resolve promptly"
+    );
+    assert_eq!(body["error"]["code"], -1);
+    assert_eq!(body["error"]["message"], "User rejected sampling");
 }
 
 #[tokio::test]

@@ -55,7 +55,6 @@ mod mcp_compliance_tests {
             is_error: Some(false),
             structured_content: Some(json!({"structured": "data"})),
             meta: Some(meta_one("call_meta", json!("test"))),
-            task_id: None,
         };
         let serialized = serde_json::to_string(&call_result).unwrap();
         let parsed: Value = serde_json::from_str(&serialized).unwrap();
@@ -255,7 +254,6 @@ mod mcp_compliance_tests {
                 }
             })),
             meta: None,
-            task_id: None,
         };
         let serialized = serde_json::to_string(&call_result).unwrap();
         let parsed: Value = serde_json::from_str(&serialized).unwrap();
@@ -271,7 +269,6 @@ mod mcp_compliance_tests {
             is_error: Some(false),
             structured_content: None,
             meta: None,
-            task_id: None,
         };
         let serialized = serde_json::to_string(&call_result_no_structured).unwrap();
         let parsed: Value = serde_json::from_str(&serialized).unwrap();
@@ -381,7 +378,6 @@ mod mcp_compliance_tests {
             is_error: Some(false),
             structured_content: None,
             meta: Some(complex_meta.clone()),
-            task_id: None,
         };
 
         let serialized = serde_json::to_string(&call_result).unwrap();
@@ -396,7 +392,6 @@ mod mcp_compliance_tests {
             is_error: Some(false),
             structured_content: None,
             meta: Some(empty_meta.clone()),
-            task_id: None,
         };
 
         let serialized = serde_json::to_string(&call_result_empty).unwrap();

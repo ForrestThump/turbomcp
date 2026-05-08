@@ -159,6 +159,12 @@ pub async fn route_request<H: McpHandler>(
             JsonRpcOutgoing::success(id, result)
         }
 
+        "resources/templates/list" => {
+            let resource_templates = handler.list_resource_templates();
+            let result = serde_json::json!({ "resourceTemplates": resource_templates });
+            JsonRpcOutgoing::success(id, result)
+        }
+
         "resources/read" => {
             let params = request.params.unwrap_or_default();
             let uri = params
@@ -406,7 +412,7 @@ mod tests {
     use core::future::Future;
     use std::collections::HashMap;
     use turbomcp_types::{
-        Prompt, PromptResult, Resource, ResourceResult, ServerCapabilities,
+        Prompt, PromptResult, Resource, ResourceResult, ResourceTemplate, ServerCapabilities,
         ServerTasksCapabilities, ServerTasksRequestsCapabilities, TasksCancelCapabilities,
         TasksListCapabilities, TasksToolsCallCapabilities, TasksToolsCapabilities, Tool,
         ToolResult,
@@ -750,6 +756,77 @@ mod tests {
         let tools = result["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0]["name"], "greet");
+    }
+
+    #[tokio::test]
+    async fn test_route_resource_templates_list() {
+        #[derive(Clone)]
+        struct TemplateHandler;
+
+        impl McpHandler for TemplateHandler {
+            fn server_info(&self) -> ServerInfo {
+                ServerInfo::new("template-router", "1.0.0")
+            }
+
+            fn list_tools(&self) -> Vec<Tool> {
+                vec![]
+            }
+
+            fn list_resources(&self) -> Vec<Resource> {
+                vec![]
+            }
+
+            fn list_resource_templates(&self) -> Vec<ResourceTemplate> {
+                vec![ResourceTemplate::new("file://{path}", "file")]
+            }
+
+            fn list_prompts(&self) -> Vec<Prompt> {
+                vec![]
+            }
+
+            async fn call_tool<'a>(
+                &'a self,
+                _name: &'a str,
+                _args: Value,
+                _ctx: &'a RequestContext,
+            ) -> McpResult<ToolResult> {
+                unreachable!("tool calls are not used in this test")
+            }
+
+            async fn read_resource<'a>(
+                &'a self,
+                _uri: &'a str,
+                _ctx: &'a RequestContext,
+            ) -> McpResult<ResourceResult> {
+                unreachable!("resource reads are not used in this test")
+            }
+
+            async fn get_prompt<'a>(
+                &'a self,
+                _name: &'a str,
+                _args: Option<Value>,
+                _ctx: &'a RequestContext,
+            ) -> McpResult<PromptResult> {
+                unreachable!("prompt reads are not used in this test")
+            }
+        }
+
+        let ctx = RequestContext::stdio();
+        let request = JsonRpcIncoming {
+            jsonrpc: "2.0".to_string(),
+            id: Some(serde_json::json!(1)),
+            method: "resources/templates/list".to_string(),
+            params: None,
+        };
+
+        let response =
+            route_request(&TemplateHandler, request, &ctx, &RouteConfig::default()).await;
+        assert!(response.error.is_none());
+        let result = response.result.expect("resource templates result");
+        let templates = result["resourceTemplates"].as_array().unwrap();
+        assert_eq!(templates.len(), 1);
+        assert_eq!(templates[0]["uriTemplate"], "file://{path}");
+        assert_eq!(templates[0]["name"], "file");
     }
 
     #[tokio::test]

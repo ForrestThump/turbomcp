@@ -18,11 +18,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{RwLock, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use turbomcp_core::error::{ErrorKind, McpError, McpResult};
 use turbomcp_core::handler::McpHandler;
-use turbomcp_types::ProtocolVersion;
+use turbomcp_types::{ClientCapabilities, ProtocolVersion};
 
 use crate::context::{Cancellable, McpSession, RequestContext, SessionFuture};
 use crate::router;
@@ -145,6 +145,7 @@ impl Transport for ChannelTransport {
 #[derive(Debug, Clone)]
 struct ChannelSessionHandle {
     request_tx: mpsc::Sender<SessionCommand>,
+    client_capabilities: Arc<RwLock<Option<ClientCapabilities>>>,
 }
 
 #[derive(Debug)]
@@ -161,6 +162,10 @@ enum SessionCommand {
 }
 
 impl McpSession for ChannelSessionHandle {
+    fn client_capabilities<'a>(&'a self) -> SessionFuture<'a, Option<ClientCapabilities>> {
+        Box::pin(async move { Ok(self.client_capabilities.read().await.clone()) })
+    }
+
     fn call<'a>(
         &'a self,
         method: &'a str,
@@ -261,7 +266,10 @@ async fn run_server_loop<H: McpHandler>(
 ) -> McpResult<()> {
     // Channel for session commands (server-to-client requests/notifications)
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<SessionCommand>(32);
-    let session_handle = Arc::new(ChannelSessionHandle { request_tx: cmd_tx });
+    let session_handle = Arc::new(ChannelSessionHandle {
+        request_tx: cmd_tx,
+        client_capabilities: Arc::new(RwLock::new(None)),
+    });
 
     // Channel for completed handler responses
     let (response_tx, mut response_rx) = mpsc::channel::<router::JsonRpcOutgoing>(32);
@@ -324,6 +332,11 @@ async fn run_server_loop<H: McpHandler>(
                     match serde_json::from_value::<turbomcp_core::jsonrpc::JsonRpcIncoming>(value) {
                         Ok(request) => {
                             if request.method == "initialize" {
+                                let client_capabilities =
+                                    super::client_capabilities_from_initialize_params(
+                                        request.params.as_ref(),
+                                    );
+
                                 if matches!(session_state, SessionState::Initialized(_)) {
                                     send_error_msg(
                                         &outgoing,
@@ -335,8 +348,7 @@ async fn run_server_loop<H: McpHandler>(
                                 }
 
                                 let initialize_request_id = request.id.clone();
-                                let ctx =
-                                    RequestContext::channel().with_session(session_handle.clone());
+                                let ctx = RequestContext::channel();
                                 let response = router::route_request_with_config(
                                     &handler,
                                     request,
@@ -356,6 +368,8 @@ async fn run_server_loop<H: McpHandler>(
                                             initialize_request_id.as_ref(),
                                         ),
                                     );
+                                    *session_handle.client_capabilities.write().await =
+                                        Some(client_capabilities);
                                 }
 
                                 if response.should_send() {
@@ -393,6 +407,16 @@ async fn run_server_loop<H: McpHandler>(
                                     let response = router::route_request(&h, request, &ctx).await;
                                     let _ = resp_tx.send(response).await;
                                 });
+                            } else if request.method == "ping"
+                                && matches!(session_state, SessionState::Uninitialized)
+                            {
+                                // Lifecycle permits ping before initialize has completed.
+                                let ctx =
+                                    RequestContext::channel().with_session(session_handle.clone());
+                                let response = router::route_request(&handler, request, &ctx).await;
+                                if response.should_send() {
+                                    send_response_msg(&outgoing, &response).await?;
+                                }
                             } else {
                                 // Notifications (id=None) MUST NOT receive responses per
                                 // JSON-RPC 2.0, so rejection paths stay silent for them.

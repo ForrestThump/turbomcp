@@ -14,11 +14,11 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{RwLock, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use turbomcp_core::error::{ErrorKind, McpError, McpResult};
 use turbomcp_core::handler::McpHandler;
-use turbomcp_types::ProtocolVersion;
+use turbomcp_types::{ClientCapabilities, ProtocolVersion};
 
 use crate::config::ServerConfig;
 use crate::context::{Cancellable, McpSession, RequestContext, SessionFuture};
@@ -52,6 +52,7 @@ impl<T: AsyncWrite + Unpin + Send> LineWriter for T {}
 #[derive(Debug, Clone)]
 pub struct SessionHandle {
     request_tx: mpsc::Sender<SessionCommand>,
+    client_capabilities: Arc<RwLock<Option<ClientCapabilities>>>,
 }
 
 #[derive(Debug)]
@@ -68,6 +69,10 @@ enum SessionCommand {
 }
 
 impl McpSession for SessionHandle {
+    fn client_capabilities<'a>(&'a self) -> SessionFuture<'a, Option<ClientCapabilities>> {
+        Box::pin(async move { Ok(self.client_capabilities.read().await.clone()) })
+    }
+
     fn call<'a>(
         &'a self,
         method: &'a str,
@@ -155,7 +160,10 @@ impl<H: McpHandler> LineTransportRunner<H> {
     {
         // Channel for session commands (server-to-client requests/notifications)
         let (cmd_tx, mut cmd_rx) = mpsc::channel::<SessionCommand>(32);
-        let session_handle = Arc::new(SessionHandle { request_tx: cmd_tx });
+        let session_handle = Arc::new(SessionHandle {
+            request_tx: cmd_tx,
+            client_capabilities: Arc::new(RwLock::new(None)),
+        });
 
         // Channel for completed handler responses
         let (response_tx, mut response_rx) = mpsc::channel::<HandlerResponse>(32);
@@ -237,6 +245,11 @@ impl<H: McpHandler> LineTransportRunner<H> {
                         match router::parse_request_from_value(value) {
                             Ok(request) => {
                                 if request.method == "initialize" {
+                                    let client_capabilities =
+                                        super::client_capabilities_from_initialize_params(
+                                            request.params.as_ref(),
+                                        );
+
                                     // Reject duplicate initialize per MCP spec.
                                     if matches!(session_state, SessionState::Initialized(_)) {
                                         self.send_error(
@@ -262,7 +275,7 @@ impl<H: McpHandler> LineTransportRunner<H> {
                                     // here and cannot process the server-to-client
                                     // request, which would deadlock.
                                     let initialize_request_id = request.id.clone();
-                                    let ctx = ctx_factory().with_session(session_handle.clone());
+                                    let ctx = ctx_factory();
                                     let response = router::route_request_with_config(
                                         &self.handler,
                                         request,
@@ -290,6 +303,8 @@ impl<H: McpHandler> LineTransportRunner<H> {
                                                 initialize_request_id.as_ref(),
                                             ),
                                         );
+                                        *session_handle.client_capabilities.write().await =
+                                            Some(client_capabilities);
                                     }
 
                                     if response.should_send() {
@@ -335,6 +350,16 @@ impl<H: McpHandler> LineTransportRunner<H> {
                                         .await;
                                         let _ = resp_tx.send(response).await;
                                     });
+                                } else if request.method == "ping"
+                                    && matches!(session_state, SessionState::Uninitialized)
+                                {
+                                    // Lifecycle permits ping before initialize has completed.
+                                    let ctx = ctx_factory().with_session(session_handle.clone());
+                                    let response =
+                                        router::route_request(&self.handler, request, &ctx).await;
+                                    if response.should_send() {
+                                        self.send_response(&mut writer, &response).await?;
+                                    }
                                 } else {
                                     // All other requests require a successful initialize.
                                     // Notifications (id=None) MUST NOT receive responses
@@ -661,11 +686,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_line_transport_rejects_before_init() {
+    async fn test_line_transport_allows_ping_before_init() {
         let handler = TestHandler;
         let runner = LineTransportRunner::new(handler);
 
-        // Send ping without initialize first
+        // Send ping without initialize first; MCP lifecycle permits this.
         let input = r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
         let reader = BufReader::new(Cursor::new(format!("{}\n", input)));
         let mut output = Vec::new();
@@ -676,14 +701,8 @@ mod tests {
             .unwrap();
 
         let output_str = String::from_utf8(output).unwrap();
-        assert!(
-            output_str.contains("\"error\""),
-            "Should reject ping before init"
-        );
-        assert!(
-            output_str.contains("not initialized"),
-            "Error should mention initialization"
-        );
+        assert!(output_str.contains("\"result\":{}"));
+        assert!(!output_str.contains("\"error\""));
     }
 
     // JSON-RPC 2.0: notifications (no `id`) MUST NOT receive responses.
@@ -763,7 +782,7 @@ mod tests {
         let handler = TestHandler;
         let runner = LineTransportRunner::new(handler);
 
-        // Empty lines followed by a ping (without init, so we get an error)
+        // Empty lines followed by a ping before init, which MCP lifecycle permits.
         let input = "\n\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n\n";
         let reader = BufReader::new(Cursor::new(input));
         let mut output = Vec::new();
@@ -774,8 +793,9 @@ mod tests {
             .unwrap();
 
         let output_str = String::from_utf8(output).unwrap();
-        // Should only have one response (error for uninitialized ping)
+        // Should only have one successful ping response.
         assert_eq!(output_str.matches("jsonrpc").count(), 1);
+        assert!(output_str.contains("\"result\":{}"));
     }
 
     // C-4: MAX_MESSAGE_SIZE enforcement

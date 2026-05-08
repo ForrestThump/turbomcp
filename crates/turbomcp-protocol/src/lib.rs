@@ -63,8 +63,9 @@
 //! | Icons | SEP-973 | Icon metadata for tools, resources, prompts |
 //! | Enum Improvements | SEP-1330 | Standards-based JSON Schema enum patterns |
 //!
-//! **Experimental Feature (requires feature flag):**
-//! - `experimental-tasks` - Tasks API (SEP-1686) for long-running operations
+//! **Optional client/server helpers (feature flag):**
+//! - `experimental-tasks` - convenience APIs for task operations; the wire types
+//!   and version adapter method set are available for MCP 2025-11-25 compliance.
 //!
 //! **Authentication & Security** (always enabled):
 //! - SSRF protection for URL validation
@@ -81,8 +82,9 @@
 //!
 //! ## Version Selection
 //!
-//! TurboMCP v3.0 targets MCP 2025-11-25 only. Runtime negotiation is exact-match:
-//! clients and servers must agree on the current protocol version.
+//! TurboMCP v3 targets MCP 2025-11-25 as the latest stable protocol and keeps
+//! adapter support for 2025-06-18 compatibility. Servers can be configured for
+//! exact-match negotiation or for the default stable-version set.
 //!
 //! **Typical Usage:**
 //! ```toml
@@ -90,7 +92,7 @@
 //! turbomcp-protocol = "3.0"  # All core features included
 //! ```
 //!
-//! **With Experimental Tasks API:**
+//! **With Tasks convenience APIs:**
 //! ```toml
 //! [dependencies]
 //! turbomcp-protocol = { version = "3.0", features = ["experimental-tasks"] }
@@ -104,9 +106,9 @@
 //! use turbomcp_protocol::{InitializeRequest, InitializeResult, ClientCapabilities};
 //! use turbomcp_protocol::types::{Implementation, ServerCapabilities}; // Corrected import path
 //!
-//! // Client requests the current protocol version
+//! // Client requests the latest stable protocol version
 //! let request = InitializeRequest {
-//!     protocol_version: "2025-11-25".into(),  // Request draft
+//!     protocol_version: "2025-11-25".into(),
 //!     capabilities: ClientCapabilities::default(),
 //!     client_info: Implementation {
 //!         name: "my-client".to_string(),

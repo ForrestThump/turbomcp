@@ -755,9 +755,7 @@ async fn test_websocket_ping_pong() {
 
     // Send manual ping
     let ping_request = turbomcp_protocol::types::PingRequest {
-        params: turbomcp_protocol::types::PingParams {
-            data: Some(serde_json::json!([1, 2, 3])),
-        },
+        params: turbomcp_protocol::types::PingParams::default(),
     };
     transport
         .send_ping(ping_request, None)

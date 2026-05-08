@@ -11,7 +11,7 @@ This crate provides the HTTP client transport implementation for the Model Conte
 - **MCP 2025-11-25 Specification Compliance**: Full implementation of the streamable HTTP spec
 - **Single Endpoint Design**: All communication through one MCP endpoint
 - **SSE Support**: Server-Sent Events for server-to-client streaming
-- **Endpoint Discovery**: Automatic endpoint URI discovery via SSE events
+- **Legacy SSE Compatibility**: Optional support for older `endpoint` SSE events
 - **Session Management**: Mcp-Session-Id header support for session tracking
 - **Auto-Reconnect**: Configurable retry policies with exponential backoff
 - **Last-Event-ID Resumability**: Resume SSE streams from last received event

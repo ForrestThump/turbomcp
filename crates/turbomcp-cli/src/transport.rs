@@ -128,7 +128,9 @@ impl UnifiedClient {
         }
     }
 
-    pub async fn list_resource_templates(&self) -> CliResult<Vec<String>> {
+    pub async fn list_resource_templates(
+        &self,
+    ) -> CliResult<Vec<turbomcp_protocol::types::ResourceTemplate>> {
         match &self.inner {
             #[cfg(feature = "stdio")]
             ClientInner::Stdio(client) => Ok(client.list_resource_templates().await?),

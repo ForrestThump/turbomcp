@@ -203,6 +203,28 @@ pub async fn list_resources(backend: &Client<ChildProcessTransport>) -> Result<V
     }))
 }
 
+/// Helper function to list all available resource templates
+pub async fn list_resource_templates(backend: &Client<ChildProcessTransport>) -> Result<Value, Box<dyn std::error::Error>> {
+    tracing::debug!("Listing all resource templates");
+
+    let mut resource_templates = Vec::new();
+    let mut cursor = None;
+    for _ in 0..1000 {
+        let result = backend.list_resource_templates_paginated(cursor).await
+            .map_err(|e| format!("Failed to list resource templates: {}", e))?;
+        let page_empty = result.resource_templates.is_empty();
+        resource_templates.extend(result.resource_templates);
+        match result.next_cursor {
+            Some(next_cursor) if !page_empty => cursor = Some(next_cursor),
+            _ => break,
+        }
+    }
+
+    Ok(serde_json::json!({
+        "resourceTemplates": resource_templates
+    }))
+}
+
 /// Helper function to list all available prompts
 pub async fn list_prompts(backend: &Client<ChildProcessTransport>) -> Result<Value, Box<dyn std::error::Error>> {
     tracing::debug!("Listing all prompts");

@@ -24,7 +24,7 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
-use turbomcp_types::ProtocolVersion;
+use turbomcp_types::{ClientCapabilities, ProtocolVersion};
 
 /// RAII guard that removes a pending-handler entry from the per-connection
 /// cancellation registry when dropped.
@@ -113,6 +113,16 @@ impl InitializedSessionState {
 
 pub(crate) fn request_id_key(id: &Value) -> Option<String> {
     serde_json::to_string(id).ok()
+}
+
+pub(crate) fn client_capabilities_from_initialize_params(
+    params: Option<&Value>,
+) -> ClientCapabilities {
+    params
+        .and_then(|params| params.get("capabilities"))
+        .cloned()
+        .and_then(|capabilities| serde_json::from_value(capabilities).ok())
+        .unwrap_or_default()
 }
 
 #[cfg(feature = "stdio")]

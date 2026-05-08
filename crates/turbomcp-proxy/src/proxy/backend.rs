@@ -14,7 +14,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 use tracing::{debug, info};
 use turbomcp_client::Client;
-use turbomcp_protocol::types::{GetPromptResult, Prompt, ReadResourceResult, Resource, Tool};
+use turbomcp_protocol::types::{
+    GetPromptResult, Prompt, ReadResourceResult, Resource, ResourceTemplate, Tool,
+};
 use turbomcp_protocol::{Error, PROTOCOL_VERSION};
 #[cfg(unix)]
 use turbomcp_transport::UnixTransport;
@@ -27,8 +29,8 @@ use turbomcp_transport::{
 use crate::error::{ProxyError, ProxyResult};
 use crate::introspection::{
     EmptyCapability, LoggingCapability, PromptSpec, PromptsCapability, ResourceSpec,
-    ResourcesCapability, ServerCapabilities, ServerInfo, ServerSpec, ToolInputSchema, ToolSpec,
-    ToolsCapability,
+    ResourcesCapability, ServerCapabilities, ServerInfo, ServerSpec, ToolAnnotations,
+    ToolInputSchema, ToolOutputSchema, ToolSpec, ToolsCapability,
 };
 
 /// Type alias for async result futures used in `ProxyClient` trait (v3.0: `McpError` not boxed)
@@ -45,6 +47,9 @@ pub trait ProxyClient: Send + Sync {
 
     /// List all available resources
     fn list_resources(&self) -> ClientFuture<'_, Vec<Resource>>;
+
+    /// List all available resource templates
+    fn list_resource_templates(&self) -> ClientFuture<'_, Vec<ResourceTemplate>>;
 
     /// List all available prompts
     fn list_prompts(&self) -> ClientFuture<'_, Vec<Prompt>>;
@@ -81,6 +86,24 @@ impl<T: Transport + 'static> ProxyClient for ConcreteProxyClient<T> {
     fn list_resources(&self) -> ClientFuture<'_, Vec<Resource>> {
         let client = self.client.clone();
         Box::pin(async move { client.list_resources().await })
+    }
+
+    fn list_resource_templates(&self) -> ClientFuture<'_, Vec<ResourceTemplate>> {
+        let client = self.client.clone();
+        Box::pin(async move {
+            let mut all_templates = Vec::new();
+            let mut cursor = None;
+            for _ in 0..1000 {
+                let result = client.list_resource_templates_paginated(cursor).await?;
+                let page_empty = result.resource_templates.is_empty();
+                all_templates.extend(result.resource_templates);
+                match result.next_cursor {
+                    Some(next_cursor) if !page_empty => cursor = Some(next_cursor),
+                    _ => break,
+                }
+            }
+            Ok(all_templates)
+        })
     }
 
     fn list_prompts(&self) -> ClientFuture<'_, Vec<Prompt>> {
@@ -469,6 +492,11 @@ impl BackendConnector {
             .await
             .map_err(|e| ProxyError::backend(format!("Failed to list resources: {e}")))?;
 
+        let resource_templates =
+            self.client.list_resource_templates().await.map_err(|e| {
+                ProxyError::backend(format!("Failed to list resource templates: {e}"))
+            })?;
+
         // List prompts
         let prompts = self
             .client
@@ -492,8 +520,8 @@ impl BackendConnector {
             capabilities: Self::convert_capabilities(&self.init_result.server_capabilities),
             tools: Self::convert_tools(tools),
             resources: Self::convert_resources(resources),
+            resource_templates: Self::convert_resource_templates(resource_templates),
             prompts: Self::convert_prompts(prompts),
-            resource_templates: Vec::new(),
             instructions: None,
         })
     }
@@ -524,38 +552,19 @@ impl BackendConnector {
     fn convert_tools(tools: Vec<Tool>) -> Vec<ToolSpec> {
         tools
             .into_iter()
-            .map(|t| {
-                let mut additional = HashMap::new();
-                if let Some(ref additional_props) = t.input_schema.additional_properties {
-                    additional.insert("additionalProperties".to_string(), additional_props.clone());
-                }
-                for (key, value) in &t.input_schema.extra_keywords {
-                    additional.insert(key.clone(), value.clone());
-                }
-                let schema_type = t
-                    .input_schema
-                    .schema_type
-                    .as_ref()
-                    .and_then(|value| value.as_str().map(str::to_owned))
-                    .unwrap_or_else(|| "object".to_string());
-                let properties = t.input_schema.properties_as_object().map(|obj| {
-                    obj.iter()
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect::<std::collections::HashMap<_, _>>()
-                });
-                ToolSpec {
-                    name: t.name,
-                    title: t.title,
-                    description: t.description,
-                    input_schema: ToolInputSchema {
-                        schema_type,
-                        properties,
-                        required: t.input_schema.required,
-                        additional,
-                    },
-                    output_schema: None,
-                    annotations: None,
-                }
+            .map(|t| ToolSpec {
+                name: t.name,
+                title: t.title,
+                description: t.description,
+                input_schema: convert_input_schema(t.input_schema),
+                output_schema: t.output_schema.map(convert_output_schema),
+                annotations: t.annotations.map(|a| ToolAnnotations {
+                    title: a.title,
+                    read_only_hint: a.read_only_hint,
+                    destructive_hint: a.destructive_hint,
+                    idempotent_hint: a.idempotent_hint,
+                    open_world_hint: a.open_world_hint,
+                }),
             })
             .collect()
     }
@@ -566,11 +575,33 @@ impl BackendConnector {
             .map(|r| ResourceSpec {
                 uri: r.uri.clone(),
                 name: r.name,
-                title: None,
+                title: r.title,
                 description: r.description,
                 mime_type: r.mime_type,
-                size: None,
-                annotations: None,
+                size: r.size,
+                annotations: r.annotations.map(|ann| crate::introspection::Annotations {
+                    fields: serde_json::from_value(serde_json::to_value(ann).unwrap_or_default())
+                        .unwrap_or_default(),
+                }),
+            })
+            .collect()
+    }
+
+    fn convert_resource_templates(
+        templates: Vec<ResourceTemplate>,
+    ) -> Vec<crate::introspection::ResourceTemplateSpec> {
+        templates
+            .into_iter()
+            .map(|t| crate::introspection::ResourceTemplateSpec {
+                uri_template: t.uri_template,
+                name: t.name,
+                title: t.title,
+                description: t.description,
+                mime_type: t.mime_type,
+                annotations: t.annotations.map(|ann| crate::introspection::Annotations {
+                    fields: serde_json::from_value(serde_json::to_value(ann).unwrap_or_default())
+                        .unwrap_or_default(),
+                }),
             })
             .collect()
     }
@@ -592,7 +623,7 @@ impl BackendConnector {
                     .collect();
                 PromptSpec {
                     name: p.name,
-                    title: None,
+                    title: p.title,
                     description: p.description,
                     arguments,
                 }
@@ -651,6 +682,20 @@ impl BackendConnector {
         })
     }
 
+    /// List resource templates from the backend
+    ///
+    /// # Errors
+    ///
+    /// Returns `ProxyError` if listing resource templates fails.
+    pub async fn list_resource_templates(&self) -> ProxyResult<Vec<ResourceTemplate>> {
+        self.client.list_resource_templates().await.map_err(|e| {
+            ProxyError::backend_with_code(
+                format!("Failed to list resource templates: {e}"),
+                e.jsonrpc_error_code(),
+            )
+        })
+    }
+
     /// Read a resource from the backend
     ///
     /// # Errors
@@ -699,6 +744,148 @@ impl BackendConnector {
 }
 
 #[cfg(test)]
+#[derive(Clone, Default)]
+struct StaticProxyClient {
+    tools: Vec<Tool>,
+    resources: Vec<Resource>,
+    resource_templates: Vec<ResourceTemplate>,
+    prompts: Vec<Prompt>,
+}
+
+#[cfg(test)]
+impl ProxyClient for StaticProxyClient {
+    fn list_tools(&self) -> ClientFuture<'_, Vec<Tool>> {
+        let tools = self.tools.clone();
+        Box::pin(async move { Ok(tools) })
+    }
+
+    fn list_resources(&self) -> ClientFuture<'_, Vec<Resource>> {
+        let resources = self.resources.clone();
+        Box::pin(async move { Ok(resources) })
+    }
+
+    fn list_resource_templates(&self) -> ClientFuture<'_, Vec<ResourceTemplate>> {
+        let resource_templates = self.resource_templates.clone();
+        Box::pin(async move { Ok(resource_templates) })
+    }
+
+    fn list_prompts(&self) -> ClientFuture<'_, Vec<Prompt>> {
+        let prompts = self.prompts.clone();
+        Box::pin(async move { Ok(prompts) })
+    }
+
+    fn call_tool(
+        &self,
+        _name: &str,
+        _arguments: Option<HashMap<String, Value>>,
+    ) -> ClientFuture<'_, Value> {
+        Box::pin(async { Err(Error::method_not_found("test backend has no tools")) })
+    }
+
+    fn read_resource(&self, _uri: &str) -> ClientFuture<'_, ReadResourceResult> {
+        Box::pin(async { Err(Error::method_not_found("test backend has no resources")) })
+    }
+
+    fn get_prompt(
+        &self,
+        _name: &str,
+        _arguments: Option<HashMap<String, Value>>,
+    ) -> ClientFuture<'_, GetPromptResult> {
+        Box::pin(async { Err(Error::method_not_found("test backend has no prompts")) })
+    }
+}
+
+#[cfg(test)]
+impl BackendConnector {
+    pub(crate) fn from_static_data_for_test(
+        tools: Vec<Tool>,
+        resources: Vec<Resource>,
+        resource_templates: Vec<ResourceTemplate>,
+        prompts: Vec<Prompt>,
+    ) -> Self {
+        let client = StaticProxyClient {
+            tools,
+            resources,
+            resource_templates,
+            prompts,
+        };
+        Self {
+            client: Arc::new(client),
+            config: Arc::new(BackendConfig {
+                transport: BackendTransport::Stdio {
+                    command: "test".to_string(),
+                    args: Vec::new(),
+                    working_dir: None,
+                },
+                client_name: "test-proxy".to_string(),
+                client_version: "1.0.0".to_string(),
+            }),
+            spec: Arc::new(tokio::sync::Mutex::new(None)),
+            init_result: Arc::new(turbomcp_client::InitializeResult {
+                server_info: turbomcp_protocol::types::Implementation {
+                    name: "test-backend".to_string(),
+                    version: "1.0.0".to_string(),
+                    ..Default::default()
+                },
+                server_capabilities: turbomcp_protocol::types::ServerCapabilities::default(),
+            }),
+        }
+    }
+}
+
+fn convert_input_schema(schema: turbomcp_protocol::types::ToolInputSchema) -> ToolInputSchema {
+    let schema_type = schema
+        .schema_type
+        .as_ref()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "object".to_string());
+    let properties = schema.properties_as_object().map(|obj| {
+        obj.iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect::<std::collections::HashMap<_, _>>()
+    });
+    let mut additional = HashMap::new();
+    if let Some(additional_props) = schema.additional_properties {
+        additional.insert("additionalProperties".to_string(), additional_props);
+    }
+    additional.extend(schema.extra_keywords);
+
+    ToolInputSchema {
+        schema_type,
+        properties,
+        required: schema.required,
+        additional,
+    }
+}
+
+fn convert_output_schema(schema: turbomcp_protocol::types::ToolOutputSchema) -> ToolOutputSchema {
+    let mut additional = HashMap::new();
+    if let Some(additional_props) = schema.additional_properties {
+        additional.insert("additionalProperties".to_string(), additional_props);
+    }
+    additional.extend(schema.extra_keywords);
+    let schema_type = schema
+        .schema_type
+        .as_ref()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "object".to_string());
+    let properties = schema.properties.and_then(|props| {
+        props.as_object().map(|obj| {
+            obj.iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect::<std::collections::HashMap<_, _>>()
+        })
+    });
+
+    ToolOutputSchema {
+        schema_type,
+        properties,
+        required: schema.required,
+        additional,
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -716,6 +903,81 @@ mod tests {
 
         assert_eq!(config.client_name, "test-proxy");
         assert_eq!(config.client_version, "1.0.0");
+    }
+
+    #[tokio::test]
+    async fn test_static_backend_introspection_preserves_resource_templates() {
+        let tool = Tool {
+            name: "inspect".to_string(),
+            title: Some("Inspect".to_string()),
+            description: Some("Inspect an item".to_string()),
+            output_schema: Some(turbomcp_protocol::types::ToolOutputSchema::empty()),
+            annotations: Some(turbomcp_protocol::types::ToolAnnotations {
+                title: Some("Inspect".to_string()),
+                read_only_hint: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let resource = Resource {
+            uri: "repo://one".to_string(),
+            name: "repo-one".to_string(),
+            title: Some("Repo One".to_string()),
+            description: Some("Repository one".to_string()),
+            mime_type: Some("application/json".to_string()),
+            size: Some(42),
+            ..Default::default()
+        };
+        let template = ResourceTemplate {
+            uri_template: "repo://{owner}/{name}".to_string(),
+            name: "repo".to_string(),
+            title: Some("Repository".to_string()),
+            description: Some("Repository metadata".to_string()),
+            mime_type: Some("application/json".to_string()),
+            ..Default::default()
+        };
+        let prompt = Prompt {
+            name: "summarize".to_string(),
+            title: Some("Summarize".to_string()),
+            description: Some("Summarize input".to_string()),
+            ..Default::default()
+        };
+
+        let backend = BackendConnector::from_static_data_for_test(
+            vec![tool],
+            vec![resource],
+            vec![template],
+            vec![prompt],
+        );
+
+        let spec = backend.introspect().await.expect("introspection");
+        assert_eq!(spec.tools[0].title.as_deref(), Some("Inspect"));
+        assert!(spec.tools[0].output_schema.is_some());
+        assert_eq!(
+            spec.tools[0]
+                .annotations
+                .as_ref()
+                .and_then(|a| a.read_only_hint),
+            Some(true)
+        );
+        assert_eq!(spec.resources[0].title.as_deref(), Some("Repo One"));
+        assert_eq!(spec.resources[0].size, Some(42));
+        assert_eq!(
+            spec.resource_templates[0].uri_template,
+            "repo://{owner}/{name}"
+        );
+        assert_eq!(
+            spec.resource_templates[0].title.as_deref(),
+            Some("Repository")
+        );
+        assert_eq!(spec.prompts[0].title.as_deref(), Some("Summarize"));
+
+        let forwarded = backend
+            .list_resource_templates()
+            .await
+            .expect("forwarded templates");
+        assert_eq!(forwarded[0].uri_template, "repo://{owner}/{name}");
+        assert_eq!(forwarded[0].title.as_deref(), Some("Repository"));
     }
 
     #[tokio::test]

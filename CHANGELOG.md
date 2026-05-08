@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.1.4] - 2026-05-08
+
+Patch release: MCP compliance hardening focused on the 2025-11-25 and
+2025-06-18 stable protocol surfaces, Streamable HTTP/SSE bidirectionality,
+resource template fidelity, version adaptation, and regression coverage.
+
+### Added
+
+- **Streamable HTTP/SSE server-initiated request support** — initialized HTTP
+  sessions now attach an `McpSession` to request contexts, so
+  `ctx.sample(...)`, `ctx.elicit_form(...)`, `ctx.elicit_url(...)`, and
+  `ctx.notify_client(...)` can send JSON-RPC requests or notifications over SSE
+  and correlate client POSTed responses back to the original handler.
+- **`resources/templates/list` support across server, client, macros, and
+  proxy paths** — handlers, routing, generated servers, backend introspection,
+  and proxy forwarding now expose resource templates as first-class MCP
+  resources rather than dropping or flattening them.
+- **Stable schema/method parity regression coverage** — server tests now compare
+  supported version-adapter methods directly against the embedded stable MCP
+  schemas to catch missing method wiring during future spec updates.
+
+### Changed
+
+- **Protocol negotiation is explicit for stable versions** — 2025-11-25 remains
+  the preferred stable version, while 2025-06-18 compatibility is retained
+  through version adapters that strip newer response fields where required.
+- **Release-facing metadata now targets 3.1.4** — workspace manifests, internal
+  crate dependency pins, lockfile entries, install snippets, README examples,
+  and package-facing migration docs identify the patch release consistently.
+
+### Fixed
+
+- **HTTP/SSE sampling, elicitation, and roots flows no longer time out after
+  valid client responses** — client JSON-RPC responses posted with the active
+  `Mcp-Session-Id` resolve pending server-initiated requests immediately,
+  including rejected sampling responses.
+- **Normal POST-only HTTP clients remain compatible** — ordinary client-to-server
+  JSON-RPC requests continue to work without requiring an SSE subscriber or
+  server-initiated request handling.
+- **Client resource template APIs preserve full metadata** — `ResourceTemplate`
+  responses retain `uriTemplate`, `name`, `title`, `description`, `mimeType`,
+  `icons`, `annotations`, and `_meta` instead of reducing templates to strings.
+- **Proxy resource template forwarding preserves backend data** — proxy
+  introspection and `resources/templates/list` forwarding now keep template
+  metadata intact and emit the spec field name `resourceTemplates`.
+
 ## [3.1.3] - 2026-04-29
 
 Patch release: follow-on exhaustive audit of lower-to-upper layers, focusing on

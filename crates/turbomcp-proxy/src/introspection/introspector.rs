@@ -10,7 +10,10 @@ use turbomcp_protocol::{
         ClientCapabilities, Cursor, ElicitationCapabilities, Implementation, RootsCapabilities,
         SamplingCapabilities,
         prompts::{ListPromptsRequest, ListPromptsResult},
-        resources::{ListResourcesRequest, ListResourcesResult},
+        resources::{
+            ListResourceTemplatesRequest, ListResourceTemplatesResult, ListResourcesRequest,
+            ListResourcesResult,
+        },
         tools::{ListToolsRequest, ListToolsResult},
     },
 };
@@ -261,7 +264,7 @@ impl McpIntrospector {
         backend: &mut dyn McpBackend,
     ) -> ProxyResult<(Vec<ResourceSpec>, Vec<ResourceTemplateSpec>)> {
         let mut all_resources = Vec::new();
-        let all_templates = Vec::new();
+        let mut all_templates = Vec::new();
         let mut cursor: Option<Cursor> = None;
 
         loop {
@@ -288,7 +291,7 @@ impl McpIntrospector {
                 all_resources.push(ResourceSpec {
                     uri: resource.uri.clone(),
                     name: resource.name,
-                    title: None,
+                    title: resource.title,
                     description: resource.description,
                     mime_type: resource.mime_type,
                     size: resource.size,
@@ -301,10 +304,56 @@ impl McpIntrospector {
                 });
             }
 
-            // Note: resource_templates are returned inline with resources in MCP spec
-            // Not as a separate field in ListResourcesResult
-
             // Check for next page
+            if let Some(next_cursor) = result.next_cursor {
+                cursor = Some(next_cursor);
+            } else {
+                break;
+            }
+        }
+
+        let mut cursor: Option<Cursor> = None;
+        loop {
+            trace!(cursor = ?cursor, "Fetching resource templates page");
+
+            let request = ListResourceTemplatesRequest {
+                cursor: cursor.clone(),
+                _meta: None,
+            };
+
+            let params = serde_json::to_value(&request).map_err(|e| {
+                ProxyError::backend(format!(
+                    "Failed to serialize resources/templates/list request: {e}"
+                ))
+            })?;
+
+            let result_value = backend
+                .call_method("resources/templates/list", params)
+                .await?;
+
+            let result: ListResourceTemplatesResult = serde_json::from_value(result_value)
+                .map_err(|e| {
+                    ProxyError::backend(format!(
+                        "Failed to parse resources/templates/list response: {e}"
+                    ))
+                })?;
+
+            for template in result.resource_templates {
+                all_templates.push(ResourceTemplateSpec {
+                    uri_template: template.uri_template,
+                    name: template.name,
+                    title: template.title,
+                    description: template.description,
+                    mime_type: template.mime_type,
+                    annotations: template.annotations.map(|ann| Annotations {
+                        fields: serde_json::from_value(
+                            serde_json::to_value(ann).unwrap_or_default(),
+                        )
+                        .unwrap_or_default(),
+                    }),
+                });
+            }
+
             if let Some(next_cursor) = result.next_cursor {
                 cursor = Some(next_cursor);
             } else {
@@ -348,7 +397,7 @@ impl McpIntrospector {
             for prompt in result.prompts {
                 all_prompts.push(PromptSpec {
                     name: prompt.name,
-                    title: None,
+                    title: prompt.title,
                     description: prompt.description,
                     arguments: prompt
                         .arguments

@@ -115,7 +115,7 @@ async fn test_ping_rejection_should_not_hang() {
         .expect("Failed to create transport");
 
     let request = PingRequest {
-        params: turbomcp_protocol::types::PingParams { data: None },
+        params: turbomcp_protocol::types::PingParams::default(),
     };
 
     let start = Instant::now();

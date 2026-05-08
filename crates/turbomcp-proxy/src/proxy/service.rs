@@ -110,6 +110,8 @@ impl ProxyService {
                 }))
             }
 
+            "resources/templates/list" => self.forward_resource_templates_list().await,
+
             "resources/read" => {
                 debug!("Forwarding resources/read to backend");
                 let params = request.params.ok_or_else(|| {
@@ -173,6 +175,19 @@ impl ProxyService {
                 Err(McpError::internal(format!("Method not found: {method}")))
             }
         }
+    }
+
+    async fn forward_resource_templates_list(&self) -> McpResult<Value> {
+        debug!("Forwarding resources/templates/list to backend");
+        let resource_templates = self
+            .backend
+            .list_resource_templates()
+            .await
+            .map_err(proxy_error_to_mcp)?;
+
+        Ok(serde_json::json!({
+            "resourceTemplates": resource_templates
+        }))
     }
 
     pub(crate) async fn process_value(&self, request: Value) -> McpResult<Value> {
@@ -267,8 +282,37 @@ fn spec_resource_to_mcp_resource(
         title: spec.title.clone(),
         mime_type: spec.mime_type.clone(),
         size: spec.size,
+        annotations: spec
+            .annotations
+            .as_ref()
+            .and_then(resource_annotations_from_spec),
         ..Default::default()
     }
+}
+
+#[cfg(feature = "runtime")]
+fn spec_resource_template_to_mcp_resource_template(
+    spec: &crate::introspection::ResourceTemplateSpec,
+) -> turbomcp_protocol::types::ResourceTemplate {
+    turbomcp_protocol::types::ResourceTemplate {
+        uri_template: spec.uri_template.clone(),
+        name: spec.name.clone(),
+        description: spec.description.clone(),
+        title: spec.title.clone(),
+        mime_type: spec.mime_type.clone(),
+        annotations: spec
+            .annotations
+            .as_ref()
+            .and_then(resource_annotations_from_spec),
+        ..Default::default()
+    }
+}
+
+#[cfg(feature = "runtime")]
+fn resource_annotations_from_spec(
+    annotations: &crate::introspection::Annotations,
+) -> Option<turbomcp_protocol::types::ResourceAnnotations> {
+    serde_json::from_value(serde_json::to_value(annotations).ok()?).ok()
 }
 
 #[cfg(feature = "runtime")]
@@ -371,6 +415,14 @@ impl turbomcp_server::McpHandler for ProxyService {
             .collect()
     }
 
+    fn list_resource_templates(&self) -> Vec<turbomcp_protocol::types::ResourceTemplate> {
+        self.spec
+            .resource_templates
+            .iter()
+            .map(spec_resource_template_to_mcp_resource_template)
+            .collect()
+    }
+
     fn list_prompts(&self) -> Vec<turbomcp_protocol::types::Prompt> {
         self.spec
             .prompts
@@ -468,6 +520,57 @@ mod tests {
         };
 
         Some(ProxyService::new(backend, spec))
+    }
+
+    #[tokio::test]
+    async fn test_resource_templates_list_is_forwarded() {
+        let template = turbomcp_protocol::types::ResourceTemplate {
+            uri_template: "repo://{owner}/{name}".to_string(),
+            name: "repo".to_string(),
+            title: Some("Repository".to_string()),
+            description: Some("Repository metadata".to_string()),
+            mime_type: Some("application/json".to_string()),
+            ..Default::default()
+        };
+        let backend = BackendConnector::from_static_data_for_test(
+            Vec::new(),
+            Vec::new(),
+            vec![template],
+            Vec::new(),
+        );
+        let spec = ServerSpec {
+            server_info: crate::introspection::ServerInfo {
+                name: "backend".to_string(),
+                version: "1.0.0".to_string(),
+                title: None,
+            },
+            protocol_version: turbomcp_protocol::PROTOCOL_VERSION.to_string(),
+            capabilities: crate::introspection::ServerCapabilities {
+                resources: Some(crate::introspection::ResourcesCapability::default()),
+                ..Default::default()
+            },
+            tools: Vec::new(),
+            resources: Vec::new(),
+            resource_templates: Vec::new(),
+            prompts: Vec::new(),
+            instructions: None,
+        };
+        let service = ProxyService::new(backend, spec);
+
+        let result = service
+            .process_value(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "resources/templates/list"
+            }))
+            .await
+            .expect("resources/templates/list result");
+
+        let templates = result["resourceTemplates"].as_array().expect("templates");
+        assert_eq!(templates.len(), 1);
+        assert_eq!(templates[0]["uriTemplate"], "repo://{owner}/{name}");
+        assert_eq!(templates[0]["title"], "Repository");
+        assert_eq!(templates[0]["mimeType"], "application/json");
     }
 
     #[tokio::test]

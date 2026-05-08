@@ -2,9 +2,9 @@
 //!
 //! This client provides **strict MCP 2025-11-25 specification compliance** with:
 //! - Single MCP endpoint for all communication
-//! - Endpoint discovery via SSE "endpoint" event
 //! - Accept header negotiation (application/json, text/event-stream)
 //! - Handles SSE responses from POST requests
+//! - Backward-compatible handling for legacy SSE "endpoint" events
 //! - Auto-reconnect with exponential backoff
 //! - Last-Event-ID resumability
 //! - Session management with Mcp-Session-Id
@@ -185,7 +185,11 @@ pub struct StreamableHttpClientTransport {
     metrics: Arc<RwLock<TransportMetrics>>,
     _event_emitter: TransportEventEmitter,
 
-    /// Discovered message endpoint (if different from main endpoint)
+    /// Legacy SSE message endpoint if a server sends an `endpoint` event.
+    ///
+    /// MCP 2025-11-25 Streamable HTTP uses a single MCP endpoint for POST and GET.
+    /// The `endpoint` SSE event belongs to the older HTTP+SSE transport, but keeping
+    /// this optional override lets the client interoperate with legacy servers.
     message_endpoint: Arc<RwLock<Option<String>>>,
 
     /// Session ID from server
@@ -204,14 +208,6 @@ pub struct StreamableHttpClientTransport {
 
     /// SSE connection task handle
     sse_task_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
-
-    /// Oneshot signal that the SSE task has discovered the message endpoint, so
-    /// `connect()` can synchronize before the first `send()`. Pre-3.1 this used a
-    /// 500 ms `sleep` and races on slow networks / cold caches.
-    /// Held as `(Sender, Receiver)` Option pair: the sender is moved into the SSE
-    /// task on `start_sse_connection`, the receiver is awaited in `connect`.
-    endpoint_ready_tx: Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
-    endpoint_ready_rx: Arc<Mutex<Option<tokio::sync::oneshot::Receiver<()>>>>,
 }
 
 impl std::fmt::Debug for StreamableHttpClientTransport {
@@ -234,7 +230,6 @@ impl StreamableHttpClientTransport {
         let (sse_tx, sse_rx) = mpsc::channel(1000);
         let (response_tx, response_rx) = mpsc::channel(100);
         let (event_emitter, _) = TransportEventEmitter::new();
-        let (endpoint_ready_tx, endpoint_ready_rx) = tokio::sync::oneshot::channel();
 
         // Emit insecurity warning if certificate validation is disabled
         if config.tls.is_insecure() {
@@ -370,8 +365,6 @@ impl StreamableHttpClientTransport {
             response_receiver: Arc::new(Mutex::new(response_rx)),
             response_sender: response_tx,
             sse_task_handle: Arc::new(Mutex::new(None)),
-            endpoint_ready_tx: Arc::new(Mutex::new(Some(endpoint_ready_tx))),
-            endpoint_ready_rx: Arc::new(Mutex::new(Some(endpoint_ready_rx))),
         })
     }
 
@@ -451,9 +444,6 @@ impl StreamableHttpClientTransport {
         let session_id = Arc::clone(&self.session_id);
         let last_event_id = Arc::clone(&self.last_event_id);
         let message_endpoint = Arc::clone(&self.message_endpoint);
-        // Take the oneshot sender — `connect()` awaits the matching receiver.
-        // After the first SSE event sets the endpoint we drop the sender, signalling.
-        let endpoint_ready_tx = self.endpoint_ready_tx.lock().await.take();
 
         let task = tokio::spawn(async move {
             Self::sse_connection_task(
@@ -465,7 +455,6 @@ impl StreamableHttpClientTransport {
                 session_id,
                 last_event_id,
                 message_endpoint,
-                endpoint_ready_tx,
             )
             .await;
         });
@@ -486,7 +475,6 @@ impl StreamableHttpClientTransport {
         session_id: Arc<RwLock<Option<String>>>,
         last_event_id: Arc<RwLock<Option<String>>>,
         message_endpoint: Arc<RwLock<Option<String>>>,
-        mut endpoint_ready_tx: Option<tokio::sync::oneshot::Sender<()>>,
     ) {
         let mut attempt = 0u32;
 
@@ -604,7 +592,6 @@ impl StreamableHttpClientTransport {
                                         &sse_sender,
                                         &last_event_id,
                                         &message_endpoint,
-                                        &mut endpoint_ready_tx,
                                     )
                                     .await
                                     {
@@ -641,17 +628,12 @@ impl StreamableHttpClientTransport {
         }
     }
 
-    /// Process SSE event.
-    ///
-    /// `endpoint_ready_tx` is `Some` until the first `endpoint` event is processed —
-    /// at that point we drop the sender, which signals `connect()` that endpoint
-    /// discovery is complete and `send()` is now safe.
+    /// Process an SSE event from the standalone GET stream.
     async fn process_sse_event(
         event_str: &str,
         sse_sender: &mpsc::Sender<TransportMessage>,
         last_event_id: &Arc<RwLock<Option<String>>>,
         message_endpoint: &Arc<RwLock<Option<String>>>,
-        endpoint_ready_tx: &mut Option<tokio::sync::oneshot::Sender<()>>,
     ) -> TransportResult<()> {
         let lines: Vec<&str> = event_str.lines().collect();
         let mut event_type: Option<String> = None;
@@ -690,7 +672,10 @@ impl StreamableHttpClientTransport {
         // Handle different event types
         match event_type.as_deref() {
             Some("endpoint") => {
-                // CRITICAL: This is the endpoint discovery event per MCP 2025-11-25 spec
+                // Legacy HTTP+SSE transport compatibility. Streamable HTTP
+                // (MCP 2025-11-25) uses a single endpoint, so connect/send must not
+                // depend on this event.
+                //
                 // The event data may be either:
                 // 1. A JSON object: {"uri":"http://..."}
                 // 2. A plain string: "http://..."
@@ -718,12 +703,6 @@ impl StreamableHttpClientTransport {
 
                 info!("Discovered message endpoint: {}", endpoint_uri);
                 *message_endpoint.write().await = Some(endpoint_uri);
-                // Signal `connect()` that the endpoint is now usable. `send` returns
-                // `Err` only if the receiver was already dropped (connect timed out
-                // or was abandoned) — safe to ignore.
-                if let Some(tx) = endpoint_ready_tx.take() {
-                    let _ = tx.send(());
-                }
                 Ok(())
             }
             Some("message") | None => {
@@ -1104,28 +1083,6 @@ impl Transport for StreamableHttpClientTransport {
             // Start SSE connection task
             self.start_sse_connection().await?;
 
-            // Wait for the SSE task to discover the message endpoint instead of relying
-            // on a fixed sleep. Pre-3.1 used `sleep(500ms)`, which races on slow
-            // networks / cold caches and the first `send()` could be routed to a stale
-            // endpoint. The SSE task drops `endpoint_ready_tx` once it processes the
-            // `endpoint` event, which closes this receiver.
-            let rx = self.endpoint_ready_rx.lock().await.take();
-            if let Some(rx) = rx {
-                match tokio::time::timeout(self.config.timeout, rx).await {
-                    Ok(_) => {
-                        // Either Ok(()) (sender fired) or Err (sender dropped without
-                        // firing — task crashed before discovery). Either way connect
-                        // shouldn't block further; the next send() will surface failure.
-                    }
-                    Err(_) => {
-                        return Err(TransportError::ConnectionFailed(format!(
-                            "SSE endpoint discovery timed out after {:?}",
-                            self.config.timeout
-                        )));
-                    }
-                }
-            }
-
             *self.state.write().await = TransportState::Connected;
 
             info!("Connected successfully");
@@ -1219,15 +1176,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_endpoint_event_json_parsing() {
-        // REGRESSION TEST: Verify client correctly parses JSON endpoint event
-        // Bug: Client was storing entire JSON string {"uri":"..."} instead of extracting URI
+        // Legacy HTTP+SSE compatibility: verify JSON endpoint events still parse.
+        // Bug: Client was storing entire JSON string {"uri":"..."} instead of extracting URI.
 
         use std::sync::Arc;
         use tokio::sync::RwLock;
 
         let message_endpoint = Arc::new(RwLock::new(None::<String>));
 
-        // Simulate endpoint event with JSON format (MCP 2025-11-25 spec)
+        // Simulate a legacy endpoint event with JSON format.
         let event_data = [r#"{"uri":"http://127.0.0.1:8080/mcp"}"#.to_string()];
         let data_str = event_data.join("\n");
 
@@ -1256,7 +1213,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_endpoint_event_plain_string_parsing() {
-        // Test backward compatibility with plain string endpoint events
+        // Legacy HTTP+SSE compatibility with plain string endpoint events.
 
         use std::sync::Arc;
         use tokio::sync::RwLock;

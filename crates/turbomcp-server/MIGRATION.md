@@ -73,7 +73,7 @@ let config = ServerConfig::builder()
 v3.x adds an in-process channel transport for zero-overhead communication between components in the same process. Enable with the `channel` feature flag:
 
 ```toml
-turbomcp-server = { version = "3.1.3", features = ["channel"] }
+turbomcp-server = { version = "3.1.4", features = ["channel"] }
 ```
 
 ### ServerConfig now has try_build for validation
@@ -97,9 +97,9 @@ The default feature is `stdio`. This has not changed between v2.x and v3.x. If y
 
 ```toml
 # These all work the same as before
-turbomcp-server = { version = "3.1.3", features = ["http"] }
-turbomcp-server = { version = "3.1.3", features = ["stdio", "http", "websocket", "tcp"] }
-turbomcp-server = { version = "3.1.3", features = ["full"] }
+turbomcp-server = { version = "3.1.4", features = ["http"] }
+turbomcp-server = { version = "3.1.4", features = ["stdio", "http", "websocket", "tcp"] }
+turbomcp-server = { version = "3.1.4", features = ["full"] }
 ```
 
 ---

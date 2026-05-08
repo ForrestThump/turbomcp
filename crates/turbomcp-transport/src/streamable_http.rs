@@ -51,7 +51,7 @@ pub struct StreamableHttpConfig {
     /// Base URL including scheme (e.g., "http://127.0.0.1:8080")
     ///
     /// Constructed by builder from bind_addr and TLS config.
-    /// Used for MCP endpoint discovery to ensure protocol compliance.
+    /// Used to build the configured MCP endpoint URL.
     pub base_url: String,
 
     /// Base path for MCP endpoint (default: "/mcp")

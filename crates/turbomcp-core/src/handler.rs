@@ -55,8 +55,8 @@ use crate::context::RequestContext;
 use crate::error::McpResult;
 use crate::marker::{MaybeSend, MaybeSync};
 use turbomcp_types::{
-    Prompt, PromptResult, PromptsCapabilities, Resource, ResourceResult, ResourcesCapabilities,
-    ServerCapabilities, ServerInfo, Tool, ToolResult, ToolsCapabilities,
+    Prompt, PromptResult, PromptsCapabilities, Resource, ResourceResult, ResourceTemplate,
+    ResourcesCapabilities, ServerCapabilities, ServerInfo, Tool, ToolResult, ToolsCapabilities,
 };
 
 /// The unified MCP handler trait.
@@ -222,7 +222,7 @@ pub trait McpHandler: Clone + MaybeSend + MaybeSync + 'static {
             });
         }
 
-        if !self.list_resources().is_empty() {
+        if !self.list_resources().is_empty() || !self.list_resource_templates().is_empty() {
             capabilities.resources = Some(ResourcesCapabilities {
                 subscribe: None,
                 list_changed: Some(true),
@@ -250,6 +250,15 @@ pub trait McpHandler: Clone + MaybeSend + MaybeSync + 'static {
     ///
     /// Called in response to `resources/list` requests.
     fn list_resources(&self) -> Vec<Resource>;
+
+    /// Returns all available resource URI templates.
+    ///
+    /// Called in response to `resources/templates/list` requests. Servers with
+    /// dynamic resources should return URI templates here rather than exposing
+    /// templated strings as concrete `resources/list` entries.
+    fn list_resource_templates(&self) -> Vec<ResourceTemplate> {
+        Vec::new()
+    }
 
     /// Returns all available prompts.
     ///

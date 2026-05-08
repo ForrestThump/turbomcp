@@ -12,20 +12,22 @@
 //! ## Feature Flags vs Runtime Negotiation
 //!
 //! Most MCP 2025-11-25 features are now **always available** (no feature flag needed).
-//! Only experimental features like the Tasks API require a feature flag:
+//! The protocol wire types and version adapters include the MCP 2025-11-25
+//! method surface. Convenience client/server helpers for task operations remain
+//! behind a feature flag:
 //! ```toml
 //! # Enable experimental Tasks API
 //! turbomcp-protocol = { version = "3.0", features = ["experimental-tasks"] }
 //! ```
 //!
-//! Runtime negotiation is exact-match only:
+//! Runtime negotiation is policy-driven by the server/client configuration:
 //! ```rust,ignore
 //! use turbomcp_protocol::{InitializeRequest, InitializeResult};
 //!
 //! // Client asks for the current spec
 //! let request = InitializeRequest { protocol_version: "2025-11-25".into(), ..Default::default() };
 //!
-//! // Server responds with the same version or rejects the request.
+//! // Server responds with a supported stable version or rejects the request.
 //! let response = InitializeResult { protocol_version: "2025-11-25".into(), ..Default::default() };
 //! ```
 

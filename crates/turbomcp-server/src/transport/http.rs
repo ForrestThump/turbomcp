@@ -32,19 +32,19 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
 use tower_http::limit::RequestBodyLimitLayer;
 use turbomcp_core::error::{McpError, McpResult};
 use turbomcp_core::handler::McpHandler;
-use turbomcp_core::jsonrpc::JsonRpcResponse as CoreJsonRpcResponse;
+use turbomcp_core::jsonrpc::{JsonRpcResponse as CoreJsonRpcResponse, JsonRpcResponsePayload};
 use turbomcp_transport::security::{
     OriginConfig, SecurityHeaders, extract_client_ip, extract_client_ip_with_trust, validate_origin,
 };
-use turbomcp_types::ProtocolVersion;
+use turbomcp_types::{ClientCapabilities, ProtocolVersion};
 use uuid::Uuid;
 
 use crate::config::{RateLimiter, ServerConfig};
-use crate::context::RequestContext;
+use crate::context::{McpSession, RequestContext, SessionFuture};
 use crate::router::{self, JsonRpcIncoming, JsonRpcOutgoing};
 
 /// Maximum HTTP request body size for MCP requests.
@@ -57,6 +57,15 @@ const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
 
 /// SSE keep-alive interval.
 const SSE_KEEP_ALIVE_SECS: u64 = 30;
+
+/// Maximum in-flight server-to-client requests per HTTP session.
+const MAX_PENDING_SERVER_REQUESTS: usize = 64;
+
+/// Timeout for server-to-client request responses over Streamable HTTP.
+const SERVER_REQUEST_TIMEOUT_SECS: u64 = 60;
+
+type PendingServerResponse = oneshot::Sender<McpResult<serde_json::Value>>;
+type PendingServerRequests = Arc<Mutex<HashMap<String, PendingServerResponse>>>;
 
 /// Per-session data tracked by SessionManager.
 ///
@@ -71,8 +80,14 @@ struct SessionData {
     subscribers: Vec<mpsc::UnboundedSender<String>>,
     /// Negotiated protocol version (set after successful initialize).
     protocol_version: Option<ProtocolVersion>,
+    /// Client capabilities captured from the successful initialize request.
+    client_capabilities: Option<ClientCapabilities>,
     /// Request IDs already used by the client within this session.
     seen_request_ids: HashSet<String>,
+    /// Pending responses for server-initiated requests sent over SSE.
+    pending_server_requests: PendingServerRequests,
+    /// Monotonic server request counter. IDs are rendered as `s-{n}`.
+    next_server_request_id: u64,
 }
 
 /// Session manager for SSE connections.
@@ -112,7 +127,10 @@ impl SessionManager {
             SessionData {
                 subscribers: Vec::new(),
                 protocol_version: None,
+                client_capabilities: None,
                 seen_request_ids,
+                pending_server_requests: Arc::new(Mutex::new(HashMap::new())),
+                next_server_request_id: 1,
             },
         );
 
@@ -155,7 +173,6 @@ impl SessionManager {
     /// exactly one of the session's currently connected streams (the most
     /// recently subscribed live one), dropping any closed senders along the
     /// way. Returns `true` if the message was delivered.
-    #[allow(dead_code)] // Reserved for server-initiated push (not yet wired)
     pub(crate) async fn send_to_session(&self, session_id: &str, message: &str) -> bool {
         let mut sessions = self.sessions.write().await;
         let Some(data) = sessions.get_mut(session_id) else {
@@ -211,10 +228,16 @@ impl SessionManager {
         self.sessions.read().await.len()
     }
 
-    /// Store the negotiated protocol version for a session.
-    pub(crate) async fn set_protocol_version(&self, session_id: &str, version: ProtocolVersion) {
+    /// Store the initialized protocol version and client capabilities.
+    pub(crate) async fn set_initialized(
+        &self,
+        session_id: &str,
+        version: ProtocolVersion,
+        client_capabilities: ClientCapabilities,
+    ) {
         if let Some(data) = self.sessions.write().await.get_mut(session_id) {
             data.protocol_version = Some(version);
+            data.client_capabilities = Some(client_capabilities);
         }
     }
 
@@ -225,6 +248,18 @@ impl SessionManager {
             .await
             .get(session_id)
             .and_then(|data| data.protocol_version.clone())
+    }
+
+    /// Retrieve initialized client capabilities for a session.
+    pub(crate) async fn get_client_capabilities(
+        &self,
+        session_id: &str,
+    ) -> Option<ClientCapabilities> {
+        self.sessions
+            .read()
+            .await
+            .get(session_id)
+            .and_then(|data| data.client_capabilities.clone())
     }
 
     /// Register a request ID for an existing session.
@@ -242,6 +277,186 @@ impl SessionManager {
             .await
             .get_mut(session_id)
             .is_some_and(|data| data.seen_request_ids.insert(request_id))
+    }
+
+    /// Register a pending server-to-client request and return its JSON-RPC id.
+    async fn register_pending_server_request(
+        &self,
+        session_id: &str,
+        response_tx: PendingServerResponse,
+    ) -> McpResult<String> {
+        let (request_id, pending) = {
+            let mut sessions = self.sessions.write().await;
+            let Some(data) = sessions.get_mut(session_id) else {
+                return Err(McpError::transport("HTTP session not found"));
+            };
+
+            let request_id = format!("s-{}", data.next_server_request_id);
+            data.next_server_request_id = data.next_server_request_id.saturating_add(1);
+            (request_id, Arc::clone(&data.pending_server_requests))
+        };
+
+        let mut pending = pending.lock().await;
+        if pending.len() >= MAX_PENDING_SERVER_REQUESTS {
+            return Err(McpError::server_overloaded());
+        }
+
+        pending.insert(request_id.clone(), response_tx);
+        Ok(request_id)
+    }
+
+    /// Remove a pending server request without completing it.
+    async fn remove_pending_server_request(&self, session_id: &str, request_id: &str) -> bool {
+        let Some(pending) = self.pending_server_requests(session_id).await else {
+            return false;
+        };
+
+        pending.lock().await.remove(request_id).is_some()
+    }
+
+    /// Complete a pending server request from a client POSTed JSON-RPC response.
+    async fn complete_pending_server_response(
+        &self,
+        session_id: &str,
+        response: CoreJsonRpcResponse,
+    ) -> Result<(), StatusCode> {
+        let Some(request_id) = response.id.as_request_id().map(ToString::to_string) else {
+            return Err(StatusCode::BAD_REQUEST);
+        };
+
+        let Some(pending) = self.pending_server_requests(session_id).await else {
+            return Err(StatusCode::NOT_FOUND);
+        };
+
+        let Some(response_tx) = pending.lock().await.remove(&request_id) else {
+            tracing::warn!(
+                session_id,
+                request_id,
+                "Received response for unknown HTTP server request"
+            );
+            return Err(StatusCode::BAD_REQUEST);
+        };
+
+        let result = match response.payload {
+            JsonRpcResponsePayload::Success { result } => Ok(result),
+            JsonRpcResponsePayload::Error { error } => {
+                Err(McpError::from_rpc_code(error.code, error.message))
+            }
+        };
+
+        response_tx
+            .send(result)
+            .map_err(|_| StatusCode::BAD_REQUEST)
+    }
+
+    async fn pending_server_requests(&self, session_id: &str) -> Option<PendingServerRequests> {
+        self.sessions
+            .read()
+            .await
+            .get(session_id)
+            .map(|data| Arc::clone(&data.pending_server_requests))
+    }
+}
+
+/// Bidirectional HTTP/SSE session handle used by request handlers.
+#[derive(Debug, Clone)]
+struct HttpSessionHandle {
+    session_id: String,
+    session_manager: SessionManager,
+    request_timeout: Duration,
+}
+
+impl HttpSessionHandle {
+    fn new(session_id: impl Into<String>, session_manager: SessionManager) -> Self {
+        Self {
+            session_id: session_id.into(),
+            session_manager,
+            request_timeout: Duration::from_secs(SERVER_REQUEST_TIMEOUT_SECS),
+        }
+    }
+}
+
+impl McpSession for HttpSessionHandle {
+    fn client_capabilities<'a>(&'a self) -> SessionFuture<'a, Option<ClientCapabilities>> {
+        Box::pin(async move {
+            Ok(self
+                .session_manager
+                .get_client_capabilities(&self.session_id)
+                .await)
+        })
+    }
+
+    fn call<'a>(
+        &'a self,
+        method: &'a str,
+        params: serde_json::Value,
+    ) -> SessionFuture<'a, serde_json::Value> {
+        Box::pin(async move {
+            let (response_tx, response_rx) = oneshot::channel();
+            let request_id = self
+                .session_manager
+                .register_pending_server_request(&self.session_id, response_tx)
+                .await?;
+
+            let request = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": method,
+                "params": params,
+            });
+            let payload = serde_json::to_string(&request)
+                .map_err(|e| McpError::serialization(e.to_string()))?;
+
+            if !self
+                .session_manager
+                .send_to_session(&self.session_id, &payload)
+                .await
+            {
+                self.session_manager
+                    .remove_pending_server_request(&self.session_id, &request_id)
+                    .await;
+                return Err(McpError::unavailable(
+                    "No active SSE stream for HTTP session",
+                ));
+            }
+
+            match tokio::time::timeout(self.request_timeout, response_rx).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(_)) => Err(McpError::transport("HTTP session response channel closed")),
+                Err(_) => {
+                    self.session_manager
+                        .remove_pending_server_request(&self.session_id, &request_id)
+                        .await;
+                    Err(McpError::timeout(format!(
+                        "Timed out waiting for response to server request {request_id}"
+                    )))
+                }
+            }
+        })
+    }
+
+    fn notify<'a>(&'a self, method: &'a str, params: serde_json::Value) -> SessionFuture<'a, ()> {
+        Box::pin(async move {
+            let notification = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": method,
+                "params": params,
+            });
+            let payload = serde_json::to_string(&notification)
+                .map_err(|e| McpError::serialization(e.to_string()))?;
+
+            if self
+                .session_manager
+                .send_to_session(&self.session_id, &payload)
+                .await
+            {
+                Ok(())
+            } else {
+                Err(McpError::unavailable(
+                    "No active SSE stream for HTTP session",
+                ))
+            }
+        })
     }
 }
 
@@ -469,9 +684,11 @@ async fn route_with_version_tracking<H: McpHandler>(
     config: Option<&ServerConfig>,
     session_id: Option<&str>,
 ) -> router::JsonRpcOutgoing {
-    let ctx = RequestContext::http();
+    let ctx = http_request_context(session_manager, session_id, request.id.as_ref());
 
     if request.method == "initialize" {
+        let client_capabilities =
+            super::client_capabilities_from_initialize_params(request.params.as_ref());
         let response = router::route_request_with_config(handler, request, &ctx, config).await;
 
         // If successful and we have a session, extract and store the negotiated version.
@@ -479,7 +696,9 @@ async fn route_with_version_tracking<H: McpHandler>(
             && let Some(version_str) = result.get("protocolVersion").and_then(|v| v.as_str())
         {
             let version = ProtocolVersion::from(version_str);
-            session_manager.set_protocol_version(sid, version).await;
+            session_manager
+                .set_initialized(sid, version, client_capabilities)
+                .await;
             tracing::debug!(
                 session_id = sid,
                 protocol_version = version_str,
@@ -499,6 +718,30 @@ async fn route_with_version_tracking<H: McpHandler>(
 
     // Pre-initialize or sessionless: route with config for proper validation.
     router::route_request_with_config(handler, request, &ctx, config).await
+}
+
+fn http_request_context(
+    session_manager: &SessionManager,
+    session_id: Option<&str>,
+    request_id: Option<&serde_json::Value>,
+) -> RequestContext {
+    let mut ctx = RequestContext::http();
+
+    if let Some(request_id) = request_id.and_then(super::request_id_key) {
+        ctx = ctx.with_request_id(request_id);
+    }
+
+    if let Some(session_id) = session_id {
+        let session = Arc::new(HttpSessionHandle::new(
+            session_id.to_string(),
+            session_manager.clone(),
+        )) as Arc<dyn McpSession>;
+        ctx = ctx
+            .with_session_id(session_id.to_string())
+            .with_session(session);
+    }
+
+    ctx
 }
 
 fn parse_session_id(headers: &HeaderMap) -> Option<String> {
@@ -660,6 +903,12 @@ async fn resolve_session_for_request<H: McpHandler>(
         return Ok(None);
     }
 
+    // MCP 2025-11-25 lifecycle permits ping before the server has responded
+    // to initialize. With no session yet, route it as a sessionless request.
+    if method == "ping" && session_id.is_none() {
+        return Ok(None);
+    }
+
     let Some(session_id) = session_id else {
         return Err(StatusCode::BAD_REQUEST);
     };
@@ -675,6 +924,47 @@ async fn resolve_session_for_request<H: McpHandler>(
     validate_protocol_header(headers, state.config.as_ref(), expected.as_ref())?;
 
     Ok(Some(session_id))
+}
+
+async fn resolve_session_for_response<H: McpHandler>(
+    state: &SseState<H>,
+    headers: &HeaderMap,
+) -> Result<String, StatusCode> {
+    let Some(session_id) = parse_session_id(headers) else {
+        return Err(StatusCode::BAD_REQUEST);
+    };
+
+    if !state.session_manager.has_session(&session_id).await {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let expected = state
+        .session_manager
+        .get_protocol_version(&session_id)
+        .await;
+    validate_protocol_header(headers, state.config.as_ref(), expected.as_ref())?;
+
+    Ok(session_id)
+}
+
+async fn handle_client_json_rpc_response<H: McpHandler>(
+    state: &SseState<H>,
+    headers: &HeaderMap,
+    response: CoreJsonRpcResponse,
+) -> Response {
+    let session_id = match resolve_session_for_response(state, headers).await {
+        Ok(session_id) => session_id,
+        Err(status) => return empty_response(status),
+    };
+
+    match state
+        .session_manager
+        .complete_pending_server_response(&session_id, response)
+        .await
+    {
+        Ok(()) => empty_response(StatusCode::ACCEPTED),
+        Err(status) => empty_response(status),
+    }
 }
 
 /// Axum handler for JSON-RPC requests (simple mode).
@@ -729,16 +1019,22 @@ async fn handle_json_rpc<H: McpHandler>(
         }
     };
 
-    let request = match serde_json::from_value::<JsonRpcIncoming>(payload.clone()) {
+    if let Ok(response) = serde_json::from_value::<CoreJsonRpcResponse>(payload.clone()) {
+        return handle_client_json_rpc_response(&state, &headers, response).await;
+    }
+
+    let request = match serde_json::from_value::<JsonRpcIncoming>(payload) {
         Ok(request) => request,
-        Err(_) => {
-            if serde_json::from_value::<CoreJsonRpcResponse>(payload).is_ok() {
-                return empty_response(StatusCode::ACCEPTED);
-            }
-            return empty_response(StatusCode::BAD_REQUEST);
-        }
+        Err(_) => return empty_response(StatusCode::BAD_REQUEST),
     };
     let is_initialize = request.method == "initialize";
+    let client_capabilities = if is_initialize {
+        Some(super::client_capabilities_from_initialize_params(
+            request.params.as_ref(),
+        ))
+    } else {
+        None
+    };
     let session_id = match resolve_session_for_request(&state, &headers, &request.method).await {
         Ok(session_id) => session_id,
         Err(status) => return empty_response(status),
@@ -783,7 +1079,11 @@ async fn handle_json_rpc<H: McpHandler>(
             .await;
         state
             .session_manager
-            .set_protocol_version(&session_id, ProtocolVersion::from(version_str))
+            .set_initialized(
+                &session_id,
+                ProtocolVersion::from(version_str),
+                client_capabilities.unwrap_or_default(),
+            )
             .await;
 
         let mut response = json_response(StatusCode::OK, response);

@@ -13,7 +13,7 @@ use turbomcp_core::context::RequestContext;
 use turbomcp_core::error::McpResult;
 use turbomcp_core::handler::McpHandler;
 use turbomcp_types::{
-    Prompt, PromptResult, Resource, ResourceResult, ServerInfo, Tool, ToolResult,
+    Prompt, PromptResult, Resource, ResourceResult, ResourceTemplate, ServerInfo, Tool, ToolResult,
 };
 
 /// Typed middleware trait with hooks for each MCP operation.
@@ -69,6 +69,14 @@ pub trait McpMiddleware: Send + Sync + 'static {
         next: Next<'a>,
     ) -> Pin<Box<dyn Future<Output = Vec<Resource>> + Send + 'a>> {
         Box::pin(async move { next.list_resources() })
+    }
+
+    /// Hook called when listing resource templates.
+    fn on_list_resource_templates<'a>(
+        &'a self,
+        next: Next<'a>,
+    ) -> Pin<Box<dyn Future<Output = Vec<ResourceTemplate>> + Send + 'a>> {
+        Box::pin(async move { next.list_resource_templates() })
     }
 
     /// Hook called when listing prompts.
@@ -188,6 +196,12 @@ impl<'a> Next<'a> {
         self.handler.dyn_list_resources()
     }
 
+    /// Forward `list_resource_templates` directly to the wrapped handler. See
+    /// [`Self::list_tools`] for the chaining caveat.
+    pub fn list_resource_templates(self) -> Vec<ResourceTemplate> {
+        self.handler.dyn_list_resource_templates()
+    }
+
     /// Forward `list_prompts` directly to the wrapped handler. See
     /// [`Self::list_tools`] for the chaining caveat.
     pub fn list_prompts(self) -> Vec<Prompt> {
@@ -265,6 +279,7 @@ trait DynHandler: Send + Sync {
     fn dyn_server_info(&self) -> ServerInfo;
     fn dyn_list_tools(&self) -> Vec<Tool>;
     fn dyn_list_resources(&self) -> Vec<Resource>;
+    fn dyn_list_resource_templates(&self) -> Vec<ResourceTemplate>;
     fn dyn_list_prompts(&self) -> Vec<Prompt>;
     fn dyn_call_tool<'a>(
         &'a self,
@@ -307,6 +322,10 @@ impl<H: McpHandler> DynHandler for HandlerWrapper<H> {
 
     fn dyn_list_resources(&self) -> Vec<Resource> {
         self.handler.list_resources()
+    }
+
+    fn dyn_list_resource_templates(&self) -> Vec<ResourceTemplate> {
+        self.handler.list_resource_templates()
     }
 
     fn dyn_list_prompts(&self) -> Vec<Prompt> {
@@ -421,6 +440,10 @@ impl<H: McpHandler> McpHandler for MiddlewareStack<H> {
 
     fn list_resources(&self) -> Vec<Resource> {
         self.handler.dyn_list_resources()
+    }
+
+    fn list_resource_templates(&self) -> Vec<ResourceTemplate> {
+        self.handler.dyn_list_resource_templates()
     }
 
     fn list_prompts(&self) -> Vec<Prompt> {

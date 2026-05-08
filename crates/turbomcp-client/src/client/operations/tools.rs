@@ -7,12 +7,22 @@ use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 
 use turbomcp_protocol::types::{
-    CallToolRequest, CallToolResult, Cursor, ListToolsRequest, ListToolsResult, Tool,
+    CallToolRequest, CallToolResult, CreateTaskResult, Cursor, ListToolsRequest, ListToolsResult,
+    TaskMetadata, Tool,
 };
 use turbomcp_protocol::{Error, Result};
 
 /// Maximum number of pagination pages to prevent infinite loops from misbehaving servers.
 const MAX_PAGINATION_PAGES: usize = 1000;
+
+/// Response shape for `tools/call`.
+#[derive(Debug, Clone)]
+pub enum CallToolResponse {
+    /// Immediate tool result.
+    Result(CallToolResult),
+    /// Task handle for task-augmented execution.
+    Task(CreateTaskResult),
+}
 
 impl<T: turbomcp_transport::Transport + 'static> super::super::core::Client<T> {
     /// List all available tools from the MCP server
@@ -126,7 +136,9 @@ impl<T: turbomcp_transport::Transport + 'static> super::super::core::Client<T> {
     ///
     /// * `name` - The name of the tool to call
     /// * `arguments` - Optional arguments to pass to the tool
-    /// * `task` - Optional task metadata for task-augmented requests (MCP 2025-11-25 draft)
+    /// * `task` - Must be `None`; task-augmented calls return `CreateTaskResult`.
+    ///   Use [`Self::call_tool_task`] or [`Self::call_tool_response`] for task
+    ///   execution.
     ///
     /// # Returns
     ///
@@ -135,7 +147,6 @@ impl<T: turbomcp_transport::Transport + 'static> super::super::core::Client<T> {
     /// - `is_error: Option<bool>` - Whether the tool execution resulted in an error
     /// - `structured_content: Option<serde_json::Value>` - Schema-validated structured output
     /// - `_meta: Option<serde_json::Value>` - Metadata for client applications (not exposed to LLMs)
-    /// - `task_id: Option<String>` - Task identifier if task-augmented
     ///
     /// # Examples
     ///
@@ -161,12 +172,37 @@ impl<T: turbomcp_transport::Transport + 'static> super::super::core::Client<T> {
         &self,
         name: &str,
         arguments: Option<HashMap<String, serde_json::Value>>,
-        task: Option<turbomcp_protocol::types::tasks::TaskMetadata>,
+        task: Option<TaskMetadata>,
     ) -> Result<CallToolResult> {
+        if task.is_some() {
+            return Err(Error::invalid_request(
+                "task-augmented tools/call returns CreateTaskResult; use call_tool_task or call_tool_response",
+            ));
+        }
+
+        match self.call_tool_response(name, arguments, None).await? {
+            CallToolResponse::Result(result) => Ok(result),
+            CallToolResponse::Task(_) => Err(Error::invalid_request(
+                "task-augmented tools/call returned CreateTaskResult; use call_tool_task or call_tool_response",
+            )),
+        }
+    }
+
+    /// Call a tool and preserve the spec-level response variant.
+    ///
+    /// MCP 2025-11-25 task-augmented `tools/call` returns `CreateTaskResult`
+    /// immediately. Non-task calls return `CallToolResult`.
+    pub async fn call_tool_response(
+        &self,
+        name: &str,
+        arguments: Option<HashMap<String, serde_json::Value>>,
+        task: Option<TaskMetadata>,
+    ) -> Result<CallToolResponse> {
         if !self.inner.initialized.load(Ordering::Relaxed) {
             return Err(Error::invalid_request("Client not initialized"));
         }
 
+        let is_task_augmented = task.is_some();
         let request_data = CallToolRequest {
             name: name.to_string(),
             arguments: Some(arguments.unwrap_or_default()),
@@ -174,13 +210,40 @@ impl<T: turbomcp_transport::Transport + 'static> super::super::core::Client<T> {
             _meta: None,
         };
 
-        // Core protocol call
-        let result: CallToolResult = self
+        let raw_result: serde_json::Value = self
             .inner
             .protocol
             .request("tools/call", Some(serde_json::to_value(&request_data)?))
             .await?;
 
-        Ok(result) // Return full CallToolResult - MCP spec compliant!
+        if is_task_augmented {
+            serde_json::from_value(raw_result)
+                .map(CallToolResponse::Task)
+                .map_err(|e| {
+                    Error::internal(format!("Failed to deserialize CreateTaskResult: {e}"))
+                })
+        } else {
+            serde_json::from_value(raw_result)
+                .map(CallToolResponse::Result)
+                .map_err(|e| Error::internal(format!("Failed to deserialize CallToolResult: {e}")))
+        }
+    }
+
+    /// Call a tool using MCP task-augmented execution.
+    ///
+    /// Returns the created task handle. Retrieve the final result with the
+    /// Tasks API once the server reports completion.
+    pub async fn call_tool_task(
+        &self,
+        name: &str,
+        arguments: Option<HashMap<String, serde_json::Value>>,
+        task: TaskMetadata,
+    ) -> Result<CreateTaskResult> {
+        match self.call_tool_response(name, arguments, Some(task)).await? {
+            CallToolResponse::Task(result) => Ok(result),
+            CallToolResponse::Result(_) => Err(Error::invalid_request(
+                "task-augmented tools/call returned CallToolResult instead of CreateTaskResult",
+            )),
+        }
     }
 }

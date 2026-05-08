@@ -100,15 +100,6 @@ pub struct CallToolResult {
     /// exposed to LLMs (tracking IDs, metrics, cache status, etc.).
     #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
     pub meta: Option<HashMap<String, Value>>,
-    /// Optional task ID when tool execution is augmented with task tracking
-    /// (MCP 2025-11-25 draft — SEP-1686).
-    ///
-    /// When a tool call includes task metadata, the server creates a task to
-    /// track the operation and returns the `task_id` here. Clients use this to
-    /// monitor progress via `tasks/get` or retrieve final results via
-    /// `tasks/result`.
-    #[serde(rename = "taskId", skip_serializing_if = "Option::is_none")]
-    pub task_id: Option<String>,
 }
 
 impl CallToolResult {

@@ -27,7 +27,7 @@ use turbomcp_core::context::RequestContext;
 use turbomcp_core::error::{McpError, McpResult};
 use turbomcp_core::handler::McpHandler;
 use turbomcp_types::{
-    Prompt, PromptResult, Resource, ResourceResult, ServerInfo, Tool, ToolResult,
+    Prompt, PromptResult, Resource, ResourceResult, ResourceTemplate, ServerInfo, Tool, ToolResult,
 };
 
 /// A composite handler that mounts multiple handlers with prefixes.
@@ -82,6 +82,10 @@ impl<H: McpHandler> HandlerWrapper<H> {
         self.handler.list_resources()
     }
 
+    fn list_resource_templates(&self) -> Vec<ResourceTemplate> {
+        self.handler.list_resource_templates()
+    }
+
     fn list_prompts(&self) -> Vec<Prompt> {
         self.handler.list_prompts()
     }
@@ -122,6 +126,7 @@ trait DynHandler: Send + Sync {
     fn dyn_clone(&self) -> Box<dyn DynHandler>;
     fn dyn_list_tools(&self) -> Vec<Tool>;
     fn dyn_list_resources(&self) -> Vec<Resource>;
+    fn dyn_list_resource_templates(&self) -> Vec<ResourceTemplate>;
     fn dyn_list_prompts(&self) -> Vec<Prompt>;
     fn dyn_call_tool<'a>(
         &'a self,
@@ -153,6 +158,10 @@ impl<H: McpHandler> DynHandler for HandlerWrapper<H> {
 
     fn dyn_list_resources(&self) -> Vec<Resource> {
         self.list_resources()
+    }
+
+    fn dyn_list_resource_templates(&self) -> Vec<ResourceTemplate> {
+        self.list_resource_templates()
     }
 
     fn dyn_list_prompts(&self) -> Vec<Prompt> {
@@ -327,6 +336,11 @@ impl CompositeHandler {
         format!("{}://{}", prefix, uri)
     }
 
+    /// Prefix a resource URI template.
+    fn prefix_resource_template_uri(prefix: &str, uri_template: &str) -> String {
+        format!("{}://{}", prefix, uri_template)
+    }
+
     /// Prefix a prompt name.
     fn prefix_prompt_name(prefix: &str, name: &str) -> String {
         format!("{}_{}", prefix, name)
@@ -421,6 +435,18 @@ impl McpHandler for CompositeHandler {
             }
         }
         resources
+    }
+
+    fn list_resource_templates(&self) -> Vec<ResourceTemplate> {
+        let mut templates = Vec::new();
+        for mounted in self.handlers.iter() {
+            for mut template in mounted.handler.dyn_list_resource_templates() {
+                template.uri_template =
+                    Self::prefix_resource_template_uri(&mounted.prefix, &template.uri_template);
+                templates.push(template);
+            }
+        }
+        templates
     }
 
     fn list_prompts(&self) -> Vec<Prompt> {

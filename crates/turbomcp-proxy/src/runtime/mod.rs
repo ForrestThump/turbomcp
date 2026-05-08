@@ -1318,6 +1318,19 @@ impl RuntimeProxy {
                 }))
             }
 
+            "resources/templates/list" => {
+                debug!("Forwarding resources/templates/list to backend");
+                let resource_templates = self
+                    .backend
+                    .list_resource_templates()
+                    .await
+                    .map_err(|e| McpError::internal(e.to_string()))?;
+
+                Ok(serde_json::json!({
+                    "resourceTemplates": resource_templates
+                }))
+            }
+
             "resources/read" => {
                 debug!("Forwarding resources/read to backend");
                 let params = request.params.as_ref().ok_or_else(|| {

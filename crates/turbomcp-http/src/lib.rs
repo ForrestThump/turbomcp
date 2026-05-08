@@ -10,7 +10,7 @@
 //! - **MCP 2025-11-25 Specification Compliance**: Full implementation of the streamable HTTP spec
 //! - **Single Endpoint Design**: All communication through one MCP endpoint
 //! - **SSE Support**: Server-Sent Events for server-to-client streaming
-//! - **Endpoint Discovery**: Automatic endpoint URI discovery via SSE events
+//! - **Legacy SSE Compatibility**: Optional support for older `endpoint` SSE events
 //! - **Session Management**: Mcp-Session-Id header support for session tracking
 //! - **Auto-Reconnect**: Configurable retry policies with exponential backoff
 //! - **Last-Event-ID Resumability**: Resume SSE streams from last received event
@@ -45,10 +45,9 @@
 //! ## MCP Protocol Flow
 //!
 //! 1. Client connects and optionally opens SSE stream (GET with Accept: text/event-stream)
-//! 2. Server may send "endpoint" event with message endpoint URI
-//! 3. Client sends requests via POST to message endpoint
-//! 4. Server responds with JSON or SSE stream (Accept header negotiation)
-//! 5. Client terminates session with DELETE request
+//! 2. Client sends requests via POST to the MCP endpoint
+//! 3. Server responds with JSON or SSE stream (Accept header negotiation)
+//! 4. Client terminates session with DELETE request
 //!
 //! ## Configuration Options
 //!

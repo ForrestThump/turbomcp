@@ -13,7 +13,7 @@ mod streamable_http_client_tests {
     use bytes::Bytes;
     use std::time::Duration;
     use turbomcp_protocol::MessageId;
-    use turbomcp_transport::core::{Transport, TransportMessage};
+    use turbomcp_transport::core::{Transport, TransportMessage, TransportState};
     use turbomcp_transport::streamable_http_client::{
         RetryPolicy, StreamableHttpClientConfig, StreamableHttpClientTransport,
     };
@@ -65,6 +65,40 @@ mod streamable_http_client_tests {
             MessageId::from("notification".to_string()),
             Bytes::from(serde_json::to_vec(&json).unwrap()),
         )
+    }
+
+    #[tokio::test]
+    async fn test_connect_does_not_require_legacy_endpoint_event() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/mcp"))
+            .and(header("Accept", "text/event-stream"))
+            .respond_with(ResponseTemplate::new(405))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let config = StreamableHttpClientConfig {
+            base_url: mock_server.uri(),
+            endpoint_path: "/mcp".to_string(),
+            timeout: Duration::from_millis(50),
+            retry_policy: RetryPolicy::Fixed {
+                interval: Duration::from_secs(60),
+                max_attempts: Some(1),
+            },
+            protocol_version: "2025-11-25".to_string(),
+            ..Default::default()
+        };
+
+        let transport = StreamableHttpClientTransport::new(config).expect("test config builds");
+
+        transport.connect().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(25)).await;
+
+        assert_eq!(transport.state().await, TransportState::Connected);
+
+        transport.disconnect().await.unwrap();
     }
 
     #[tokio::test]

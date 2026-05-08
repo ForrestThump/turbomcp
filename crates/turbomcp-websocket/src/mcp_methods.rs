@@ -402,7 +402,7 @@ mod tests {
         let transport = WebSocketBidirectionalTransport::new(config).await.unwrap();
 
         let request = PingRequest {
-            params: turbomcp_protocol::types::PingParams { data: None },
+            params: turbomcp_protocol::types::PingParams::default(),
         };
         let result = transport.send_ping(request, None).await;
 

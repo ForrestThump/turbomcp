@@ -20,6 +20,7 @@ use core::future::Future;
 use core::pin::Pin;
 
 use serde_json::Value;
+use turbomcp_types::ClientCapabilities;
 
 use crate::error::McpResult;
 use crate::marker::{MaybeSend, MaybeSync};
@@ -54,6 +55,15 @@ pub type SessionFuture<'a, T> = Pin<Box<dyn Future<Output = McpResult<T>> + 'a>>
 /// }
 /// ```
 pub trait McpSession: Debug + MaybeSend + MaybeSync {
+    /// Client capabilities captured during MCP initialization, when known.
+    ///
+    /// Transport-provided sessions should return `Some` after a successful
+    /// initialize handshake so handler helpers can enforce server-initiated
+    /// request capability requirements.
+    fn client_capabilities<'a>(&'a self) -> SessionFuture<'a, Option<ClientCapabilities>> {
+        Box::pin(async move { Ok(None) })
+    }
+
     /// Send a JSON-RPC request to the client and await its response.
     ///
     /// Used for round-trip operations such as `sampling/createMessage` and

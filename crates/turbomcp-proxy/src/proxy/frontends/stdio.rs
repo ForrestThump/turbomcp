@@ -166,6 +166,7 @@ impl StdioFrontend {
                 self.backend.call_tool(name, arguments).await
             }
             "resources/list" => self.backend.list_resources().await,
+            "resources/templates/list" => self.backend.list_resource_templates().await,
             "resources/read" => {
                 let params = request.params.ok_or_else(|| {
                     turbomcp_protocol::Error::invalid_params("Missing params for resources/read")

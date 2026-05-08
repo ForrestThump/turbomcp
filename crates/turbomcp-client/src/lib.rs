@@ -163,6 +163,7 @@ pub mod sampling;
 pub mod middleware;
 
 // Re-export key types for convenience
+pub use client::operations::tools::CallToolResponse;
 pub use client::{ConnectionInfo, ConnectionState, ManagerConfig, ServerGroup, SessionManager};
 
 use std::sync::Arc;

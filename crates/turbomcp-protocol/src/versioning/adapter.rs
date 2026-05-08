@@ -163,6 +163,10 @@ impl VersionAdapter for V2025_06_18Adapter {
                 strip_from_array(&mut result, "resources", &["icons"]);
                 result
             }
+            "resources/templates/list" => {
+                strip_from_array(&mut result, "resourceTemplates", &["icons"]);
+                result
+            }
             _ => result,
         }
     }
@@ -274,6 +278,7 @@ static METHODS_2025_06_18: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
         "tools/list",
         "tools/call",
         "resources/list",
+        "resources/templates/list",
         "resources/read",
         "resources/subscribe",
         "resources/unsubscribe",
@@ -536,6 +541,27 @@ mod tests {
         let resource = &filtered["resources"][0];
         assert!(resource.get("uri").is_some());
         assert!(resource.get("icons").is_none(), "icons should be stripped");
+    }
+
+    #[test]
+    fn test_v2025_06_18_supports_and_strips_resource_templates() {
+        let adapter = V2025_06_18Adapter;
+        assert!(adapter.validate_method("resources/templates/list").is_ok());
+
+        let result = json!({
+            "resourceTemplates": [
+                {
+                    "uriTemplate": "file://{path}",
+                    "name": "file",
+                    "icons": [{ "src": "https://example.com/icon.png" }]
+                }
+            ]
+        });
+
+        let filtered = adapter.filter_result("resources/templates/list", result);
+        let template = &filtered["resourceTemplates"][0];
+        assert_eq!(template["uriTemplate"], "file://{path}");
+        assert!(template.get("icons").is_none(), "icons should be stripped");
     }
 
     #[test]

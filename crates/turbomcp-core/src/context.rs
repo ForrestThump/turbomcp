@@ -33,7 +33,7 @@ use crate::session::Cancellable;
 #[cfg(feature = "std")]
 use std::time::Instant;
 
-use turbomcp_types::{CreateMessageRequest, CreateMessageResult, ElicitResult};
+use turbomcp_types::{ClientCapabilities, CreateMessageRequest, CreateMessageResult, ElicitResult};
 
 /// Transport type identifier.
 ///
@@ -531,6 +531,7 @@ impl RequestContext {
     /// [`McpError::capability_not_supported`] on unidirectional transports.
     pub async fn sample(&self, request: CreateMessageRequest) -> McpResult<CreateMessageResult> {
         let session = self.require_session("sampling/createMessage")?;
+        self.require_sampling_capability(session, &request).await?;
         let params = serde_json::to_value(request).map_err(|e| {
             McpError::invalid_params(alloc::format!("Failed to serialize sampling request: {e}"))
         })?;
@@ -546,6 +547,7 @@ impl RequestContext {
         schema: Value,
     ) -> McpResult<ElicitResult> {
         let session = self.require_session("elicitation/create")?;
+        self.require_elicitation_capability(session, "form").await?;
         let params = serde_json::json!({
             "mode": "form",
             "message": message.into(),
@@ -565,6 +567,7 @@ impl RequestContext {
         elicitation_id: impl Into<String>,
     ) -> McpResult<ElicitResult> {
         let session = self.require_session("elicitation/create")?;
+        self.require_elicitation_capability(session, "url").await?;
         let params = serde_json::json!({
             "mode": "url",
             "message": message.into(),
@@ -590,6 +593,75 @@ impl RequestContext {
             ))
         })
     }
+
+    async fn require_sampling_capability(
+        &self,
+        session: &Arc<dyn McpSession>,
+        request: &CreateMessageRequest,
+    ) -> McpResult<()> {
+        let Some(caps) = session.client_capabilities().await? else {
+            return Ok(());
+        };
+
+        let Some(sampling) = caps.sampling.as_ref() else {
+            return Err(McpError::capability_not_supported(
+                "client sampling capability required for sampling/createMessage",
+            ));
+        };
+
+        if (request.tools.is_some() || request.tool_choice.is_some()) && sampling.tools.is_none() {
+            return Err(McpError::capability_not_supported(
+                "client sampling.tools capability required for tool-enabled sampling/createMessage",
+            ));
+        }
+
+        if request.task.is_some() && !client_supports_task_sampling(&caps) {
+            return Err(McpError::capability_not_supported(
+                "client tasks.requests.sampling.createMessage capability required for task-augmented sampling/createMessage",
+            ));
+        }
+
+        Ok(())
+    }
+
+    async fn require_elicitation_capability(
+        &self,
+        session: &Arc<dyn McpSession>,
+        mode: &str,
+    ) -> McpResult<()> {
+        let Some(caps) = session.client_capabilities().await? else {
+            return Ok(());
+        };
+
+        let Some(elicitation) = caps.elicitation.as_ref() else {
+            return Err(McpError::capability_not_supported(
+                "client elicitation capability required for elicitation/create",
+            ));
+        };
+
+        let supported = match mode {
+            "form" => elicitation.supports_form(),
+            "url" => elicitation.supports_url(),
+            _ => false,
+        };
+
+        if supported {
+            Ok(())
+        } else {
+            Err(McpError::capability_not_supported(alloc::format!(
+                "client elicitation.{mode} capability required for elicitation/create"
+            )))
+        }
+    }
+}
+
+fn client_supports_task_sampling(caps: &ClientCapabilities) -> bool {
+    caps.tasks
+        .as_ref()
+        .and_then(|tasks| tasks.requests.as_ref())
+        .and_then(|requests| requests.sampling.as_ref())
+        .and_then(|sampling| sampling.create_message.as_ref())
+        .is_some()
 }
 
 // ====================================================================

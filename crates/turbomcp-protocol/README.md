@@ -21,7 +21,7 @@ Model Context Protocol (MCP) implementation for MCP `2025-11-25`, with JSON-RPC 
 - [Usage](#usage)
 - [Message Flow](#message-flow)
 - [Feature Flags](#feature-flags)
-  - [MCP 2025-11-25 Draft Features](#mcp-2025-11-25-draft-specification-features)
+  - [Optional Features](#optional-features)
 - [Supported MCP Methods](#supported-mcp-methods)
 - [Integration](#integration)
 
@@ -31,23 +31,26 @@ Model Context Protocol (MCP) implementation for MCP `2025-11-25`, with JSON-RPC 
 
 ### MCP Version Support
 
-TurboMCP v3.0 targets MCP `2025-11-25`.
-Core protocol capabilities are enabled by default, and runtime negotiation is exact-match only.
+TurboMCP v3 targets MCP `2025-11-25` as the latest stable protocol and keeps
+adapter support for `2025-06-18` compatibility. Core protocol capabilities are
+enabled by default; runtime negotiation policy is configured by the server or
+client transport layer.
 
 | Spec Version | Status | Notes |
 |--------------|--------|-------|
 | **MCP 2025-11-25** | ✅ Full Support | Canonical v3 protocol surface |
+| **MCP 2025-06-18** | ✅ Compatibility | Supported through version adapters |
 
 **Quick Start:**
 ```toml
 [dependencies]
-turbomcp-protocol = "3.1.3"
+turbomcp-protocol = "3.1.4"
 ```
 
 Only the experimental Tasks API (SEP-1686) requires a feature flag:
 ```toml
 [dependencies]
-turbomcp-protocol = { version = "3.1.3", features = ["experimental-tasks"] }
+turbomcp-protocol = { version = "3.1.4", features = ["experimental-tasks"] }
 ```
 
 ## Key Features
@@ -456,7 +459,7 @@ sequenceDiagram
 
 ### Protocol Version
 
-TurboMCP v3 targets MCP `2025-11-25`. The default `VersionManager`
+TurboMCP v3 targets MCP `2025-11-25` as the latest stable version. The default `VersionManager`
 (`VersionManager::default()` / `Version::known_versions()`) advertises
 the stable set — `2025-06-18` and `2025-11-25` — and negotiates exact
 matches (newest is selected as current).
@@ -477,7 +480,7 @@ All core MCP 2025-11-25 features are now always available - no feature flags nee
 
 ```toml
 [dependencies]
-turbomcp-protocol = "3.1.3"  # All core features included
+turbomcp-protocol = "3.1.4"  # All core features included
 ```
 
 ### Runtime Version Negotiation
@@ -527,7 +530,7 @@ turbomcp-protocol = { version = "2.x", features = ["mcp-url-elicitation", "mcp-i
 
 **After (v3.0):**
 ```toml
-turbomcp-protocol = "3.1.3"  # All features included by default
+turbomcp-protocol = "3.1.4"  # All features included by default
 ```
 
 **Example:**
@@ -589,11 +592,11 @@ These MCP 2025-11-25 features are now **always available** - no feature flag nee
 | Icons | SEP-973 | Icon metadata for tools/resources/prompts |
 | Enum Improvements | SEP-1330 | Standards-based enum schemas (oneOf, anyOf) |
 
-#### Experimental Features (Require Feature Flag)
+#### Optional Features
 
 | Feature | SEP | Description | Enabled by Default |
 |---------|-----|-------------|--------------------|
-| `experimental-tasks` | SEP-1686 | Experimental Tasks API for durable long-running requests | ❌ |
+| `experimental-tasks` | SEP-1686 | Convenience APIs for durable task operations; wire types are available | ❌ |
 
 **Legend:**
 - ✅ : Always enabled (core feature)
@@ -612,31 +615,31 @@ primitives needed by the protocol layer itself (see
 **Minimal build (stable spec only):**
 ```toml
 [dependencies]
-turbomcp-protocol = { version = "3.1.3", default-features = false, features = ["std"] }
+turbomcp-protocol = { version = "3.1.4", default-features = false, features = ["std"] }
 ```
 
 **High-performance build:**
 ```toml
 [dependencies]
-turbomcp-protocol = { version = "3.1.3", features = ["simd", "zero-copy", "lock-free"] }
+turbomcp-protocol = { version = "3.1.4", features = ["simd", "zero-copy", "lock-free"] }
 ```
 
 **Observable production build:**
 ```toml
 [dependencies]
-turbomcp-protocol = { version = "3.1.3", features = ["simd", "tracing", "metrics"] }
+turbomcp-protocol = { version = "3.1.4", features = ["simd", "tracing", "metrics"] }
 ```
 
 **Full MCP 2025-11-25 support (default):**
 ```toml
 [dependencies]
-turbomcp-protocol = "3.1.3"  # All core features included
+turbomcp-protocol = "3.1.4"  # All core features included
 ```
 
 **With experimental Tasks API:**
 ```toml
 [dependencies]
-turbomcp-protocol = { version = "3.1.3", features = ["experimental-tasks"] }
+turbomcp-protocol = { version = "3.1.4", features = ["experimental-tasks"] }
 ```
 
 ## Supported MCP Methods

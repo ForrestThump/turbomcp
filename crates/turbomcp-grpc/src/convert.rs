@@ -855,7 +855,7 @@ impl TryFrom<CallToolResult> for proto::CallToolResult {
     type Error = GrpcError;
 
     fn try_from(result: CallToolResult) -> GrpcResult<Self> {
-        // Note: structured_content, task_id, _meta are protocol-only fields
+        // Note: structured_content and _meta are protocol-only fields
         // that don't round-trip through proto (no wire slot for them).
         let content: Result<Vec<_>, _> =
             result.content.into_iter().map(TryInto::try_into).collect();
@@ -879,7 +879,6 @@ impl TryFrom<proto::CallToolResult> for CallToolResult {
             is_error: result.is_error,
             structured_content: None,
             meta: None,
-            task_id: None,
         })
     }
 }

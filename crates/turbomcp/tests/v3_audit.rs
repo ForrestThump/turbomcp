@@ -30,10 +30,14 @@ async fn test_v3_server_compilation_and_execution() {
     assert_eq!(tools.len(), 1);
     assert_eq!(tools[0].name, "add");
 
-    // Check resources
+    // Templated resources are exposed through resources/templates/list, not as
+    // concrete resources/list entries.
     let resources = server.list_resources();
-    assert_eq!(resources.len(), 1);
-    assert_eq!(resources[0].name, "get_test");
+    assert!(resources.is_empty());
+    let templates = server.list_resource_templates();
+    assert_eq!(templates.len(), 1);
+    assert_eq!(templates[0].name, "get_test");
+    assert_eq!(templates[0].uri_template, "file://{name}");
 
     // Test tool execution
     let ctx = RequestContext::stdio();

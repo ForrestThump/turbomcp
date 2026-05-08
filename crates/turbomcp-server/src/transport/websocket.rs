@@ -418,6 +418,21 @@ async fn handle_websocket<H: McpHandler>(
                     continue;
                 }
 
+                if parsed.method == "ping"
+                    && matches!(session_state, SessionState::Uninitialized)
+                {
+                    // Lifecycle permits ping before initialize has completed.
+                    let ctx = RequestContext::websocket();
+                    let response = router::route_request(&handler, parsed, &ctx).await;
+                    if response.should_send()
+                        && let Ok(response_str) = router::serialize_response(&response)
+                        && sender.send(Message::Text(response_str.into())).await.is_err()
+                    {
+                        break;
+                    }
+                    continue;
+                }
+
                 // All other methods: enforce post-init gating and id-uniqueness,
                 // then spawn the handler so the receive loop keeps draining
                 // (notably `notifications/cancelled` from the same client).
