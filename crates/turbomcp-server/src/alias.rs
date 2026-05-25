@@ -253,8 +253,9 @@ pub struct AliasLayer<H> {
     inner: H,
     /// Map from alias name → Alias definition for O(1) call dispatch.
     alias_map: HashMap<String, Alias>,
-    /// Pre-built Tool definitions for resolved aliases, used to extend list_tools.
-    alias_tools: Vec<Tool>,
+    /// Pre-merged tool list: filtered inner tools followed by alias tools.
+    /// Built once at construction; `list_tools()` clones this directly.
+    tools: Vec<Tool>,
 }
 
 impl<H: McpHandler> AliasLayer<H> {
@@ -264,8 +265,9 @@ impl<H: McpHandler> AliasLayer<H> {
     /// definitions. See the struct-level docs for construction-time warnings.
     pub fn new(inner: H, config: AliasConfig) -> Self {
         let inner_tools = inner.list_tools();
-        let mut alias_map: HashMap<String, Alias> = HashMap::new();
-        let mut alias_tools: Vec<Tool> = Vec::new();
+        let hint = config.aliases.len();
+        let mut alias_map: HashMap<String, Alias> = HashMap::with_capacity(hint);
+        let mut alias_tools: Vec<Tool> = Vec::with_capacity(hint);
 
         for alias in config.aliases {
             // Skip duplicate alias names — first definition wins.
@@ -301,10 +303,19 @@ impl<H: McpHandler> AliasLayer<H> {
             }
         }
 
+        // Merge into a single pre-built list: inner tools (minus any shadowed by an alias)
+        // followed by the alias tools. This is cloned on every list_tools() call, so building
+        // it once here avoids re-filtering and re-allocating on each invocation.
+        let tools: Vec<Tool> = inner_tools
+            .into_iter()
+            .filter(|t| !alias_map.contains_key(&t.name))
+            .chain(alias_tools)
+            .collect();
+
         Self {
             inner,
             alias_map,
-            alias_tools,
+            tools,
         }
     }
 
@@ -346,7 +357,7 @@ impl<H: McpHandler> McpHandler for AliasLayer<H> {
     fn server_capabilities(&self) -> ServerCapabilities {
         let mut caps = self.inner.server_capabilities();
 
-        caps.tools = if !self.list_tools().is_empty() {
+        caps.tools = if !self.tools.is_empty() {
             Some(ToolsCapabilities {
                 list_changed: Some(true),
             })
@@ -379,16 +390,7 @@ impl<H: McpHandler> McpHandler for AliasLayer<H> {
     }
 
     fn list_tools(&self) -> Vec<Tool> {
-        // Inner tools whose names are shadowed by an alias are filtered out,
-        // ensuring the listing contains no duplicate names.
-        let mut tools: Vec<Tool> = self
-            .inner
-            .list_tools()
-            .into_iter()
-            .filter(|t| !self.alias_map.contains_key(&t.name))
-            .collect();
-        tools.extend_from_slice(&self.alias_tools);
-        tools
+        self.tools.clone()
     }
 
     fn list_resources(&self) -> Vec<Resource> {
