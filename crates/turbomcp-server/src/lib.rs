@@ -92,6 +92,7 @@
 // to improve API documentation quality for enterprise adoption
 
 // Core modules
+pub mod alias;
 mod builder;
 mod composite;
 mod config;
@@ -103,6 +104,9 @@ mod visibility;
 
 /// Transport implementations for different protocols.
 pub mod transport;
+
+/// Dynamic tool aliasing via config file.
+pub use alias::{Alias, AliasConfig, AliasConfigError, AliasLayer};
 
 /// Progressive disclosure through component visibility control.
 pub use visibility::{VisibilityLayer, VisibilitySessionGuard};
@@ -173,8 +177,8 @@ pub mod __macro_support {
 pub mod prelude {
     // Core traits
     pub use super::{
-        CompositeHandler, McpHandler, McpHandlerExt, McpMiddleware, McpServerExt, MiddlewareStack,
-        VisibilityLayer, VisibilitySessionGuard,
+        Alias, AliasConfig, AliasLayer, CompositeHandler, McpHandler, McpHandlerExt, McpMiddleware,
+        McpServerExt, MiddlewareStack, VisibilityLayer, VisibilitySessionGuard,
     };
 
     // Builder and transport

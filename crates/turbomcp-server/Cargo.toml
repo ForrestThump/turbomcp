@@ -35,6 +35,7 @@ tracing = { workspace = true }
 
 # Utilities
 thiserror = { workspace = true }
+toml = "0.8"
 bytes = { workspace = true }
 parking_lot = { workspace = true }
 uuid = { workspace = true }

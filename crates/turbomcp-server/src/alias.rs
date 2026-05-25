@@ -1,0 +1,738 @@
+//! Dynamic tool aliasing via config file.
+//!
+//! This module lets an implementing MCP server define tool aliases in a config
+//! file at startup — no recompilation required. Each alias appears to the model
+//! as a first-class tool; the indirection is completely invisible.
+//!
+//! # How it works
+//!
+//! An alias maps a new tool name to an existing tool, optionally pre-filling
+//! some arguments. At construction time, [`AliasLayer`] calls `list_tools()` on
+//! the inner handler, strips the pre-filled keys from the schema of each
+//! aliased tool, and caches the resulting [`Tool`] definitions. The model
+//! only ever sees the alias name and the reduced schema.
+//!
+//! When the model calls an alias, [`AliasLayer`] injects the preset arguments
+//! (preset values always win) and forwards the call to the real tool under its
+//! original name.
+//!
+//! # Example config (TOML)
+//!
+//! ```toml
+//! [[aliases]]
+//! name = "show_listings"
+//! tool = "search_where"
+//! description = "Find all active property listings"
+//!
+//! [aliases.preset_args]
+//! front_matter = "listing"
+//!
+//! [[aliases]]
+//! name = "find_expired"
+//! tool = "search_where"
+//! description = "Find all expired listings"
+//!
+//! [aliases.preset_args]
+//! front_matter = "listing"
+//! status = "expired"
+//! ```
+//!
+//! # Example usage
+//!
+//! ```rust,ignore
+//! use turbomcp_server::alias::{AliasConfig, AliasLayer};
+//!
+//! let config = AliasConfig::from_file("server-config.toml")?;
+//! let handler = MyServer::new();
+//! let with_aliases = AliasLayer::new(handler, config);
+//! with_aliases.serve().await?;
+//! ```
+
+use std::collections::HashMap;
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use turbomcp_core::{
+    context::RequestContext,
+    error::McpResult,
+    handler::McpHandler,
+};
+use turbomcp_types::{
+    Prompt, PromptResult, Resource, ResourceResult, ResourceTemplate, Tool, ToolInputSchema,
+    ToolResult,
+};
+
+/// A single tool alias definition.
+///
+/// Aliases are typically loaded from a TOML config file via [`AliasConfig`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Alias {
+    /// The tool name the model will see and call.
+    pub name: String,
+    /// The underlying tool to invoke.
+    pub tool: String,
+    /// Description shown to the model. If absent, inherits from the underlying tool.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Human-readable title. If absent, inherits from the underlying tool.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Arguments that are always pre-filled and hidden from the model's schema.
+    ///
+    /// These are injected at call time and always win over any model-provided
+    /// value for the same key.
+    #[serde(default)]
+    pub preset_args: HashMap<String, Value>,
+}
+
+/// Top-level alias config, parsed from an implementing server's config file.
+///
+/// # TOML format
+///
+/// ```toml
+/// [[aliases]]
+/// name    = "show_listings"
+/// tool    = "search_where"
+/// description = "Find all property listings"
+///
+/// [aliases.preset_args]
+/// front_matter = "listing"
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AliasConfig {
+    /// The list of aliases to register.
+    #[serde(default)]
+    pub aliases: Vec<Alias>,
+}
+
+impl AliasConfig {
+    /// Parse an [`AliasConfig`] from a TOML string.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`toml::de::Error`] if the string is not valid TOML or does
+    /// not match the expected structure.
+    pub fn from_toml(s: &str) -> Result<Self, toml::de::Error> {
+        toml::from_str(s)
+    }
+
+    /// Load an [`AliasConfig`] from a TOML file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AliasConfigError::Io`] if the file cannot be read, or
+    /// [`AliasConfigError::Toml`] if the file content is invalid.
+    pub fn from_file(path: impl AsRef<std::path::Path>) -> Result<Self, AliasConfigError> {
+        let contents = std::fs::read_to_string(path).map_err(AliasConfigError::Io)?;
+        Self::from_toml(&contents).map_err(AliasConfigError::Toml)
+    }
+}
+
+/// Error returned when loading or parsing an [`AliasConfig`].
+#[derive(Debug, thiserror::Error)]
+pub enum AliasConfigError {
+    /// The config file could not be read from disk.
+    #[error("failed to read alias config file: {0}")]
+    Io(#[from] std::io::Error),
+    /// The config file content could not be parsed as TOML.
+    #[error("failed to parse alias config: {0}")]
+    Toml(#[from] toml::de::Error),
+}
+
+/// Builds the `Tool` definition the model sees for an alias.
+///
+/// Takes the underlying tool's full definition, strips any pre-filled keys
+/// from the schema, and applies the alias's name and optional description/title.
+fn build_alias_tool(alias: &Alias, underlying: &Tool) -> Tool {
+    Tool {
+        name: alias.name.clone(),
+        description: alias
+            .description
+            .clone()
+            .or_else(|| underlying.description.clone()),
+        title: alias.title.clone().or_else(|| underlying.title.clone()),
+        input_schema: strip_preset_args(&underlying.input_schema, &alias.preset_args),
+        icons: underlying.icons.clone(),
+        annotations: underlying.annotations.clone(),
+        execution: underlying.execution.clone(),
+        output_schema: underlying.output_schema.clone(),
+        // Don't leak internal _meta from the underlying tool.
+        meta: None,
+    }
+}
+
+/// Returns a copy of `schema` with all keys that appear in `preset_args`
+/// removed from `properties` and `required`.
+///
+/// If removing the preset keys empties `properties` or `required`, those
+/// fields are set to `None`, which produces a zero-argument schema.
+fn strip_preset_args(
+    schema: &ToolInputSchema,
+    preset_args: &HashMap<String, Value>,
+) -> ToolInputSchema {
+    if preset_args.is_empty() {
+        return schema.clone();
+    }
+
+    let mut schema = schema.clone();
+
+    if let Some(Value::Object(ref mut props)) = schema.properties {
+        for key in preset_args.keys() {
+            props.remove(key);
+        }
+        if props.is_empty() {
+            schema.properties = None;
+        }
+    }
+
+    if let Some(ref mut required) = schema.required {
+        required.retain(|k| !preset_args.contains_key(k));
+        if required.is_empty() {
+            schema.required = None;
+        }
+    }
+
+    schema
+}
+
+/// Wraps any [`McpHandler`] and injects tool aliases defined in an [`AliasConfig`].
+///
+/// Each alias appears to the model as an independent tool with a clean schema
+/// (pre-filled arguments are stripped out). If all of a tool's parameters are
+/// pre-filled, the alias takes no arguments at all.
+///
+/// Aliases that reference a tool name not present in the inner handler are
+/// skipped at construction time with a `warn` log.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let config = AliasConfig::from_file("server.toml")?;
+/// let handler = AliasLayer::new(MyServer::new(), config);
+/// handler.serve().await?;
+/// ```
+#[derive(Clone)]
+pub struct AliasLayer<H> {
+    inner: H,
+    /// Resolved (alias definition, synthesized Tool) pairs, computed once at construction.
+    resolved: Vec<(Alias, Tool)>,
+}
+
+impl<H: McpHandler> AliasLayer<H> {
+    /// Create a new alias layer, resolving aliases against the inner handler.
+    ///
+    /// Calls `inner.list_tools()` once at construction to build the alias
+    /// definitions. Aliases referencing unknown tools are skipped with a warning.
+    pub fn new(inner: H, config: AliasConfig) -> Self {
+        let inner_tools = inner.list_tools();
+        let resolved = config
+            .aliases
+            .into_iter()
+            .filter_map(|alias| {
+                match inner_tools.iter().find(|t| t.name == alias.tool) {
+                    Some(underlying) => {
+                        let tool = build_alias_tool(&alias, underlying);
+                        Some((alias, tool))
+                    }
+                    None => {
+                        tracing::warn!(
+                            alias = %alias.name,
+                            underlying_tool = %alias.tool,
+                            "alias references unknown tool and will be skipped"
+                        );
+                        None
+                    }
+                }
+            })
+            .collect();
+
+        Self { inner, resolved }
+    }
+
+    /// Get a reference to the inner handler.
+    pub fn inner(&self) -> &H {
+        &self.inner
+    }
+
+    /// Consume the layer and return the inner handler.
+    pub fn into_inner(self) -> H {
+        self.inner
+    }
+
+    /// Returns the number of successfully resolved aliases.
+    pub fn alias_count(&self) -> usize {
+        self.resolved.len()
+    }
+}
+
+impl<H: std::fmt::Debug> std::fmt::Debug for AliasLayer<H> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AliasLayer")
+            .field("inner", &self.inner)
+            .field("alias_count", &self.resolved.len())
+            .finish()
+    }
+}
+
+#[allow(clippy::manual_async_fn)]
+impl<H: McpHandler> McpHandler for AliasLayer<H> {
+    fn server_info(&self) -> turbomcp_types::ServerInfo {
+        self.inner.server_info()
+    }
+
+    fn list_tools(&self) -> Vec<Tool> {
+        let mut tools = self.inner.list_tools();
+        tools.extend(self.resolved.iter().map(|(_, t)| t.clone()));
+        tools
+    }
+
+    fn list_resources(&self) -> Vec<Resource> {
+        self.inner.list_resources()
+    }
+
+    fn list_resource_templates(&self) -> Vec<ResourceTemplate> {
+        self.inner.list_resource_templates()
+    }
+
+    fn list_prompts(&self) -> Vec<Prompt> {
+        self.inner.list_prompts()
+    }
+
+    fn call_tool<'a>(
+        &'a self,
+        name: &'a str,
+        args: Value,
+        ctx: &'a RequestContext,
+    ) -> impl std::future::Future<Output = McpResult<ToolResult>>
+    + turbomcp_core::marker::MaybeSend
+    + 'a {
+        // Resolve the alias synchronously before entering the async block.
+        // `alias_ref` borrows from `self.resolved` with lifetime 'a, which
+        // is valid for the entire future.
+        let alias_ref = self
+            .resolved
+            .iter()
+            .find(|(a, _)| a.name == name)
+            .map(|(a, _)| a);
+
+        async move {
+            if let Some(alias) = alias_ref {
+                // Build merged args: model-provided args form the base,
+                // then preset args overwrite. This ensures the preset
+                // values can never be changed by the model.
+                let mut obj = match args {
+                    Value::Object(m) => m,
+                    _ => serde_json::Map::new(),
+                };
+                for (k, v) in &alias.preset_args {
+                    obj.insert(k.clone(), v.clone());
+                }
+                self.inner
+                    .call_tool(&alias.tool, Value::Object(obj), ctx)
+                    .await
+            } else {
+                self.inner.call_tool(name, args, ctx).await
+            }
+        }
+    }
+
+    fn read_resource<'a>(
+        &'a self,
+        uri: &'a str,
+        ctx: &'a RequestContext,
+    ) -> impl std::future::Future<Output = McpResult<ResourceResult>>
+    + turbomcp_core::marker::MaybeSend
+    + 'a {
+        self.inner.read_resource(uri, ctx)
+    }
+
+    fn get_prompt<'a>(
+        &'a self,
+        name: &'a str,
+        args: Option<Value>,
+        ctx: &'a RequestContext,
+    ) -> impl std::future::Future<Output = McpResult<PromptResult>>
+    + turbomcp_core::marker::MaybeSend
+    + 'a {
+        self.inner.get_prompt(name, args, ctx)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::manual_async_fn)]
+mod tests {
+    use super::*;
+    use turbomcp_core::{error::McpError, marker::MaybeSend};
+    use turbomcp_types::{PromptResult, ResourceResult, ServerInfo, ToolResult};
+
+    // --- minimal test handler ---
+
+    #[derive(Clone, Debug)]
+    struct TestHandler;
+
+    impl McpHandler for TestHandler {
+        fn server_info(&self) -> ServerInfo {
+            ServerInfo::new("test", "1.0.0")
+        }
+
+        fn list_tools(&self) -> Vec<Tool> {
+            vec![
+                Tool {
+                    name: "search_where".to_string(),
+                    description: Some("Search with filters".to_string()),
+                    input_schema: ToolInputSchema::default()
+                        .add_property(
+                            "front_matter",
+                            serde_json::json!({"type": "string", "description": "content type"}),
+                        )
+                        .require_property("front_matter")
+                        .add_property(
+                            "limit",
+                            serde_json::json!({"type": "integer", "description": "max results"}),
+                        ),
+                    ..Default::default()
+                },
+                Tool {
+                    name: "no_params".to_string(),
+                    description: Some("A tool with no params".to_string()),
+                    ..Default::default()
+                },
+            ]
+        }
+
+        fn list_resources(&self) -> Vec<Resource> {
+            vec![]
+        }
+
+        fn list_prompts(&self) -> Vec<Prompt> {
+            vec![]
+        }
+
+        fn call_tool<'a>(
+            &'a self,
+            name: &'a str,
+            args: Value,
+            _ctx: &'a RequestContext,
+        ) -> impl std::future::Future<Output = McpResult<ToolResult>> + MaybeSend + 'a {
+            let response = format!("{}:{}", name, args);
+            async move { Ok(ToolResult::text(response)) }
+        }
+
+        fn read_resource<'a>(
+            &'a self,
+            _uri: &'a str,
+            _ctx: &'a RequestContext,
+        ) -> impl std::future::Future<Output = McpResult<ResourceResult>> + MaybeSend + 'a {
+            async move { Err(McpError::resource_not_found("none")) }
+        }
+
+        fn get_prompt<'a>(
+            &'a self,
+            _name: &'a str,
+            _args: Option<Value>,
+            _ctx: &'a RequestContext,
+        ) -> impl std::future::Future<Output = McpResult<PromptResult>> + MaybeSend + 'a {
+            async move { Err(McpError::prompt_not_found("none")) }
+        }
+    }
+
+    // --- helpers ---
+
+    fn make_config(aliases: Vec<Alias>) -> AliasConfig {
+        AliasConfig { aliases }
+    }
+
+    fn make_alias(
+        name: &str,
+        tool: &str,
+        preset_args: HashMap<String, Value>,
+    ) -> Alias {
+        Alias {
+            name: name.to_string(),
+            tool: tool.to_string(),
+            description: None,
+            title: None,
+            preset_args,
+        }
+    }
+
+    // --- schema stripping ---
+
+    #[test]
+    fn strip_removes_preset_keys_from_properties_and_required() {
+        let schema = ToolInputSchema::default()
+            .add_property("front_matter", serde_json::json!({"type": "string"}))
+            .require_property("front_matter")
+            .add_property("limit", serde_json::json!({"type": "integer"}));
+
+        let preset = HashMap::from([("front_matter".to_string(), Value::String("listing".into()))]);
+        let stripped = strip_preset_args(&schema, &preset);
+
+        let props = stripped.properties_as_object().unwrap();
+        assert!(!props.contains_key("front_matter"), "preset key should be gone");
+        assert!(props.contains_key("limit"), "non-preset key should remain");
+        assert!(
+            stripped.required.as_ref().map_or(true, |r| !r.contains(&"front_matter".to_string())),
+            "preset key should not be required"
+        );
+    }
+
+    #[test]
+    fn strip_all_params_yields_no_properties_and_no_required() {
+        let schema = ToolInputSchema::default()
+            .add_property("front_matter", serde_json::json!({"type": "string"}))
+            .require_property("front_matter");
+
+        let preset = HashMap::from([("front_matter".to_string(), Value::String("listing".into()))]);
+        let stripped = strip_preset_args(&schema, &preset);
+
+        assert!(stripped.properties.is_none(), "no properties after full strip");
+        assert!(stripped.required.is_none(), "no required after full strip");
+    }
+
+    #[test]
+    fn strip_with_empty_preset_is_a_no_op() {
+        let schema = ToolInputSchema::default()
+            .add_property("x", serde_json::json!({"type": "string"}));
+        let before = schema.clone();
+        let after = strip_preset_args(&schema, &HashMap::new());
+        assert_eq!(before, after);
+    }
+
+    // --- list_tools ---
+
+    #[test]
+    fn alias_tool_appears_in_list_tools() {
+        let preset = HashMap::from([("front_matter".to_string(), Value::String("listing".into()))]);
+        let layer = AliasLayer::new(
+            TestHandler,
+            make_config(vec![make_alias("show_listings", "search_where", preset)]),
+        );
+
+        let names: Vec<_> = layer.list_tools().into_iter().map(|t| t.name).collect();
+        assert!(names.contains(&"show_listings".to_string()));
+        assert!(names.contains(&"search_where".to_string()), "underlying tool still present");
+    }
+
+    #[test]
+    fn alias_schema_does_not_expose_preset_key() {
+        let preset = HashMap::from([("front_matter".to_string(), Value::String("listing".into()))]);
+        let layer = AliasLayer::new(
+            TestHandler,
+            make_config(vec![make_alias("show_listings", "search_where", preset)]),
+        );
+
+        let alias_tool = layer
+            .list_tools()
+            .into_iter()
+            .find(|t| t.name == "show_listings")
+            .unwrap();
+
+        let props = alias_tool.input_schema.properties_as_object();
+        let has_front_matter = props.map_or(false, |p| p.contains_key("front_matter"));
+        assert!(!has_front_matter, "preset arg must not appear in the alias schema");
+    }
+
+    #[test]
+    fn alias_schema_exposes_remaining_non_preset_params() {
+        let preset = HashMap::from([("front_matter".to_string(), Value::String("listing".into()))]);
+        let layer = AliasLayer::new(
+            TestHandler,
+            make_config(vec![make_alias("show_listings", "search_where", preset)]),
+        );
+
+        let alias_tool = layer
+            .list_tools()
+            .into_iter()
+            .find(|t| t.name == "show_listings")
+            .unwrap();
+
+        let props = alias_tool.input_schema.properties_as_object().unwrap();
+        assert!(props.contains_key("limit"), "non-preset param must remain visible");
+    }
+
+    #[test]
+    fn fully_preset_alias_has_no_schema_params() {
+        // use search_where with both keys preset so nothing remains
+        let preset_full = HashMap::from([
+            ("front_matter".to_string(), Value::String("listing".into())),
+            ("limit".to_string(), serde_json::json!(10)),
+        ]);
+        let layer = AliasLayer::new(
+            TestHandler,
+            make_config(vec![make_alias("all_listings", "search_where", preset_full)]),
+        );
+
+        let alias_tool = layer
+            .list_tools()
+            .into_iter()
+            .find(|t| t.name == "all_listings")
+            .unwrap();
+
+        assert!(
+            alias_tool.input_schema.properties.is_none(),
+            "fully-preset alias should have no schema params"
+        );
+    }
+
+    #[test]
+    fn unknown_underlying_tool_is_skipped() {
+        let preset = HashMap::new();
+        let layer = AliasLayer::new(
+            TestHandler,
+            make_config(vec![make_alias("ghost", "nonexistent_tool", preset)]),
+        );
+
+        assert_eq!(layer.alias_count(), 0);
+        let names: Vec<_> = layer.list_tools().into_iter().map(|t| t.name).collect();
+        assert!(!names.contains(&"ghost".to_string()));
+    }
+
+    // --- call_tool dispatch ---
+
+    #[tokio::test]
+    async fn alias_call_injects_preset_args() {
+        let preset = HashMap::from([("front_matter".to_string(), Value::String("listing".into()))]);
+        let layer = AliasLayer::new(
+            TestHandler,
+            make_config(vec![make_alias("show_listings", "search_where", preset)]),
+        );
+
+        let ctx = RequestContext::default();
+        let result = layer
+            .call_tool("show_listings", serde_json::json!({}), &ctx)
+            .await
+            .unwrap();
+
+        // TestHandler echoes "tool_name:args"; verify preset was injected
+        let text = result.first_text().unwrap();
+        assert!(text.contains("search_where"), "must be dispatched to underlying tool");
+        assert!(text.contains("listing"), "preset value must appear in forwarded args");
+    }
+
+    #[tokio::test]
+    async fn preset_args_override_model_provided_values() {
+        let preset = HashMap::from([("front_matter".to_string(), Value::String("listing".into()))]);
+        let layer = AliasLayer::new(
+            TestHandler,
+            make_config(vec![make_alias("show_listings", "search_where", preset)]),
+        );
+
+        let ctx = RequestContext::default();
+        // Model tries to set front_matter to something else
+        let result = layer
+            .call_tool(
+                "show_listings",
+                serde_json::json!({"front_matter": "blog", "limit": 5}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        let text = result.first_text().unwrap();
+        assert!(text.contains("listing"), "preset must win over model value");
+        assert!(!text.contains("\"front_matter\":\"blog\""), "model value must be overwritten");
+    }
+
+    #[tokio::test]
+    async fn non_alias_call_passes_through_unchanged() {
+        let layer = AliasLayer::new(TestHandler, AliasConfig::default());
+
+        let ctx = RequestContext::default();
+        let result = layer
+            .call_tool("search_where", serde_json::json!({"front_matter": "blog"}), &ctx)
+            .await
+            .unwrap();
+
+        let text = result.first_text().unwrap();
+        assert!(text.contains("search_where"));
+        assert!(text.contains("blog"));
+    }
+
+    // --- description / title inheritance ---
+
+    #[test]
+    fn alias_inherits_description_when_not_overridden() {
+        let layer = AliasLayer::new(
+            TestHandler,
+            make_config(vec![Alias {
+                name: "show_listings".to_string(),
+                tool: "search_where".to_string(),
+                description: None,
+                title: None,
+                preset_args: HashMap::new(),
+            }]),
+        );
+
+        let alias_tool = layer
+            .list_tools()
+            .into_iter()
+            .find(|t| t.name == "show_listings")
+            .unwrap();
+
+        assert_eq!(alias_tool.description.as_deref(), Some("Search with filters"));
+    }
+
+    #[test]
+    fn alias_description_overrides_underlying() {
+        let layer = AliasLayer::new(
+            TestHandler,
+            make_config(vec![Alias {
+                name: "show_listings".to_string(),
+                tool: "search_where".to_string(),
+                description: Some("Find all property listings".to_string()),
+                title: None,
+                preset_args: HashMap::new(),
+            }]),
+        );
+
+        let alias_tool = layer
+            .list_tools()
+            .into_iter()
+            .find(|t| t.name == "show_listings")
+            .unwrap();
+
+        assert_eq!(
+            alias_tool.description.as_deref(),
+            Some("Find all property listings")
+        );
+    }
+
+    // --- TOML parsing ---
+
+    #[test]
+    fn parse_alias_config_from_toml() {
+        let toml = r#"
+[[aliases]]
+name = "show_listings"
+tool = "search_where"
+description = "Find all listings"
+
+[aliases.preset_args]
+front_matter = "listing"
+
+[[aliases]]
+name = "find_expired"
+tool = "search_where"
+
+[aliases.preset_args]
+front_matter = "listing"
+status = "expired"
+"#;
+        let config = AliasConfig::from_toml(toml).unwrap();
+        assert_eq!(config.aliases.len(), 2);
+        assert_eq!(config.aliases[0].name, "show_listings");
+        assert_eq!(
+            config.aliases[0].preset_args.get("front_matter"),
+            Some(&Value::String("listing".into()))
+        );
+        assert_eq!(config.aliases[1].name, "find_expired");
+        assert_eq!(config.aliases[1].preset_args.len(), 2);
+    }
+
+    #[test]
+    fn empty_aliases_section_is_valid() {
+        let config = AliasConfig::from_toml("").unwrap();
+        assert_eq!(config.aliases.len(), 0);
+    }
+}
