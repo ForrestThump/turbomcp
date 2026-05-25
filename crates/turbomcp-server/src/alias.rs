@@ -424,13 +424,11 @@ impl<H: McpHandler> McpHandler for AliasLayer<H> {
                 let mut obj = match args {
                     Value::Object(m) => m,
                     Value::Null => serde_json::Map::new(),
-                    other => {
+                    _ => {
                         tracing::debug!(
                             alias = %alias.name,
                             "alias received non-object args; treating as empty"
                         );
-                        // Avoid unused variable warning in release builds.
-                        let _ = other;
                         serde_json::Map::new()
                     }
                 };
@@ -1147,6 +1145,46 @@ description = "Find listings"
         assert!(
             matches!(result, Err(AliasConfigError::Io(_))),
             "missing file must return Io error"
+        );
+    }
+
+    #[test]
+    fn from_file_returns_toml_error_for_malformed_content() {
+        let path = std::env::temp_dir().join("turbomcp_alias_test_bad.toml");
+        std::fs::write(&path, "[[aliases\nthis is not valid toml!!!").unwrap();
+        let result = AliasConfig::from_file(&path);
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            matches!(result, Err(AliasConfigError::Toml(_))),
+            "malformed TOML must return Toml error"
+        );
+    }
+
+    #[test]
+    fn server_capabilities_inherits_non_listing_caps_from_inner() {
+        use turbomcp_types::ServerCapabilities;
+
+        // Build an inner handler that exposes a tool, so server_capabilities()
+        // will set caps.tools. We then verify that the AliasLayer does not zero
+        // out unrelated capability fields that the default McpHandler derives.
+        let layer = AliasLayer::new(TestHandler, AliasConfig::default());
+        let caps: ServerCapabilities = layer.server_capabilities();
+
+        // TestHandler has tools, so tools capability must be present.
+        assert!(
+            caps.tools.is_some(),
+            "tools capability must be set when inner handler has tools"
+        );
+
+        // Inner handler has no resources or prompts; those fields should be absent
+        // rather than erroneously populated.
+        assert!(
+            caps.resources.is_none(),
+            "resources capability must not be set when inner has no resources"
+        );
+        assert!(
+            caps.prompts.is_none(),
+            "prompts capability must not be set when inner has no prompts"
         );
     }
 }
