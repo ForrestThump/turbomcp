@@ -741,7 +741,7 @@ mod tests {
     // --- schema stripping ---
 
     #[test]
-    fn strip_removes_preset_keys_from_properties_and_required() {
+    fn test_strip_removes_preset_keys_from_properties_and_required() {
         let schema = ToolInputSchema::default()
             .add_property("front_matter", serde_json::json!({"type": "string"}))
             .require_property("front_matter")
@@ -764,7 +764,7 @@ mod tests {
     }
 
     #[test]
-    fn strip_all_params_yields_no_properties_and_no_required() {
+    fn test_strip_all_params_yields_no_properties_and_no_required() {
         let schema = ToolInputSchema::default()
             .add_property("front_matter", serde_json::json!({"type": "string"}))
             .require_property("front_matter");
@@ -778,7 +778,7 @@ mod tests {
     }
 
     #[test]
-    fn strip_with_empty_preset_is_a_no_op() {
+    fn test_strip_with_empty_preset_is_a_no_op() {
         let schema = ToolInputSchema::default()
             .add_property("x", serde_json::json!({"type": "string"}));
         let before = schema.clone();
@@ -789,7 +789,7 @@ mod tests {
     // --- list_tools ---
 
     #[test]
-    fn alias_tool_appears_in_list_tools() {
+    fn test_alias_tool_appears_in_list_tools() {
         let preset =
             HashMap::from([("front_matter".to_string(), Value::String("listing".into()))]);
         let layer = AliasLayer::new(
@@ -806,7 +806,7 @@ mod tests {
     }
 
     #[test]
-    fn alias_schema_does_not_expose_preset_key() {
+    fn test_alias_schema_does_not_expose_preset_key() {
         let preset =
             HashMap::from([("front_matter".to_string(), Value::String("listing".into()))]);
         let layer = AliasLayer::new(
@@ -826,7 +826,7 @@ mod tests {
     }
 
     #[test]
-    fn alias_schema_exposes_remaining_non_preset_params() {
+    fn test_alias_schema_exposes_remaining_non_preset_params() {
         let preset =
             HashMap::from([("front_matter".to_string(), Value::String("listing".into()))]);
         let layer = AliasLayer::new(
@@ -845,7 +845,7 @@ mod tests {
     }
 
     #[test]
-    fn fully_preset_alias_has_no_schema_params() {
+    fn test_fully_preset_alias_has_no_schema_params() {
         // use search_where with both keys preset so nothing remains
         let preset_full = HashMap::from([
             ("front_matter".to_string(), Value::String("listing".into())),
@@ -869,7 +869,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_underlying_tool_is_skipped() {
+    fn test_unknown_underlying_tool_is_skipped() {
         let layer = AliasLayer::new(
             TestHandler,
             make_config(vec![make_alias("ghost", "nonexistent_tool", HashMap::new())]),
@@ -881,7 +881,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_alias_name_skips_second_definition() {
+    fn test_duplicate_alias_name_skips_second_definition() {
         let aliases = vec![
             make_alias("show_listings", "search_where", HashMap::new()),
             make_alias("show_listings", "no_params", HashMap::new()),
@@ -903,7 +903,7 @@ mod tests {
     }
 
     #[test]
-    fn alias_shadowing_inner_tool_deduplicates_in_listing() {
+    fn test_alias_shadowing_inner_tool_deduplicates_in_listing() {
         // Alias has the same name as an inner tool — used to replace the tool
         // with a preset-bound version while keeping the same visible name.
         let preset =
@@ -932,7 +932,7 @@ mod tests {
     // --- call_tool dispatch ---
 
     #[tokio::test]
-    async fn alias_call_injects_preset_args() {
+    async fn test_alias_call_injects_preset_args() {
         let preset =
             HashMap::from([("front_matter".to_string(), Value::String("listing".into()))]);
         let layer = AliasLayer::new(
@@ -952,7 +952,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn preset_args_override_model_provided_values() {
+    async fn test_preset_args_override_model_provided_values() {
         let preset =
             HashMap::from([("front_matter".to_string(), Value::String("listing".into()))]);
         let layer = AliasLayer::new(
@@ -979,7 +979,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn non_alias_call_passes_through_unchanged() {
+    async fn test_non_alias_call_passes_through_unchanged() {
         let layer = AliasLayer::new(TestHandler, AliasConfig::default());
 
         let ctx = RequestContext::default();
@@ -994,7 +994,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn null_args_to_alias_treated_as_empty_with_presets_injected() {
+    async fn test_null_args_to_alias_treated_as_empty_with_presets_injected() {
         let preset =
             HashMap::from([("front_matter".to_string(), Value::String("listing".into()))]);
         let layer = AliasLayer::new(
@@ -1017,7 +1017,7 @@ mod tests {
     // --- description / title inheritance ---
 
     #[test]
-    fn alias_inherits_description_when_not_overridden() {
+    fn test_alias_inherits_description_when_not_overridden() {
         let layer = AliasLayer::new(
             TestHandler,
             make_config(vec![Alias {
@@ -1039,7 +1039,7 @@ mod tests {
     }
 
     #[test]
-    fn alias_description_overrides_underlying() {
+    fn test_alias_description_overrides_underlying() {
         let layer = AliasLayer::new(
             TestHandler,
             make_config(vec![Alias {
@@ -1066,7 +1066,7 @@ mod tests {
     // --- lifecycle delegation ---
 
     #[tokio::test]
-    async fn on_initialize_delegates_to_inner_handler() {
+    async fn test_on_initialize_delegates_to_inner_handler() {
         let handler = TrackingHandler::new();
         let initialized = Arc::clone(&handler.initialized);
 
@@ -1080,7 +1080,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn on_shutdown_delegates_to_inner_handler() {
+    async fn test_on_shutdown_delegates_to_inner_handler() {
         let handler = TrackingHandler::new();
         let shutdown_called = Arc::clone(&handler.shutdown_called);
 
@@ -1096,7 +1096,7 @@ mod tests {
     // --- TOML parsing ---
 
     #[test]
-    fn parse_alias_config_from_toml() {
+    fn test_parse_alias_config_from_toml() {
         let toml = r#"
 [[aliases]]
 name = "show_listings"
@@ -1126,7 +1126,7 @@ status = "expired"
     }
 
     #[test]
-    fn empty_aliases_section_is_valid() {
+    fn test_empty_aliases_section_is_valid() {
         let config = AliasConfig::from_toml("").unwrap();
         assert_eq!(config.aliases.len(), 0);
     }
@@ -1134,7 +1134,7 @@ status = "expired"
     // --- from_file ---
 
     #[test]
-    fn from_file_loads_valid_config() {
+    fn test_from_file_loads_valid_config() {
         let content = r#"
 [[aliases]]
 name = "show_listings"
@@ -1153,7 +1153,7 @@ description = "Find listings"
     }
 
     #[test]
-    fn from_file_returns_io_error_for_missing_file() {
+    fn test_from_file_returns_io_error_for_missing_file() {
         let result = AliasConfig::from_file("/this/path/does/not/exist/turbomcp.toml");
         assert!(
             matches!(result, Err(AliasConfigError::Io(_))),
@@ -1162,7 +1162,7 @@ description = "Find listings"
     }
 
     #[test]
-    fn from_file_returns_toml_error_for_malformed_content() {
+    fn test_from_file_returns_toml_error_for_malformed_content() {
         let path = std::env::temp_dir()
             .join(format!("turbomcp_alias_test_bad_{}.toml", uuid::Uuid::new_v4()));
         std::fs::write(&path, "[[aliases\nthis is not valid toml!!!").unwrap();
@@ -1175,7 +1175,7 @@ description = "Find listings"
     }
 
     #[test]
-    fn server_capabilities_inherits_non_listing_caps_from_inner() {
+    fn test_server_capabilities_inherits_non_listing_caps_from_inner() {
         use turbomcp_types::ServerCapabilities;
 
         // Build an inner handler that exposes a tool, so server_capabilities()
