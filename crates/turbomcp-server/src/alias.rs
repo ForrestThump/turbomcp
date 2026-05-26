@@ -138,6 +138,10 @@ impl AliasConfig {
 
     /// Load an [`AliasConfig`] from a TOML file.
     ///
+    /// This performs blocking file I/O. Call it during synchronous startup
+    /// (e.g. in `main()`) before entering the async runtime — not from inside
+    /// an `async fn` or task, where it would block the executor thread.
+    ///
     /// # Errors
     ///
     /// Returns [`AliasConfigError::Io`] if the file cannot be read, or
@@ -468,6 +472,12 @@ impl<H: McpHandler> McpHandler for AliasLayer<H> {
     }
 
     // ===== Delegate all remaining trait methods to the inner handler =====
+    //
+    // MAINTENANCE: Every method below is a pure pass-through to `self.inner`.
+    // If `McpHandler` gains new methods in the future, add corresponding
+    // delegations here — otherwise the inner handler's lifecycle hooks,
+    // subscriptions, logging, and task management will silently fall back to
+    // the trait's default implementation instead of reaching the real handler.
 
     fn on_initialize(&self) -> impl std::future::Future<Output = McpResult<()>> + turbomcp_core::marker::MaybeSend {
         self.inner.on_initialize()
@@ -1131,7 +1141,8 @@ name = "show_listings"
 tool = "search_where"
 description = "Find listings"
 "#;
-        let path = std::env::temp_dir().join("turbomcp_alias_test_load.toml");
+        let path = std::env::temp_dir()
+            .join(format!("turbomcp_alias_test_load_{}.toml", uuid::Uuid::new_v4()));
         std::fs::write(&path, content).unwrap();
         let result = AliasConfig::from_file(&path);
         let _ = std::fs::remove_file(&path);
@@ -1152,7 +1163,8 @@ description = "Find listings"
 
     #[test]
     fn from_file_returns_toml_error_for_malformed_content() {
-        let path = std::env::temp_dir().join("turbomcp_alias_test_bad.toml");
+        let path = std::env::temp_dir()
+            .join(format!("turbomcp_alias_test_bad_{}.toml", uuid::Uuid::new_v4()));
         std::fs::write(&path, "[[aliases\nthis is not valid toml!!!").unwrap();
         let result = AliasConfig::from_file(&path);
         let _ = std::fs::remove_file(&path);
