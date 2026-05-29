@@ -1,0 +1,17 @@
+[package]
+name = "turbomcp4-codegen"
+version = "4.0.0-alpha.1"
+edition = "2024"
+rust-version = "1.85"
+authors = ["Nicholas Paterno <nick@epistates.com>"]
+description = "TurboMCP v4 codegen: MCP schema JSON -> checked-in Rust wire types (typify). Not in the user dep graph."
+license = "MIT"
+repository = "https://github.com/Epistates/turbomcp"
+homepage = "https://turbomcp.org"
+publish = false
+
+[[bin]]
+name = "turbomcp4-codegen"
+path = "src/main.rs"
+
+[dependencies]

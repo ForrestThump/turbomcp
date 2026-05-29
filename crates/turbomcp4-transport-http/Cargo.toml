@@ -1,0 +1,13 @@
+[package]
+name = "turbomcp4-transport-http"
+version = "4.0.0-alpha.1"
+edition = "2024"
+rust-version = "1.85"
+authors = ["Nicholas Paterno <nick@epistates.com>"]
+description = "TurboMCP v4 Streamable HTTP transport (axum)."
+license = "MIT"
+repository = "https://github.com/Epistates/turbomcp"
+homepage = "https://turbomcp.org"
+
+[dependencies]
+turbomcp4-core = { workspace = true }

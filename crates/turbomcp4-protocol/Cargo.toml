@@ -1,0 +1,19 @@
+[package]
+name = "turbomcp4-protocol"
+version = "4.0.0-alpha.1"
+edition = "2024"
+rust-version = "1.85"
+authors = ["Nicholas Paterno <nick@epistates.com>"]
+description = "TurboMCP v4 protocol: per-version typed wire modules + VersionDispatcher. no_std-portable types."
+license = "MIT"
+repository = "https://github.com/Epistates/turbomcp"
+homepage = "https://turbomcp.org"
+
+[dependencies]
+turbomcp4-core = { workspace = true, default-features = false }
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+
+[features]
+default = ["std"]
+std = ["turbomcp4-core/std", "serde/std", "serde_json/std"]

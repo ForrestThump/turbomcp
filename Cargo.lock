@@ -6072,6 +6072,122 @@ dependencies = [
 ]
 
 [[package]]
+name = "turbomcp4"
+version = "4.0.0-alpha.1"
+dependencies = [
+ "turbomcp4-core",
+]
+
+[[package]]
+name = "turbomcp4-auth"
+version = "4.0.0-alpha.1"
+dependencies = [
+ "turbomcp4-core",
+]
+
+[[package]]
+name = "turbomcp4-client"
+version = "4.0.0-alpha.1"
+dependencies = [
+ "turbomcp4-core",
+]
+
+[[package]]
+name = "turbomcp4-codec"
+version = "4.0.0-alpha.1"
+dependencies = [
+ "turbomcp4-core",
+]
+
+[[package]]
+name = "turbomcp4-codegen"
+version = "4.0.0-alpha.1"
+
+[[package]]
+name = "turbomcp4-core"
+version = "4.0.0-alpha.1"
+dependencies = [
+ "hashbrown 0.17.0",
+ "serde",
+ "serde_json",
+ "tokio-util",
+]
+
+[[package]]
+name = "turbomcp4-ext-apps"
+version = "4.0.0-alpha.1"
+dependencies = [
+ "turbomcp4-core",
+]
+
+[[package]]
+name = "turbomcp4-ext-tasks"
+version = "4.0.0-alpha.1"
+dependencies = [
+ "turbomcp4-core",
+]
+
+[[package]]
+name = "turbomcp4-macros"
+version = "4.0.0-alpha.1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "turbomcp4-protocol"
+version = "4.0.0-alpha.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "turbomcp4-core",
+]
+
+[[package]]
+name = "turbomcp4-server"
+version = "4.0.0-alpha.1"
+dependencies = [
+ "turbomcp4-core",
+]
+
+[[package]]
+name = "turbomcp4-service"
+version = "4.0.0-alpha.1"
+dependencies = [
+ "turbomcp4-core",
+]
+
+[[package]]
+name = "turbomcp4-telemetry"
+version = "4.0.0-alpha.1"
+dependencies = [
+ "turbomcp4-core",
+]
+
+[[package]]
+name = "turbomcp4-transport-http"
+version = "4.0.0-alpha.1"
+dependencies = [
+ "turbomcp4-core",
+]
+
+[[package]]
+name = "turbomcp4-transport-stdio"
+version = "4.0.0-alpha.1"
+dependencies = [
+ "turbomcp4-core",
+]
+
+[[package]]
+name = "turbomcp4-transport-ws"
+version = "4.0.0-alpha.1"
+dependencies = [
+ "turbomcp4-core",
+]
+
+[[package]]
 name = "twox-hash"
 version = "2.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

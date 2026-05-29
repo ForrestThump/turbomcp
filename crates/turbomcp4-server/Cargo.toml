@@ -1,0 +1,13 @@
+[package]
+name = "turbomcp4-server"
+version = "4.0.0-alpha.1"
+edition = "2024"
+rust-version = "1.85"
+authors = ["Nicholas Paterno <nick@epistates.com>"]
+description = "TurboMCP v4 server: McpServerCore + capability traits, MethodRouter, ServerBuilder."
+license = "MIT"
+repository = "https://github.com/Epistates/turbomcp"
+homepage = "https://turbomcp.org"
+
+[dependencies]
+turbomcp4-core = { workspace = true }

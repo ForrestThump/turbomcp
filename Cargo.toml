@@ -28,6 +28,24 @@ members = [
     "crates/turbomcp-openapi",   # v3.0: OpenAPI to MCP conversion
     "crates/turbomcp-transport-streamable", # v3.0: Streamable HTTP transport types
     "demo",
+
+    # --- v4 (branch v4-rewrite): parallel crates, renamed to turbomcp at GA ---
+    "crates/turbomcp4-core",
+    "crates/turbomcp4-protocol",
+    "crates/turbomcp4-codec",
+    "crates/turbomcp4-service",
+    "crates/turbomcp4-server",
+    "crates/turbomcp4-client",
+    "crates/turbomcp4-transport-stdio",
+    "crates/turbomcp4-transport-http",
+    "crates/turbomcp4-transport-ws",
+    "crates/turbomcp4-macros",
+    "crates/turbomcp4-codegen",
+    "crates/turbomcp4-auth",
+    "crates/turbomcp4-telemetry",
+    "crates/turbomcp4-ext-tasks",
+    "crates/turbomcp4-ext-apps",
+    "crates/turbomcp4",
 ]
 resolver = "2"
 
@@ -242,6 +260,23 @@ turbomcp-wire = { version = "3.1.5", path = "crates/turbomcp-wire", default-feat
 turbomcp-wasm = { version = "3.1.5", path = "crates/turbomcp-wasm" }
 turbomcp-wasm-macros = { version = "3.1.5", path = "crates/turbomcp-wasm-macros" }
 turbomcp-transport-streamable = { version = "3.1.5", path = "crates/turbomcp-transport-streamable", default-features = false }
+
+# --- v4 internal crates (branch v4-rewrite) ---
+turbomcp4 = { version = "4.0.0-alpha.1", path = "crates/turbomcp4" }
+turbomcp4-core = { version = "4.0.0-alpha.1", path = "crates/turbomcp4-core", default-features = false }
+turbomcp4-protocol = { version = "4.0.0-alpha.1", path = "crates/turbomcp4-protocol", default-features = false }
+turbomcp4-codec = { version = "4.0.0-alpha.1", path = "crates/turbomcp4-codec" }
+turbomcp4-service = { version = "4.0.0-alpha.1", path = "crates/turbomcp4-service" }
+turbomcp4-server = { version = "4.0.0-alpha.1", path = "crates/turbomcp4-server" }
+turbomcp4-client = { version = "4.0.0-alpha.1", path = "crates/turbomcp4-client" }
+turbomcp4-transport-stdio = { version = "4.0.0-alpha.1", path = "crates/turbomcp4-transport-stdio" }
+turbomcp4-transport-http = { version = "4.0.0-alpha.1", path = "crates/turbomcp4-transport-http" }
+turbomcp4-transport-ws = { version = "4.0.0-alpha.1", path = "crates/turbomcp4-transport-ws" }
+turbomcp4-macros = { version = "4.0.0-alpha.1", path = "crates/turbomcp4-macros" }
+turbomcp4-auth = { version = "4.0.0-alpha.1", path = "crates/turbomcp4-auth" }
+turbomcp4-telemetry = { version = "4.0.0-alpha.1", path = "crates/turbomcp4-telemetry" }
+turbomcp4-ext-tasks = { version = "4.0.0-alpha.1", path = "crates/turbomcp4-ext-tasks" }
+turbomcp4-ext-apps = { version = "4.0.0-alpha.1", path = "crates/turbomcp4-ext-apps" }
 
 [profile.dev]
 opt-level = 1
