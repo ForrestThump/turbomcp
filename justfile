@@ -18,6 +18,9 @@ crates_dir := "crates"
 target_dir := "target"
 coverage_dir := "coverage"
 
+# v4 codegen: root of the checked-out MCP schema (override with MCP_SCHEMA_ROOT)
+mcp_schema_root := env_var_or_default("MCP_SCHEMA_ROOT", "../reference/modelcontextprotocol/schema")
+
 # Set shell for both unix and Windows environments
 set shell := ["sh", "-euc"]
 set windows-shell := ["sh", "-euc", "--"] # Requires Git to be installed with `sh` in PATH if on Windows
@@ -36,6 +39,26 @@ alias f := fmt
 # Default recipe - show help
 default:
   @just --list --unsorted
+
+# =============================================================================
+# v4 codegen
+# =============================================================================
+
+# Regenerate the v4 per-version wire types from the MCP schema (checked in).
+[group: 'v4']
+codegen:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  root="{{mcp_schema_root}}"
+  echo "Generating v4 protocol types from ${root}"
+  cargo run -q -p turbomcp4-codegen -- \
+    "${root}/2025-11-25/schema.json" \
+    crates/turbomcp4-protocol/src/v2025_11_25/types.rs "MCP 2025-11-25"
+  cargo run -q -p turbomcp4-codegen -- \
+    "${root}/draft/schema.json" \
+    crates/turbomcp4-protocol/src/v2026_draft/types.rs "MCP DRAFT-2026-v1"
+  cargo fmt -p turbomcp4-protocol
+  echo "Done. Review the diff before committing."
 
 # =============================================================================
 # Setup
