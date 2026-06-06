@@ -15,6 +15,7 @@
 //! Conversions are intentionally one-directional (neutral → wire) and total
 //! (`From`, never failing): a handler can always be serialized to the wire.
 
+use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use serde_json::{Map, Value};
@@ -152,6 +153,582 @@ impl CallToolResult {
     }
 }
 
+// ---- pagination ---------------------------------------------------------------
+
+/// Inbound parameters shared by every `*/list` method: an opaque pagination
+/// cursor (absent on the first page). The framework decodes it from the wire;
+/// handlers echo a `next_cursor` in their result to advertise another page.
+#[derive(Clone, Debug, Default)]
+#[non_exhaustive]
+pub struct ListParams {
+    /// Cursor returned by a previous page, or `None` for the first page.
+    pub cursor: Option<String>,
+}
+
+impl ListParams {
+    /// First-page request (no cursor).
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Request continuing from `cursor`.
+    #[must_use]
+    pub fn with_cursor(cursor: impl Into<String>) -> Self {
+        Self {
+            cursor: Some(cursor.into()),
+        }
+    }
+}
+
+// ---- resources ----------------------------------------------------------------
+
+/// A resource descriptor (`resources/list`).
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct Resource {
+    /// The resource URI (what `resources/read` references).
+    pub uri: String,
+    /// Programmatic identifier / fallback display name.
+    pub name: String,
+    /// Optional human-facing display name.
+    pub title: Option<String>,
+    /// Optional natural-language description (a hint to the model).
+    pub description: Option<String>,
+    /// MIME type, if known.
+    pub mime_type: Option<String>,
+    /// Raw content size in bytes (before any encoding), if known.
+    pub size: Option<u64>,
+}
+
+impl Resource {
+    /// A resource with the given URI and name.
+    pub fn new(uri: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            uri: uri.into(),
+            name: name.into(),
+            title: None,
+            description: None,
+            mime_type: None,
+            size: None,
+        }
+    }
+
+    /// Set the title (builder style).
+    #[must_use]
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(title.into());
+        self
+    }
+
+    /// Set the description (builder style).
+    #[must_use]
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
+    /// Set the MIME type (builder style).
+    #[must_use]
+    pub fn with_mime_type(mut self, mime_type: impl Into<String>) -> Self {
+        self.mime_type = Some(mime_type.into());
+        self
+    }
+}
+
+/// The contents of a read resource (`resources/read`): UTF-8 text or a
+/// base64-encoded binary blob. `#[non_exhaustive]` so future kinds slot in.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub enum ResourceContents {
+    /// Text contents.
+    Text {
+        /// URI these contents belong to.
+        uri: String,
+        /// MIME type, if known.
+        mime_type: Option<String>,
+        /// The text.
+        text: String,
+    },
+    /// Binary contents, base64-encoded.
+    Blob {
+        /// URI these contents belong to.
+        uri: String,
+        /// MIME type, if known.
+        mime_type: Option<String>,
+        /// Base64-encoded bytes.
+        blob: String,
+    },
+}
+
+impl ResourceContents {
+    /// Text contents for `uri` (no MIME type).
+    pub fn text(uri: impl Into<String>, text: impl Into<String>) -> Self {
+        Self::Text {
+            uri: uri.into(),
+            mime_type: None,
+            text: text.into(),
+        }
+    }
+
+    /// Base64 binary contents for `uri` (no MIME type).
+    pub fn blob(uri: impl Into<String>, blob: impl Into<String>) -> Self {
+        Self::Blob {
+            uri: uri.into(),
+            mime_type: None,
+            blob: blob.into(),
+        }
+    }
+
+    /// Set the MIME type on either variant (builder style).
+    #[must_use]
+    pub fn with_mime_type(mut self, mime: impl Into<String>) -> Self {
+        match &mut self {
+            Self::Text { mime_type, .. } | Self::Blob { mime_type, .. } => {
+                *mime_type = Some(mime.into());
+            }
+        }
+        self
+    }
+}
+
+/// Result of `resources/list`.
+#[derive(Clone, Debug, Default)]
+#[non_exhaustive]
+pub struct ListResourcesResult {
+    /// The resources offered.
+    pub resources: Vec<Resource>,
+    /// Opaque pagination cursor; `Some` means more pages follow.
+    pub next_cursor: Option<String>,
+}
+
+impl ListResourcesResult {
+    /// A single-page result over `resources`.
+    pub fn new(resources: Vec<Resource>) -> Self {
+        Self {
+            resources,
+            next_cursor: None,
+        }
+    }
+}
+
+/// Result of `resources/read`.
+#[derive(Clone, Debug, Default)]
+#[non_exhaustive]
+pub struct ReadResourceResult {
+    /// One or more content items (a single resource may expand to several).
+    pub contents: Vec<ResourceContents>,
+}
+
+impl ReadResourceResult {
+    /// A result carrying the given contents.
+    pub fn new(contents: Vec<ResourceContents>) -> Self {
+        Self { contents }
+    }
+
+    /// A result carrying a single text item.
+    pub fn text(uri: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            contents: alloc::vec![ResourceContents::text(uri, text)],
+        }
+    }
+}
+
+/// A resource template (`resources/templates/list`): a URI Template (RFC 6570)
+/// describing a family of resources.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct ResourceTemplate {
+    /// URI Template (e.g. `file://{path}`).
+    pub uri_template: String,
+    /// Programmatic identifier / fallback display name.
+    pub name: String,
+    /// Optional human-facing display name.
+    pub title: Option<String>,
+    /// Optional natural-language description.
+    pub description: Option<String>,
+    /// MIME type shared by all matching resources, if uniform.
+    pub mime_type: Option<String>,
+}
+
+impl ResourceTemplate {
+    /// A template with the given URI Template and name.
+    pub fn new(uri_template: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            uri_template: uri_template.into(),
+            name: name.into(),
+            title: None,
+            description: None,
+            mime_type: None,
+        }
+    }
+
+    /// Set the description (builder style).
+    #[must_use]
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
+    /// Set the title (builder style).
+    #[must_use]
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(title.into());
+        self
+    }
+
+    /// Set the MIME type (builder style).
+    #[must_use]
+    pub fn with_mime_type(mut self, mime_type: impl Into<String>) -> Self {
+        self.mime_type = Some(mime_type.into());
+        self
+    }
+}
+
+/// Result of `resources/templates/list`.
+#[derive(Clone, Debug, Default)]
+#[non_exhaustive]
+pub struct ListResourceTemplatesResult {
+    /// The templates offered.
+    pub resource_templates: Vec<ResourceTemplate>,
+    /// Opaque pagination cursor; `Some` means more pages follow.
+    pub next_cursor: Option<String>,
+}
+
+impl ListResourceTemplatesResult {
+    /// A single-page result over `resource_templates`.
+    pub fn new(resource_templates: Vec<ResourceTemplate>) -> Self {
+        Self {
+            resource_templates,
+            next_cursor: None,
+        }
+    }
+}
+
+/// `resources/read` parameters (the framework strips wire `_meta` into
+/// `RequestContext` before the handler sees this).
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct ReadResourceParams {
+    /// URI of the resource to read.
+    pub uri: String,
+}
+
+impl ReadResourceParams {
+    /// Construct from a URI.
+    pub fn new(uri: impl Into<String>) -> Self {
+        Self { uri: uri.into() }
+    }
+}
+
+// ---- prompts ------------------------------------------------------------------
+
+/// Who authored a prompt message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
+    /// The end user.
+    User,
+    /// The model.
+    Assistant,
+}
+
+/// A declared prompt argument (used for templating and completion).
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct PromptArgument {
+    /// Programmatic identifier / fallback display name.
+    pub name: String,
+    /// Optional human-facing display name.
+    pub title: Option<String>,
+    /// Optional natural-language description.
+    pub description: Option<String>,
+    /// Whether the argument must be provided.
+    pub required: bool,
+}
+
+impl PromptArgument {
+    /// An optional argument with the given name.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            title: None,
+            description: None,
+            required: false,
+        }
+    }
+
+    /// Mark the argument required (builder style).
+    #[must_use]
+    pub fn required(mut self, required: bool) -> Self {
+        self.required = required;
+        self
+    }
+
+    /// Set the description (builder style).
+    #[must_use]
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
+    /// Set the title (builder style).
+    #[must_use]
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(title.into());
+        self
+    }
+}
+
+/// A prompt descriptor (`prompts/list`).
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct Prompt {
+    /// Programmatic identifier (what `prompts/get` references).
+    pub name: String,
+    /// Optional human-facing display name.
+    pub title: Option<String>,
+    /// Optional natural-language description.
+    pub description: Option<String>,
+    /// Declared arguments for templating.
+    pub arguments: Vec<PromptArgument>,
+}
+
+impl Prompt {
+    /// A prompt with the given name and no arguments.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            title: None,
+            description: None,
+            arguments: Vec::new(),
+        }
+    }
+
+    /// Set the description (builder style).
+    #[must_use]
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
+    /// Set the title (builder style).
+    #[must_use]
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(title.into());
+        self
+    }
+
+    /// Append a declared argument (builder style).
+    #[must_use]
+    pub fn with_argument(mut self, argument: PromptArgument) -> Self {
+        self.arguments.push(argument);
+        self
+    }
+}
+
+/// A single message in a rendered prompt.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct PromptMessage {
+    /// Who authored the message.
+    pub role: Role,
+    /// The message content.
+    pub content: Content,
+}
+
+impl PromptMessage {
+    /// A user-authored message.
+    pub fn user(content: Content) -> Self {
+        Self {
+            role: Role::User,
+            content,
+        }
+    }
+
+    /// An assistant-authored message.
+    pub fn assistant(content: Content) -> Self {
+        Self {
+            role: Role::Assistant,
+            content,
+        }
+    }
+
+    /// A user-authored text message.
+    pub fn user_text(text: impl Into<String>) -> Self {
+        Self::user(Content::text(text))
+    }
+
+    /// An assistant-authored text message.
+    pub fn assistant_text(text: impl Into<String>) -> Self {
+        Self::assistant(Content::text(text))
+    }
+}
+
+/// Result of `prompts/list`.
+#[derive(Clone, Debug, Default)]
+#[non_exhaustive]
+pub struct ListPromptsResult {
+    /// The prompts offered.
+    pub prompts: Vec<Prompt>,
+    /// Opaque pagination cursor; `Some` means more pages follow.
+    pub next_cursor: Option<String>,
+}
+
+impl ListPromptsResult {
+    /// A single-page result over `prompts`.
+    pub fn new(prompts: Vec<Prompt>) -> Self {
+        Self {
+            prompts,
+            next_cursor: None,
+        }
+    }
+}
+
+/// Result of `prompts/get`: a rendered prompt as a message sequence.
+#[derive(Clone, Debug, Default)]
+#[non_exhaustive]
+pub struct GetPromptResult {
+    /// Optional description of the rendered prompt.
+    pub description: Option<String>,
+    /// The messages.
+    pub messages: Vec<PromptMessage>,
+}
+
+impl GetPromptResult {
+    /// A result carrying the given messages.
+    pub fn new(messages: Vec<PromptMessage>) -> Self {
+        Self {
+            description: None,
+            messages,
+        }
+    }
+
+    /// Set the description (builder style).
+    #[must_use]
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+}
+
+/// `prompts/get` parameters.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct GetPromptParams {
+    /// Name of the prompt to render.
+    pub name: String,
+    /// Templating arguments (string→string per spec).
+    pub arguments: BTreeMap<String, String>,
+}
+
+impl GetPromptParams {
+    /// Construct from a prompt name and arguments.
+    pub fn new(name: impl Into<String>, arguments: BTreeMap<String, String>) -> Self {
+        Self {
+            name: name.into(),
+            arguments,
+        }
+    }
+}
+
+// ---- completions --------------------------------------------------------------
+
+/// Result of `completion/complete`: up to 100 suggested values.
+#[derive(Clone, Debug, Default)]
+#[non_exhaustive]
+pub struct CompleteResult {
+    /// Suggested completion values (spec caps at 100).
+    pub values: Vec<String>,
+    /// Total available, which may exceed `values.len()`.
+    pub total: Option<u32>,
+    /// Whether more values exist beyond those returned.
+    pub has_more: Option<bool>,
+}
+
+impl CompleteResult {
+    /// A result carrying the given values.
+    pub fn new(values: Vec<String>) -> Self {
+        Self {
+            values,
+            total: None,
+            has_more: None,
+        }
+    }
+
+    /// Set the total count (builder style).
+    #[must_use]
+    pub fn with_total(mut self, total: u32) -> Self {
+        self.total = Some(total);
+        self
+    }
+
+    /// Set the has-more flag (builder style).
+    #[must_use]
+    pub fn with_has_more(mut self, has_more: bool) -> Self {
+        self.has_more = Some(has_more);
+        self
+    }
+}
+
+/// What a completion request is completing against.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub enum CompletionReference {
+    /// An argument of a prompt, by prompt name.
+    Prompt {
+        /// Prompt name.
+        name: String,
+    },
+    /// A variable of a resource template, by URI (template).
+    ResourceTemplate {
+        /// Resource URI or URI template.
+        uri: String,
+    },
+}
+
+/// The argument being completed: its name and the partial value typed so far.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct CompletionArgument {
+    /// Name of the argument.
+    pub name: String,
+    /// Partial value entered so far.
+    pub value: String,
+}
+
+impl CompletionArgument {
+    /// Construct from a name and partial value.
+    pub fn new(name: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            value: value.into(),
+        }
+    }
+}
+
+/// `completion/complete` parameters.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct CompleteParams {
+    /// What is being completed (a prompt or a resource template).
+    pub reference: CompletionReference,
+    /// The argument and its partial value.
+    pub argument: CompletionArgument,
+    /// Previously-resolved arguments (for multi-variable templates).
+    pub context_arguments: BTreeMap<String, String>,
+}
+
+impl CompleteParams {
+    /// Construct from a reference and the argument being completed.
+    pub fn new(reference: CompletionReference, argument: CompletionArgument) -> Self {
+        Self {
+            reference,
+            argument,
+            context_arguments: BTreeMap::new(),
+        }
+    }
+}
+
 // ---- neutral → DRAFT-2026-v1 wire conversions --------------------------------
 
 impl From<Content> for draft::ContentBlock {
@@ -216,6 +793,192 @@ impl From<CallToolResult> for draft::CallToolResult {
     }
 }
 
+// resources
+
+impl From<Resource> for draft::Resource {
+    fn from(r: Resource) -> Self {
+        draft::Resource {
+            annotations: None,
+            description: r.description,
+            icons: Vec::new(),
+            meta: None,
+            mime_type: r.mime_type,
+            name: r.name,
+            size: r.size.map(|s| i64::try_from(s).unwrap_or(i64::MAX)),
+            title: r.title,
+            uri: r.uri,
+        }
+    }
+}
+
+impl From<ResourceContents> for draft::ReadResourceResultContentsItem {
+    fn from(c: ResourceContents) -> Self {
+        match c {
+            ResourceContents::Text {
+                uri,
+                mime_type,
+                text,
+            } => draft::ReadResourceResultContentsItem::TextResourceContents(
+                draft::TextResourceContents {
+                    meta: None,
+                    mime_type,
+                    text,
+                    uri,
+                },
+            ),
+            ResourceContents::Blob {
+                uri,
+                mime_type,
+                blob,
+            } => draft::ReadResourceResultContentsItem::BlobResourceContents(
+                draft::BlobResourceContents {
+                    blob,
+                    meta: None,
+                    mime_type,
+                    uri,
+                },
+            ),
+        }
+    }
+}
+
+impl From<ListResourcesResult> for draft::ListResourcesResult {
+    fn from(r: ListResourcesResult) -> Self {
+        draft::ListResourcesResult {
+            cache_scope: draft::ListResourcesResultCacheScope::Private,
+            meta: None,
+            next_cursor: r.next_cursor,
+            resources: r.resources.into_iter().map(Into::into).collect(),
+            result_type: draft::ResultType::Complete,
+            ttl_ms: 0,
+        }
+    }
+}
+
+impl From<ReadResourceResult> for draft::ReadResourceResult {
+    fn from(r: ReadResourceResult) -> Self {
+        draft::ReadResourceResult {
+            cache_scope: draft::ReadResourceResultCacheScope::Private,
+            contents: r.contents.into_iter().map(Into::into).collect(),
+            meta: None,
+            result_type: draft::ResultType::Complete,
+            ttl_ms: 0,
+        }
+    }
+}
+
+impl From<ResourceTemplate> for draft::ResourceTemplate {
+    fn from(t: ResourceTemplate) -> Self {
+        draft::ResourceTemplate {
+            annotations: None,
+            description: t.description,
+            icons: Vec::new(),
+            meta: None,
+            mime_type: t.mime_type,
+            name: t.name,
+            title: t.title,
+            uri_template: t.uri_template,
+        }
+    }
+}
+
+impl From<ListResourceTemplatesResult> for draft::ListResourceTemplatesResult {
+    fn from(r: ListResourceTemplatesResult) -> Self {
+        draft::ListResourceTemplatesResult {
+            cache_scope: draft::ListResourceTemplatesResultCacheScope::Private,
+            meta: None,
+            next_cursor: r.next_cursor,
+            resource_templates: r.resource_templates.into_iter().map(Into::into).collect(),
+            result_type: draft::ResultType::Complete,
+            ttl_ms: 0,
+        }
+    }
+}
+
+// prompts
+
+impl From<Role> for draft::Role {
+    fn from(r: Role) -> Self {
+        match r {
+            Role::User => draft::Role::User,
+            Role::Assistant => draft::Role::Assistant,
+        }
+    }
+}
+
+impl From<PromptArgument> for draft::PromptArgument {
+    fn from(a: PromptArgument) -> Self {
+        draft::PromptArgument {
+            description: a.description,
+            name: a.name,
+            required: Some(a.required),
+            title: a.title,
+        }
+    }
+}
+
+impl From<Prompt> for draft::Prompt {
+    fn from(p: Prompt) -> Self {
+        draft::Prompt {
+            arguments: p.arguments.into_iter().map(Into::into).collect(),
+            description: p.description,
+            icons: Vec::new(),
+            meta: None,
+            name: p.name,
+            title: p.title,
+        }
+    }
+}
+
+impl From<PromptMessage> for draft::PromptMessage {
+    fn from(m: PromptMessage) -> Self {
+        draft::PromptMessage {
+            content: m.content.into(),
+            role: m.role.into(),
+        }
+    }
+}
+
+impl From<ListPromptsResult> for draft::ListPromptsResult {
+    fn from(r: ListPromptsResult) -> Self {
+        draft::ListPromptsResult {
+            cache_scope: draft::ListPromptsResultCacheScope::Private,
+            meta: None,
+            next_cursor: r.next_cursor,
+            prompts: r.prompts.into_iter().map(Into::into).collect(),
+            result_type: draft::ResultType::Complete,
+            ttl_ms: 0,
+        }
+    }
+}
+
+impl From<GetPromptResult> for draft::GetPromptResult {
+    fn from(r: GetPromptResult) -> Self {
+        draft::GetPromptResult {
+            description: r.description,
+            messages: r.messages.into_iter().map(Into::into).collect(),
+            meta: None,
+            result_type: draft::ResultType::Complete,
+        }
+    }
+}
+
+// completions
+
+impl From<CompleteResult> for draft::CompleteResult {
+    fn from(r: CompleteResult) -> Self {
+        draft::CompleteResult {
+            completion: draft::CompleteResultCompletion {
+                has_more: r.has_more,
+                total: r.total.map(i64::from),
+                values: r.values,
+            },
+            meta: None,
+            result_type: draft::ResultType::Complete,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -252,5 +1015,77 @@ mod tests {
         assert_eq!(v["cacheScope"], "private");
         assert_eq!(v["ttlMs"], 0);
         assert_eq!(v["tools"][0]["name"], "a");
+    }
+
+    #[test]
+    fn read_resource_text_widens_to_wire_union() {
+        let wire: draft::ReadResourceResult = ReadResourceResult::text("file://a", "hi").into();
+        let v = serde_json::to_value(&wire).unwrap();
+        assert_eq!(v["resultType"], "complete");
+        assert_eq!(v["cacheScope"], "private");
+        assert_eq!(v["contents"][0]["uri"], "file://a");
+        assert_eq!(v["contents"][0]["text"], "hi");
+    }
+
+    #[test]
+    fn list_resources_and_templates_fill_required_fields() {
+        let res: draft::ListResourcesResult = ListResourcesResult::new(alloc::vec![
+            Resource::new("file://a", "a").with_mime_type("text/plain"),
+        ])
+        .into();
+        let v = serde_json::to_value(&res).unwrap();
+        assert_eq!(v["resultType"], "complete");
+        assert_eq!(v["resources"][0]["mimeType"], "text/plain");
+
+        let templates: draft::ListResourceTemplatesResult = ListResourceTemplatesResult::new(
+            alloc::vec![ResourceTemplate::new("file://{path}", "files",)],
+        )
+        .into();
+        let v = serde_json::to_value(&templates).unwrap();
+        assert_eq!(v["resourceTemplates"][0]["uriTemplate"], "file://{path}");
+        assert_eq!(v["cacheScope"], "private");
+    }
+
+    #[test]
+    fn prompt_get_widens_with_roles() {
+        let wire: draft::GetPromptResult = GetPromptResult::new(alloc::vec![
+            PromptMessage::user_text("hello"),
+            PromptMessage::assistant_text("hi there"),
+        ])
+        .with_description("greeting")
+        .into();
+        let v = serde_json::to_value(&wire).unwrap();
+        assert_eq!(v["resultType"], "complete");
+        assert_eq!(v["description"], "greeting");
+        assert_eq!(v["messages"][0]["role"], "user");
+        assert_eq!(v["messages"][0]["content"]["text"], "hello");
+        assert_eq!(v["messages"][1]["role"], "assistant");
+    }
+
+    #[test]
+    fn list_prompts_carries_arguments() {
+        let wire: draft::ListPromptsResult = ListPromptsResult::new(alloc::vec![
+            Prompt::new("summarize")
+                .with_description("Summarize text")
+                .with_argument(PromptArgument::new("text").required(true)),
+        ])
+        .into();
+        let v = serde_json::to_value(&wire).unwrap();
+        assert_eq!(v["prompts"][0]["name"], "summarize");
+        assert_eq!(v["prompts"][0]["arguments"][0]["name"], "text");
+        assert_eq!(v["prompts"][0]["arguments"][0]["required"], true);
+    }
+
+    #[test]
+    fn complete_result_nests_completion() {
+        let wire: draft::CompleteResult = CompleteResult::new(alloc::vec!["foo".to_string()])
+            .with_total(1)
+            .with_has_more(false)
+            .into();
+        let v = serde_json::to_value(&wire).unwrap();
+        assert_eq!(v["resultType"], "complete");
+        assert_eq!(v["completion"]["values"][0], "foo");
+        assert_eq!(v["completion"]["total"], 1);
+        assert_eq!(v["completion"]["hasMore"], false);
     }
 }

@@ -14,7 +14,10 @@ use core::future::Future;
 use turbomcp4_core::{Implementation, McpResult, ProtocolVersion};
 use turbomcp4_protocol::neutral;
 
-use crate::context::{CallToolContext, ListToolsContext};
+use crate::context::{
+    CallToolContext, CompleteContext, GetPromptContext, ListPromptsContext,
+    ListResourceTemplatesContext, ListResourcesContext, ListToolsContext, ReadResourceContext,
+};
 
 /// The required server trait. Every server implements this; capability traits
 /// (`WithTools`, …) are added à la carte.
@@ -41,10 +44,11 @@ pub trait McpServerCore: Clone + Send + Sync + 'static {
 
 /// Implement to serve tools (`tools/list`, `tools/call`).
 pub trait WithTools: McpServerCore {
-    /// Enumerate available tools.
+    /// Enumerate available tools. `params.cursor` continues a prior page.
     fn list_tools(
         &self,
         ctx: &ListToolsContext,
+        params: neutral::ListParams,
     ) -> impl Future<Output = McpResult<neutral::ListToolsResult>> + Send;
 
     /// Invoke a tool. Per spec, tool-level failure is reported via
@@ -55,4 +59,60 @@ pub trait WithTools: McpServerCore {
         ctx: &CallToolContext,
         params: neutral::CallToolParams,
     ) -> impl Future<Output = McpResult<neutral::CallToolResult>> + Send;
+}
+
+/// Implement to serve resources (`resources/list`, `resources/read`, and
+/// optionally `resources/templates/list`).
+pub trait WithResources: McpServerCore {
+    /// Enumerate concrete resources. `params.cursor` continues a prior page.
+    fn list_resources(
+        &self,
+        ctx: &ListResourcesContext,
+        params: neutral::ListParams,
+    ) -> impl Future<Output = McpResult<neutral::ListResourcesResult>> + Send;
+
+    /// Read a resource by URI.
+    fn read_resource(
+        &self,
+        ctx: &ReadResourceContext,
+        params: neutral::ReadResourceParams,
+    ) -> impl Future<Output = McpResult<neutral::ReadResourceResult>> + Send;
+
+    /// Enumerate resource templates (RFC 6570 URI Templates). Defaults to an
+    /// empty list, so servers exposing only concrete resources need not override
+    /// it; `resources/templates/list` is still answered (with no templates).
+    fn list_resource_templates(
+        &self,
+        _ctx: &ListResourceTemplatesContext,
+        _params: neutral::ListParams,
+    ) -> impl Future<Output = McpResult<neutral::ListResourceTemplatesResult>> + Send {
+        core::future::ready(Ok(neutral::ListResourceTemplatesResult::default()))
+    }
+}
+
+/// Implement to serve prompts (`prompts/list`, `prompts/get`).
+pub trait WithPrompts: McpServerCore {
+    /// Enumerate available prompts. `params.cursor` continues a prior page.
+    fn list_prompts(
+        &self,
+        ctx: &ListPromptsContext,
+        params: neutral::ListParams,
+    ) -> impl Future<Output = McpResult<neutral::ListPromptsResult>> + Send;
+
+    /// Render a prompt to a message sequence, applying `params.arguments`.
+    fn get_prompt(
+        &self,
+        ctx: &GetPromptContext,
+        params: neutral::GetPromptParams,
+    ) -> impl Future<Output = McpResult<neutral::GetPromptResult>> + Send;
+}
+
+/// Implement to serve argument autocompletion (`completion/complete`).
+pub trait WithCompletions: McpServerCore {
+    /// Suggest completions for the partially-typed argument in `params`.
+    fn complete(
+        &self,
+        ctx: &CompleteContext,
+        params: neutral::CompleteParams,
+    ) -> impl Future<Output = McpResult<neutral::CompleteResult>> + Send;
 }

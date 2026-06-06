@@ -22,10 +22,13 @@ mod dispatcher;
 mod router;
 mod traits;
 
-pub use context::{CallToolContext, ListToolsContext};
+pub use context::{
+    CallToolContext, CompleteContext, GetPromptContext, ListPromptsContext,
+    ListResourceTemplatesContext, ListResourcesContext, ListToolsContext, ReadResourceContext,
+};
 pub use dispatcher::VersionDispatcher;
 pub use router::MethodRouter;
-pub use traits::{McpServerCore, WithTools};
+pub use traits::{McpServerCore, WithCompletions, WithPrompts, WithResources, WithTools};
 
 #[cfg(test)]
 mod tests {
@@ -49,7 +52,11 @@ mod tests {
     }
 
     impl WithTools for Calculator {
-        async fn list_tools(&self, _ctx: &ListToolsContext) -> McpResult<neutral::ListToolsResult> {
+        async fn list_tools(
+            &self,
+            _ctx: &ListToolsContext,
+            _params: neutral::ListParams,
+        ) -> McpResult<neutral::ListToolsResult> {
             Ok(neutral::ListToolsResult::new(vec![neutral::Tool::new(
                 "add",
                 json!({"type": "object", "properties": {"a": {"type": "number"}, "b": {"type": "number"}}}),
@@ -231,5 +238,247 @@ mod tests {
     #[test]
     fn dispatcher_is_send() {
         _is_send::<VersionDispatcher<Calculator>>();
+    }
+
+    // ---- resources / prompts / completions ----------------------------------
+
+    /// A server implementing every capability trait, used to prove discover
+    /// advertises each one and the dispatcher routes all method families.
+    #[derive(Clone)]
+    struct Everything;
+
+    impl McpServerCore for Everything {
+        fn server_info(&self) -> Implementation {
+            Implementation::new("everything", "0.1.0")
+        }
+    }
+
+    impl WithResources for Everything {
+        async fn list_resources(
+            &self,
+            _ctx: &ListResourcesContext,
+            _params: neutral::ListParams,
+        ) -> McpResult<neutral::ListResourcesResult> {
+            Ok(neutral::ListResourcesResult::new(vec![
+                neutral::Resource::new("file://readme", "readme").with_mime_type("text/plain"),
+            ]))
+        }
+
+        async fn read_resource(
+            &self,
+            _ctx: &ReadResourceContext,
+            params: neutral::ReadResourceParams,
+        ) -> McpResult<neutral::ReadResourceResult> {
+            Ok(neutral::ReadResourceResult::text(
+                params.uri,
+                "file contents",
+            ))
+        }
+    }
+
+    impl WithPrompts for Everything {
+        async fn list_prompts(
+            &self,
+            _ctx: &ListPromptsContext,
+            _params: neutral::ListParams,
+        ) -> McpResult<neutral::ListPromptsResult> {
+            Ok(neutral::ListPromptsResult::new(vec![
+                neutral::Prompt::new("greet")
+                    .with_argument(neutral::PromptArgument::new("name").required(true)),
+            ]))
+        }
+
+        async fn get_prompt(
+            &self,
+            _ctx: &GetPromptContext,
+            params: neutral::GetPromptParams,
+        ) -> McpResult<neutral::GetPromptResult> {
+            let name = params.arguments.get("name").cloned().unwrap_or_default();
+            Ok(neutral::GetPromptResult::new(vec![
+                neutral::PromptMessage::user_text(format!("Greet {name}")),
+            ]))
+        }
+    }
+
+    impl WithCompletions for Everything {
+        async fn complete(
+            &self,
+            _ctx: &CompleteContext,
+            params: neutral::CompleteParams,
+        ) -> McpResult<neutral::CompleteResult> {
+            // Echo the partial value back as the single suggestion.
+            Ok(neutral::CompleteResult::new(vec![params.argument.value]))
+        }
+    }
+
+    fn everything() -> VersionDispatcher<Everything> {
+        VersionDispatcher::new(
+            Everything,
+            MethodRouter::new()
+                .with_resources()
+                .with_prompts()
+                .with_completions(),
+        )
+    }
+
+    async fn call_everything(
+        svc: &mut VersionDispatcher<Everything>,
+        req: JsonRpcRequest,
+    ) -> serde_json::Value {
+        let JsonRpcMessage::Response(r) = svc
+            .ready()
+            .await
+            .unwrap()
+            .call(req.into())
+            .await
+            .unwrap()
+            .expect("response")
+        else {
+            panic!("expected response")
+        };
+        r.result.expect("result")
+    }
+
+    #[tokio::test]
+    async fn discover_advertises_all_capabilities() {
+        let mut svc = everything();
+        let result =
+            call_everything(&mut svc, JsonRpcRequest::new(1, "server/discover", None)).await;
+        let caps = &result["capabilities"];
+        assert_eq!(caps["resources"]["listChanged"], false);
+        assert_eq!(caps["resources"]["subscribe"], false);
+        assert_eq!(caps["prompts"]["listChanged"], false);
+        assert!(caps["completions"].is_object());
+        // No tools were registered → no tools capability.
+        assert!(caps.get("tools").is_none());
+    }
+
+    #[tokio::test]
+    async fn resources_list_read_and_templates_route() {
+        let mut svc = everything();
+        let meta = json!({ "_meta": draft_meta() });
+
+        let list = call_everything(
+            &mut svc,
+            JsonRpcRequest::new(2, "resources/list", Some(meta.clone())),
+        )
+        .await;
+        assert_eq!(list["resources"][0]["uri"], "file://readme");
+        assert_eq!(list["resources"][0]["mimeType"], "text/plain");
+
+        let read = call_everything(
+            &mut svc,
+            JsonRpcRequest::new(
+                3,
+                "resources/read",
+                Some(json!({ "uri": "file://readme", "_meta": draft_meta() })),
+            ),
+        )
+        .await;
+        assert_eq!(read["contents"][0]["uri"], "file://readme");
+        assert_eq!(read["contents"][0]["text"], "file contents");
+
+        // The default `list_resource_templates` answers with an empty list.
+        let templates = call_everything(
+            &mut svc,
+            JsonRpcRequest::new(4, "resources/templates/list", Some(meta)),
+        )
+        .await;
+        assert_eq!(templates["resourceTemplates"].as_array().unwrap().len(), 0);
+        assert_eq!(templates["resultType"], "complete");
+    }
+
+    #[tokio::test]
+    async fn prompts_list_and_get_route() {
+        let mut svc = everything();
+        let list = call_everything(
+            &mut svc,
+            JsonRpcRequest::new(5, "prompts/list", Some(json!({ "_meta": draft_meta() }))),
+        )
+        .await;
+        assert_eq!(list["prompts"][0]["name"], "greet");
+        assert_eq!(list["prompts"][0]["arguments"][0]["required"], true);
+
+        let got = call_everything(
+            &mut svc,
+            JsonRpcRequest::new(
+                6,
+                "prompts/get",
+                Some(
+                    json!({ "name": "greet", "arguments": {"name": "Ada"}, "_meta": draft_meta() }),
+                ),
+            ),
+        )
+        .await;
+        assert_eq!(got["messages"][0]["role"], "user");
+        assert_eq!(got["messages"][0]["content"]["text"], "Greet Ada");
+    }
+
+    #[tokio::test]
+    async fn completion_complete_routes_with_ref_union() {
+        let mut svc = everything();
+        let result = call_everything(
+            &mut svc,
+            JsonRpcRequest::new(
+                7,
+                "completion/complete",
+                Some(json!({
+                    "ref": { "type": "ref/prompt", "name": "greet" },
+                    "argument": { "name": "name", "value": "Ad" },
+                    "_meta": draft_meta(),
+                })),
+            ),
+        )
+        .await;
+        assert_eq!(result["completion"]["values"][0], "Ad");
+        assert_eq!(result["resultType"], "complete");
+    }
+
+    #[tokio::test]
+    async fn unregistered_capability_is_method_not_found() {
+        // `Everything` doesn't register tools; calling a tools method 404s.
+        let mut svc = everything();
+        let JsonRpcMessage::Response(r) = svc
+            .ready()
+            .await
+            .unwrap()
+            .call(
+                JsonRpcRequest::new(8, "tools/list", Some(json!({ "_meta": draft_meta() }))).into(),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(r.error.unwrap().code, -32601);
+    }
+
+    #[tokio::test]
+    async fn malformed_completion_ref_is_invalid_params() {
+        let mut svc = everything();
+        let JsonRpcMessage::Response(r) = svc
+            .ready()
+            .await
+            .unwrap()
+            .call(
+                JsonRpcRequest::new(
+                    9,
+                    "completion/complete",
+                    Some(json!({
+                        "ref": { "type": "ref/prompt" },
+                        "argument": { "name": "x", "value": "" },
+                        "_meta": draft_meta(),
+                    })),
+                )
+                .into(),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(r.error.unwrap().code, -32602);
     }
 }

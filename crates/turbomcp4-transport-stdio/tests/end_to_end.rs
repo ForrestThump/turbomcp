@@ -23,7 +23,11 @@ impl McpServerCore for Calculator {
 }
 
 impl WithTools for Calculator {
-    async fn list_tools(&self, _ctx: &ListToolsContext) -> McpResult<neutral::ListToolsResult> {
+    async fn list_tools(
+        &self,
+        _ctx: &ListToolsContext,
+        _params: neutral::ListParams,
+    ) -> McpResult<neutral::ListToolsResult> {
         Ok(neutral::ListToolsResult::new(vec![neutral::Tool::new(
             "add",
             json!({"type": "object", "properties": {"a": {"type": "number"}, "b": {"type": "number"}}}),

@@ -18,12 +18,16 @@ pub mod request {
     pub const TOOLS_CALL: &str = "tools/call";
     /// `resources/list` — enumerate resources.
     pub const RESOURCES_LIST: &str = "resources/list";
+    /// `resources/templates/list` — enumerate resource templates.
+    pub const RESOURCES_TEMPLATES_LIST: &str = "resources/templates/list";
     /// `resources/read` — read a resource.
     pub const RESOURCES_READ: &str = "resources/read";
     /// `prompts/list` — enumerate prompts.
     pub const PROMPTS_LIST: &str = "prompts/list";
     /// `prompts/get` — render a prompt.
     pub const PROMPTS_GET: &str = "prompts/get";
+    /// `completion/complete` — argument autocompletion.
+    pub const COMPLETION_COMPLETE: &str = "completion/complete";
 }
 
 /// Notification method names (no response).
