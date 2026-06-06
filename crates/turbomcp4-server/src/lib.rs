@@ -17,11 +17,13 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod builder;
 mod context;
 mod dispatcher;
 mod router;
 mod traits;
 
+pub use builder::{IntoServerBuilder, ServerBuilder};
 pub use context::{
     CallToolContext, CompleteContext, GetPromptContext, ListPromptsContext,
     ListResourceTemplatesContext, ListResourcesContext, ListToolsContext, ReadResourceContext,
@@ -238,6 +240,34 @@ mod tests {
     #[test]
     fn dispatcher_is_send() {
         _is_send::<VersionDispatcher<Calculator>>();
+    }
+
+    #[tokio::test]
+    async fn builder_registers_capabilities() {
+        // `into_server()` (blanket) starts empty; `with_tools()` registers.
+        let mut svc = Calculator.into_server().with_tools().build();
+        let JsonRpcMessage::Response(r) = svc
+            .ready()
+            .await
+            .unwrap()
+            .call(JsonRpcRequest::new(1, "server/discover", None).into())
+            .await
+            .unwrap()
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(
+            r.result.unwrap()["capabilities"]["tools"]["listChanged"],
+            false
+        );
+    }
+
+    #[test]
+    fn builder_without_registration_has_no_capabilities() {
+        let dispatcher = ServerBuilder::new(Calculator).build();
+        _is_send::<VersionDispatcher<Calculator>>();
+        let _ = dispatcher; // built successfully with an empty router
     }
 
     // ---- resources / prompts / completions ----------------------------------
