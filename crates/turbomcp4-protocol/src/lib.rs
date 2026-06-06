@@ -11,7 +11,10 @@
 //!   `subscriptions/listen`, MRTR (`InputRequiredResult`); Tasks moves to the
 //!   `extensions` mechanism.
 //!
-//! The cross-version `neutral` subset and `VersionDispatcher` land in Phase 2.
+//! The cross-version [`neutral`] handler surface and the [`methods`]/[`version`]
+//! routing primitives live here; the `VersionDispatcher` that consumes them is
+//! in `turbomcp4-server` (it is generic over the user's `McpServerCore`, which
+//! sits above this layer — keeping the dependency graph acyclic).
 //!
 //! `no_std + alloc`: the generated types use only `core`/`alloc` paths (the
 //! codegen remaps typify's `::std::` output), so this crate is wasm-portable.
@@ -22,5 +25,8 @@ extern crate alloc;
 
 use turbomcp4_core as _;
 
+pub mod methods;
+pub mod neutral;
 pub mod v2025_11_25;
 pub mod v2026_draft;
+pub mod version;

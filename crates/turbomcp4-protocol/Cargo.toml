@@ -9,6 +9,12 @@ license = "MIT"
 repository = "https://github.com/Epistates/turbomcp"
 homepage = "https://turbomcp.org"
 
+[lib]
+# The generated per-version `types` modules carry the spec's prose docs
+# verbatim; rustdoc misreads their indented/backticked text as Rust doctests.
+# These are @generated and reviewed on regen — run real tests, not doc prose.
+doctest = false
+
 [dependencies]
 turbomcp4-core = { workspace = true, default-features = false }
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }

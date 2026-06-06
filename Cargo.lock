@@ -6146,6 +6146,11 @@ dependencies = [
 name = "turbomcp4-codec"
 version = "4.0.0-alpha.1"
 dependencies = [
+ "bytes",
+ "serde",
+ "serde_json",
+ "sonic-rs",
+ "thiserror 2.0.18",
  "turbomcp4-core",
 ]
 
@@ -6208,13 +6213,28 @@ dependencies = [
 name = "turbomcp4-server"
 version = "4.0.0-alpha.1"
 dependencies = [
+ "futures",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
+ "tracing",
  "turbomcp4-core",
+ "turbomcp4-protocol",
+ "turbomcp4-service",
 ]
 
 [[package]]
 name = "turbomcp4-service"
 version = "4.0.0-alpha.1"
 dependencies = [
+ "futures",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower",
+ "tracing",
+ "turbomcp4-codec",
  "turbomcp4-core",
 ]
 
@@ -6236,7 +6256,14 @@ dependencies = [
 name = "turbomcp4-transport-stdio"
 version = "4.0.0-alpha.1"
 dependencies = [
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "turbomcp4-codec",
  "turbomcp4-core",
+ "turbomcp4-protocol",
+ "turbomcp4-server",
+ "turbomcp4-service",
 ]
 
 [[package]]

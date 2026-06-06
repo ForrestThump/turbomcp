@@ -11,3 +11,13 @@ homepage = "https://turbomcp.org"
 
 [dependencies]
 turbomcp4-core = { workspace = true }
+turbomcp4-protocol = { workspace = true }
+turbomcp4-service = { workspace = true }
+tower = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
