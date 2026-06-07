@@ -9,6 +9,11 @@ license = "MIT"
 repository = "https://github.com/Epistates/turbomcp"
 homepage = "https://turbomcp.org"
 
+[features]
+# stdio is the default transport and is always linked; http is opt-in.
+default = []
+http = ["dep:turbomcp4-transport-http"]
+
 [dependencies]
 turbomcp4-core = { workspace = true }
 turbomcp4-protocol = { workspace = true }
@@ -16,6 +21,7 @@ turbomcp4-codec = { workspace = true }
 turbomcp4-service = { workspace = true }
 turbomcp4-server = { workspace = true }
 turbomcp4-transport-stdio = { workspace = true }
+turbomcp4-transport-http = { workspace = true, optional = true }
 turbomcp4-macros = { workspace = true }
 
 # Re-exported for `#[server]`-generated code (schema derivation + (de)serialization).
@@ -24,9 +30,24 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true }
+tokio = { workspace = true, features = [
+    "macros",
+    "rt",
+    "rt-multi-thread",
+    "io-util",
+    "time",
+] }
 insta = { workspace = true }
-tower = { workspace = true }
+tower = { workspace = true, features = ["util"] }
+axum = { workspace = true }
+http-body-util = "0.1"
 
 [lib]
 doctest = false
+
+[[example]]
+name = "hello_world"
+
+[[example]]
+name = "dual_transport"
+required-features = ["http"]

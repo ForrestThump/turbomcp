@@ -51,6 +51,25 @@ pub use turbomcp4_server::{
 
 pub use turbomcp4_transport_stdio::{serve_stdio, serve_stdio_with, stdio};
 
+/// Streamable HTTP transport (axum 0.8). Enable with the `http` feature.
+///
+/// Serve a macro server over HTTP by building its dispatcher and handing it to
+/// [`serve_http`](http::serve_http):
+///
+/// ```ignore
+/// use turbomcp4::http::{serve_http, HttpConfig};
+/// use turbomcp4::IntoServerBuilder;
+///
+/// // `.into_server()` resolves to the macro-generated inherent method, so the
+/// // server's capabilities are pre-registered.
+/// let service = MyServer.into_server().build();
+/// serve_http("127.0.0.1:8080".parse()?, service, HttpConfig::new()).await?;
+/// ```
+#[cfg(feature = "http")]
+pub mod http {
+    pub use turbomcp4_transport_http::{HttpConfig, HttpError, router, serve_http};
+}
+
 // ---- macros -----------------------------------------------------------------
 
 pub use turbomcp4_macros::{mcp_header, prompt, resource, server, tool};

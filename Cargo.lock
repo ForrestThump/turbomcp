@@ -6146,6 +6146,8 @@ dependencies = [
 name = "turbomcp4"
 version = "4.0.0-alpha.1"
 dependencies = [
+ "axum",
+ "http-body-util",
  "insta",
  "schemars 1.2.1",
  "serde",
@@ -6158,6 +6160,7 @@ dependencies = [
  "turbomcp4-protocol",
  "turbomcp4-server",
  "turbomcp4-service",
+ "turbomcp4-transport-http",
  "turbomcp4-transport-stdio",
 ]
 
