@@ -34,7 +34,9 @@ pub use turbomcp4_protocol::neutral;
 // ---- service seam + codec ---------------------------------------------------
 
 pub use turbomcp4_codec::{Codec, CodecError, DefaultCodec, SerdeJsonCodec};
-pub use turbomcp4_service::{McpService, ProtocolError, Transport, serve};
+pub use turbomcp4_service::{
+    CancellationToken, McpService, ProtocolError, ServeConfig, Transport, serve, serve_with,
+};
 
 // ---- server -----------------------------------------------------------------
 
@@ -47,7 +49,7 @@ pub use turbomcp4_server::{
 
 // ---- transports -------------------------------------------------------------
 
-pub use turbomcp4_transport_stdio::{serve_stdio, stdio};
+pub use turbomcp4_transport_stdio::{serve_stdio, serve_stdio_with, stdio};
 
 // ---- macros -----------------------------------------------------------------
 

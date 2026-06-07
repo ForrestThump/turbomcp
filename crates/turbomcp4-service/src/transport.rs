@@ -4,12 +4,9 @@
 //! and hand the codec complete frames. The serve loop drives a `Transport`
 //! directly, so the trait uses return-position `impl Future` (native AFIT/RPITIT)
 //! rather than boxed futures — no per-message allocation, fully monomorphized.
-//!
-//! Graceful shutdown (`graceful_shutdown(deadline)`) lands with the STDIO
-//! writer-actor in Phase 4, where there's machinery to drain in-flight work;
-//! Phase 2 keeps the surface to the minimum the serve loop needs.
 
 use core::future::Future;
+use std::time::Instant;
 
 use turbomcp4_core::JsonRpcMessage;
 
@@ -30,4 +27,21 @@ pub trait Transport: Send + 'static {
 
     /// Close the transport, flushing anything pending.
     fn close(self) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
+    /// Close the transport, having been given a `deadline` by which any drain of
+    /// pending writes should complete (PLAN §4.13).
+    ///
+    /// The default flushes-and-closes via [`Transport::close`], ignoring the
+    /// deadline — correct for transports whose `send` already flushes each frame
+    /// (e.g. stdio's line writer). Transports that buffer or own a long-lived
+    /// outbound stream (HTTP SSE, in Phase 6) override this to honor the bound.
+    fn graceful_shutdown(
+        self,
+        _deadline: Instant,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send
+    where
+        Self: Sized,
+    {
+        self.close()
+    }
 }

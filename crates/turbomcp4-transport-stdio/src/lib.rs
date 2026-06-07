@@ -21,7 +21,7 @@ use tokio::io::{
 };
 use turbomcp4_codec::{Codec, CodecError, DefaultCodec};
 use turbomcp4_core::JsonRpcMessage;
-use turbomcp4_service::{McpService, Transport};
+use turbomcp4_service::{McpService, ServeConfig, Transport};
 
 /// Failures from the line transport.
 #[derive(Debug, thiserror::Error)]
@@ -114,8 +114,26 @@ pub fn stdio() -> StdioTransport {
 ///
 /// # Errors
 /// Propagates transport and service errors from the driver loop.
-pub async fn serve_stdio<S: McpService>(
-    service: S,
-) -> Result<(), turbomcp4_service::ProtocolError> {
+pub async fn serve_stdio<S>(service: S) -> Result<(), turbomcp4_service::ProtocolError>
+where
+    S: McpService + Clone,
+    S::Future: Send + 'static,
+{
     turbomcp4_service::serve(stdio(), service).await
+}
+
+/// Serve `service` over stdin/stdout with explicit [`ServeConfig`] — the entry
+/// point when you need a shutdown token, drain timeout, or concurrency bound.
+///
+/// # Errors
+/// Propagates transport and service errors from the driver loop.
+pub async fn serve_stdio_with<S>(
+    service: S,
+    config: ServeConfig,
+) -> Result<(), turbomcp4_service::ProtocolError>
+where
+    S: McpService + Clone,
+    S::Future: Send + 'static,
+{
+    turbomcp4_service::serve_with(stdio(), service, config).await
 }

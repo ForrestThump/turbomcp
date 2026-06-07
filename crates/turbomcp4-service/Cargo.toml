@@ -15,8 +15,17 @@ turbomcp4-codec = { workspace = true }
 tower = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+tokio-util = { workspace = true }
 
 [dev-dependencies]
 futures = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = [
+    "macros",
+    "rt",
+    "rt-multi-thread",
+    "sync",
+    "time",
+    "io-util",
+] }

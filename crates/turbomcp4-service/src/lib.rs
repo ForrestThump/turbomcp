@@ -24,8 +24,10 @@ mod transport;
 
 pub use error::{ProtocolError, mcp_to_jsonrpc_error};
 pub use middleware::{Tracing, TracingLayer};
-pub use serve::serve;
+pub use serve::{ServeConfig, serve, serve_with};
 pub use transport::Transport;
+
+pub use tokio_util::sync::CancellationToken;
 
 use turbomcp4_core::JsonRpcMessage;
 
