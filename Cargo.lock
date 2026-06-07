@@ -6283,7 +6283,21 @@ dependencies = [
 name = "turbomcp4-transport-http"
 version = "4.0.0-alpha.1"
 dependencies = [
+ "axum",
+ "bytes",
+ "http-body-util",
+ "reqwest 0.13.3",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower",
+ "tower-http",
+ "tracing",
+ "turbomcp4-codec",
  "turbomcp4-core",
+ "turbomcp4-protocol",
+ "turbomcp4-server",
+ "turbomcp4-service",
 ]
 
 [[package]]
