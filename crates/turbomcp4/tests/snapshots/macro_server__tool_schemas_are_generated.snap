@@ -1,0 +1,65 @@
+---
+source: crates/turbomcp4/tests/macro_server.rs
+expression: tools
+---
+[
+  {
+    "description": "Add two numbers (the second is optional).",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "a"
+      ],
+      "properties": {
+        "a": {
+          "type": "number",
+          "format": "double"
+        },
+        "b": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      }
+    },
+    "name": "add"
+  },
+  {
+    "description": "Say hello to someone",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        }
+      }
+    },
+    "name": "hello"
+  },
+  {
+    "description": "Run a query, mirroring `region` into a request header.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "region",
+        "sql"
+      ],
+      "properties": {
+        "region": {
+          "type": "string",
+          "x-mcp-header": true
+        },
+        "sql": {
+          "description": "The SQL to run",
+          "type": "string"
+        }
+      }
+    },
+    "name": "query"
+  }
+]

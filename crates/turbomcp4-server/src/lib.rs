@@ -20,6 +20,7 @@
 mod builder;
 mod context;
 mod dispatcher;
+mod response;
 mod router;
 mod traits;
 
@@ -29,8 +30,40 @@ pub use context::{
     ListResourceTemplatesContext, ListResourcesContext, ListToolsContext, ReadResourceContext,
 };
 pub use dispatcher::VersionDispatcher;
+pub use response::{IntoCallToolResult, IntoGetPromptResult, IntoReadResourceResult};
 pub use router::MethodRouter;
 pub use traits::{McpServerCore, WithCompletions, WithPrompts, WithResources, WithTools};
+
+/// Support items called by `#[server]`-generated code. Not part of the stable
+/// API — do not depend on it directly.
+#[doc(hidden)]
+pub mod __macro_support {
+    use serde_json::Value;
+
+    /// Strip schemars bookkeeping (`$schema`, `title`) so a generated argument
+    /// schema reads as a clean MCP tool input schema.
+    #[must_use]
+    pub fn normalize_input_schema(mut v: Value) -> Value {
+        if let Some(obj) = v.as_object_mut() {
+            obj.remove("$schema");
+            obj.remove("title");
+        }
+        v
+    }
+
+    /// Mark a property as an MCP header parameter (SEP-2243). Transport-side
+    /// mirroring lands in Phase 4; here we annotate the input schema so the
+    /// information is present and snapshot-tested.
+    pub fn mark_mcp_header(schema: &mut Value, property: &str) {
+        if let Some(prop) = schema
+            .get_mut("properties")
+            .and_then(|p| p.get_mut(property))
+            .and_then(Value::as_object_mut)
+        {
+            prop.insert("x-mcp-header".into(), Value::Bool(true));
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

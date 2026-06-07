@@ -11,3 +11,22 @@ homepage = "https://turbomcp.org"
 
 [dependencies]
 turbomcp4-core = { workspace = true }
+turbomcp4-protocol = { workspace = true }
+turbomcp4-codec = { workspace = true }
+turbomcp4-service = { workspace = true }
+turbomcp4-server = { workspace = true }
+turbomcp4-transport-stdio = { workspace = true }
+turbomcp4-macros = { workspace = true }
+
+# Re-exported for `#[server]`-generated code (schema derivation + (de)serialization).
+schemars = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+insta = { workspace = true }
+tower = { workspace = true }
+
+[lib]
+doctest = false
