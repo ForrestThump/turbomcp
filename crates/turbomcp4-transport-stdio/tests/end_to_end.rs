@@ -116,7 +116,7 @@ async fn server_handles_discover_list_and_call_over_stdio_framing() {
     assert_eq!(discover["result"]["serverInfo"]["name"], "calculator");
     assert_eq!(
         discover["result"]["capabilities"]["tools"]["listChanged"],
-        false
+        true
     );
 
     // tools/list (id 2)

@@ -119,6 +119,9 @@ where
     let connection_id = format!("conn-{}", NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed));
 
     let (tx, mut rx) = mpsc::channel::<JsonRpcMessage>(capacity);
+    // Publish this connection's ordered writer so server-initiated messages
+    // (subscription pushes, bidi requests) ride the same single-writer actor.
+    let writer_registration = crate::outbound::register(&connection_id, tx.clone());
     let limiter = Arc::new(Semaphore::new(capacity));
     let mut handlers: JoinSet<()> = JoinSet::new();
     // `svc` is always the instance most recently driven to readiness; we call a
@@ -181,9 +184,11 @@ where
         }
     };
 
-    // Drain. Drop our sender so `rx` closes once the last handler's clone drops;
-    // keep writing replies and reaping handlers until everything is flushed or
-    // the deadline forces an abort.
+    // Drain. Unregister the outbound writer first (its sender clone would hold
+    // the channel open forever), then drop our sender so `rx` closes once the
+    // last handler's clone drops; keep writing replies and reaping handlers
+    // until everything is flushed or the deadline forces an abort.
+    drop(writer_registration);
     drop(tx);
     let deadline = Instant::now() + drain_timeout;
     let mut outbound_open = true;

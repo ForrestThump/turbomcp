@@ -26,6 +26,7 @@ mod inflight;
 mod response;
 mod router;
 mod session;
+mod subscriptions;
 mod tasks;
 mod traits;
 
@@ -39,6 +40,7 @@ pub use dispatcher::VersionDispatcher;
 pub use response::{IntoCallToolResult, IntoGetPromptResult, IntoReadResourceResult};
 pub use router::MethodRouter;
 pub use session::{SessionState, SessionStore};
+pub use subscriptions::ServerNotifier;
 pub use traits::{McpServerCore, WithCompletions, WithPrompts, WithResources, WithTools};
 
 /// Support items called by `#[server]`-generated code. Not part of the stable
@@ -159,7 +161,7 @@ mod tests {
         };
         let result = r.result.expect("discover result");
         assert_eq!(result["serverInfo"]["name"], "calculator");
-        assert_eq!(result["capabilities"]["tools"]["listChanged"], false);
+        assert_eq!(result["capabilities"]["tools"]["listChanged"], true);
         assert_eq!(result["resultType"], "complete");
         let versions = result["supportedVersions"].as_array().unwrap();
         assert!(versions.iter().any(|v| v == "DRAFT-2026-v1"));
@@ -300,7 +302,7 @@ mod tests {
         };
         assert_eq!(
             r.result.unwrap()["capabilities"]["tools"]["listChanged"],
-            false
+            true
         );
     }
 
@@ -416,9 +418,9 @@ mod tests {
         let result =
             call_everything(&mut svc, JsonRpcRequest::new(1, "server/discover", None)).await;
         let caps = &result["capabilities"];
-        assert_eq!(caps["resources"]["listChanged"], false);
-        assert_eq!(caps["resources"]["subscribe"], false);
-        assert_eq!(caps["prompts"]["listChanged"], false);
+        assert_eq!(caps["resources"]["listChanged"], true);
+        assert_eq!(caps["resources"]["subscribe"], true);
+        assert_eq!(caps["prompts"]["listChanged"], true);
         assert!(caps["completions"].is_object());
         // No tools were registered → no tools capability.
         assert!(caps.get("tools").is_none());

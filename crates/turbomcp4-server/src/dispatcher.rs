@@ -45,6 +45,7 @@ use crate::context::{
 use crate::inflight::InFlightRegistry;
 use crate::router::MethodRouter;
 use crate::session::{SessionState, SessionStore};
+use crate::subscriptions::{ServerNotifier, SubscriptionRegistry, subscription_id_value};
 use crate::tasks::{TaskError, TaskSnapshot, TaskStatus, TaskStore};
 use crate::traits::McpServerCore;
 
@@ -59,6 +60,7 @@ pub struct VersionDispatcher<S> {
     sessions: Arc<SessionStore>,
     tasks: Option<Arc<TaskStore>>,
     inflight: Arc<InFlightRegistry>,
+    subs: Arc<SubscriptionRegistry>,
 }
 
 impl<S: Clone> Clone for VersionDispatcher<S> {
@@ -70,6 +72,7 @@ impl<S: Clone> Clone for VersionDispatcher<S> {
             sessions: Arc::clone(&self.sessions),
             tasks: self.tasks.clone(),
             inflight: Arc::clone(&self.inflight),
+            subs: Arc::clone(&self.subs),
         }
     }
 }
@@ -87,7 +90,15 @@ impl<S: McpServerCore> VersionDispatcher<S> {
             sessions: Arc::new(SessionStore::default()),
             tasks: None,
             inflight: Arc::new(InFlightRegistry::default()),
+            subs: Arc::new(SubscriptionRegistry::default()),
         }
+    }
+
+    /// A cloneable handle for publishing change notifications
+    /// (`*_list_changed`, `resources/updated`) to every live subscription.
+    #[must_use]
+    pub fn notifier(&self) -> ServerNotifier {
+        ServerNotifier::new(Arc::clone(&self.subs))
     }
 
     /// Enable core Tasks (`2025-11-25`): task-augmented `tools/call` plus
@@ -122,12 +133,17 @@ impl<S: McpServerCore> Service<JsonRpcMessage> for VersionDispatcher<S> {
         let sessions = Arc::clone(&self.sessions);
         let tasks = self.tasks.clone();
         let inflight = Arc::clone(&self.inflight);
-        Box::pin(
-            async move { handle(server, router, supported, sessions, tasks, inflight, msg).await },
-        )
+        let subs = Arc::clone(&self.subs);
+        Box::pin(async move {
+            handle(
+                server, router, supported, sessions, tasks, inflight, subs, msg,
+            )
+            .await
+        })
     }
 }
 
+#[allow(clippy::too_many_arguments)] // one per dispatcher store; mirrors the struct
 async fn handle<S: McpServerCore>(
     server: S,
     router: Arc<MethodRouter<S>>,
@@ -135,6 +151,7 @@ async fn handle<S: McpServerCore>(
     sessions: Arc<SessionStore>,
     tasks: Option<Arc<TaskStore>>,
     inflight: Arc<InFlightRegistry>,
+    subs: Arc<SubscriptionRegistry>,
     msg: JsonRpcMessage,
 ) -> Result<Option<JsonRpcMessage>, ProtocolError> {
     match msg {
@@ -145,6 +162,16 @@ async fn handle<S: McpServerCore>(
             let cancel = CancellationToken::new();
             let _guard = connection_id(req.params.as_ref())
                 .map(|conn| inflight.register(conn, &req.id, cancel.clone()));
+
+            // `subscriptions/listen` is the one MCP request with no JSON-RPC
+            // response: its stream begins with an acknowledged *notification*
+            // via the connection's writer, so it can't share `handle_request`'s
+            // always-respond contract.
+            if req.method == methods::request::SUBSCRIPTIONS_LISTEN {
+                return handle_subscriptions_listen(&router, &supported, &subs, &req, &cancel)
+                    .await;
+            }
+
             let dispatch = handle_request(
                 server,
                 &router,
@@ -163,7 +190,7 @@ async fn handle<S: McpServerCore>(
             }
         }
         JsonRpcMessage::Notification(n) => {
-            handle_notification(&inflight, &n);
+            handle_notification(&inflight, &subs, &n);
             Ok(None)
         }
         JsonRpcMessage::Response(_) => {
@@ -183,7 +210,11 @@ struct RawCancelledParams {
     reason: Option<String>,
 }
 
-fn handle_notification(inflight: &InFlightRegistry, n: &JsonRpcNotification) {
+fn handle_notification(
+    inflight: &InFlightRegistry,
+    subs: &SubscriptionRegistry,
+    n: &JsonRpcNotification,
+) {
     match n.method.as_str() {
         methods::notification::CANCELLED => {
             // Fire-and-forget per spec: malformed params, unknown ids, and
@@ -200,11 +231,16 @@ fn handle_notification(inflight: &InFlightRegistry, n: &JsonRpcNotification) {
                 tracing::debug!("malformed notifications/cancelled; ignored");
                 return;
             };
+            // The id may name an in-flight request *or* a live subscription
+            // (cancelling the `subscriptions/listen` request id is how a
+            // stdio client closes its stream).
             let fired = inflight.cancel(conn, &parsed.request_id);
+            let unsubscribed = subs.remove(conn, &parsed.request_id);
             tracing::debug!(
                 request_id = ?parsed.request_id,
                 reason = parsed.reason.as_deref().unwrap_or(""),
                 fired,
+                unsubscribed,
                 "notifications/cancelled"
             );
         }
@@ -478,6 +514,110 @@ fn classify_version(params: Option<&Value>, supported: &[ProtocolVersion]) -> Ve
         // client that omitted `_meta` can re-issue with a known version.
         None => VersionRoute::Unsupported(None),
     }
+}
+
+// ---- subscriptions (draft `subscriptions/listen`) ------------------------------
+
+#[derive(Deserialize)]
+struct RawListenParams {
+    notifications: draft::SubscriptionFilter,
+}
+
+/// Open a subscription stream (subscriptions spec): validate the filter,
+/// intersect it with the capabilities this server actually registered, push
+/// `notifications/subscriptions/acknowledged` as the stream's first message,
+/// and commit the subscription. Success returns `Ok(None)` — the listen
+/// request never gets a JSON-RPC response; only failures answer in-band.
+async fn handle_subscriptions_listen<S: McpServerCore>(
+    router: &MethodRouter<S>,
+    supported: &[ProtocolVersion],
+    subs: &Arc<SubscriptionRegistry>,
+    req: &JsonRpcRequest,
+    cancel: &CancellationToken,
+) -> Result<Option<JsonRpcMessage>, ProtocolError> {
+    let id = req.id.clone();
+    match classify_version(req.params.as_ref(), supported) {
+        VersionRoute::Modern => {}
+        // The legacy path subscribes via `resources/subscribe` instead.
+        VersionRoute::Legacy => {
+            return Ok(Some(error_response(
+                id,
+                &McpError::method_not_found(methods::request::SUBSCRIPTIONS_LISTEN),
+            )));
+        }
+        VersionRoute::Unsupported(requested) => {
+            return Ok(Some(unsupported_version(id, requested, supported)));
+        }
+    }
+
+    // Streaming needs an ordered writer for this connection (the serve driver
+    // registers one; the HTTP endpoint registers a per-stream one).
+    let writer = connection_id(req.params.as_ref()).and_then(turbomcp4_service::outbound::writer);
+    let Some(writer) = writer else {
+        let err = JsonRpcError {
+            code: -32600,
+            message: "subscriptions/listen requires a connection that can stream notifications"
+                .to_owned(),
+            data: None,
+        };
+        return Ok(Some(JsonRpcResponse::error(id, err).into()));
+    };
+    // `writer` resolving proves the id exists; keep it for the registry key.
+    let conn = connection_id(req.params.as_ref())
+        .unwrap_or_default()
+        .to_owned();
+
+    let requested: RawListenParams = match req
+        .params
+        .as_ref()
+        .map(|p| serde_json::from_value(p.clone()))
+    {
+        Some(Ok(p)) => p,
+        _ => {
+            return Ok(Some(error_response(
+                id,
+                &McpError::invalid_params("subscriptions/listen requires a `notifications` filter"),
+            )));
+        }
+    };
+
+    // Honor only what the server can actually emit; unsupported types are
+    // omitted from the acknowledgment (spec §Acknowledgment).
+    let wanted = requested.notifications;
+    let agreed = draft::SubscriptionFilter {
+        tools_list_changed: (wanted.tools_list_changed == Some(true) && router.has_tools())
+            .then_some(true),
+        resources_list_changed: (wanted.resources_list_changed == Some(true)
+            && router.has_resources())
+        .then_some(true),
+        prompts_list_changed: (wanted.prompts_list_changed == Some(true) && router.has_prompts())
+            .then_some(true),
+        resource_subscriptions: if router.has_resources() {
+            wanted.resource_subscriptions
+        } else {
+            Vec::new()
+        },
+    };
+
+    // Acknowledged MUST be the first message on the stream — send it before
+    // the subscription can receive its first event.
+    let ack = JsonRpcNotification::new(
+        methods::notification::SUBSCRIPTIONS_ACKNOWLEDGED,
+        Some(serde_json::json!({
+            "_meta": { meta::keys::SUBSCRIPTION_ID: subscription_id_value(&id) },
+            "notifications": &agreed,
+        })),
+    );
+    if writer.send(ack.into()).await.is_err() {
+        return Ok(None); // connection already gone; nothing to answer
+    }
+    subs.insert(&conn, &id, agreed);
+    // A `notifications/cancelled` that raced this dispatch fired our in-flight
+    // token before the insert could be seen — honor it now.
+    if cancel.is_cancelled() {
+        subs.remove(&conn, &id);
+    }
+    Ok(None)
 }
 
 // ---- legacy (2025-11-25) session path ------------------------------------------
@@ -962,6 +1102,8 @@ fn build_discover_result<S: McpServerCore>(
     router: &MethodRouter<S>,
     supported: &[ProtocolVersion],
 ) -> draft::DiscoverResult {
+    // `listChanged`/`subscribe` are true: the subscription registry delivers
+    // these for every registered capability (`subscriptions/listen`).
     let capabilities = draft::ServerCapabilities {
         // `completions` is an opaque presence marker (an empty object when the
         // server supports argument autocompletion).
@@ -974,18 +1116,18 @@ fn build_discover_result<S: McpServerCore>(
         prompts: router
             .has_prompts()
             .then_some(draft::ServerCapabilitiesPrompts {
-                list_changed: Some(false),
+                list_changed: Some(true),
             }),
         resources: router
             .has_resources()
             .then_some(draft::ServerCapabilitiesResources {
-                list_changed: Some(false),
-                subscribe: Some(false),
+                list_changed: Some(true),
+                subscribe: Some(true),
             }),
         tools: router
             .has_tools()
             .then_some(draft::ServerCapabilitiesTools {
-                list_changed: Some(false),
+                list_changed: Some(true),
             }),
     };
     draft::DiscoverResult {

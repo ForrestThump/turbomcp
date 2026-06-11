@@ -44,7 +44,7 @@ pub use turbomcp4_server::{
     CallToolContext, CompleteContext, GetPromptContext, IntoCallToolResult, IntoGetPromptResult,
     IntoReadResourceResult, IntoServerBuilder, LegacySessionAdapter, ListPromptsContext,
     ListResourceTemplatesContext, ListResourcesContext, ListToolsContext, McpServerCore,
-    MethodRouter, ReadResourceContext, ServerBuilder, SessionState, SessionStore,
+    MethodRouter, ReadResourceContext, ServerBuilder, ServerNotifier, SessionState, SessionStore,
     VersionDispatcher, WithCompletions, WithPrompts, WithResources, WithTools,
 };
 

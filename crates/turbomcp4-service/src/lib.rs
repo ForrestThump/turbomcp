@@ -19,6 +19,7 @@
 
 mod error;
 mod middleware;
+pub mod outbound;
 mod serve;
 mod transport;
 

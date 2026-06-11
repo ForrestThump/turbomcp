@@ -37,6 +37,17 @@ pub mod request {
     /// `tasks/result` — retrieve a task's final result, blocking until the task
     /// reaches a terminal status (core in `2025-11-25`).
     pub const TASKS_RESULT: &str = "tasks/result";
+    /// `subscriptions/listen` — open a long-lived notification stream
+    /// (`DRAFT-2026-v1`; replaces `resources/subscribe` and the HTTP GET
+    /// stream). The request gets no JSON-RPC response — the stream's first
+    /// message is `notifications/subscriptions/acknowledged`.
+    pub const SUBSCRIPTIONS_LISTEN: &str = "subscriptions/listen";
+    /// `resources/subscribe` — subscribe to one resource's updates
+    /// (`2025-11-25`; the draft uses `subscriptions/listen` instead).
+    pub const RESOURCES_SUBSCRIBE: &str = "resources/subscribe";
+    /// `resources/unsubscribe` — drop a `resources/subscribe` subscription
+    /// (`2025-11-25`).
+    pub const RESOURCES_UNSUBSCRIBE: &str = "resources/unsubscribe";
 }
 
 /// Notification method names (no response).
@@ -48,4 +59,15 @@ pub mod notification {
     /// `notifications/tasks/status` — a task's status changed (optional per
     /// spec; requestors must poll `tasks/get` regardless).
     pub const TASKS_STATUS: &str = "notifications/tasks/status";
+    /// `notifications/subscriptions/acknowledged` — first message on a
+    /// `subscriptions/listen` stream: the filter subset the server honors.
+    pub const SUBSCRIPTIONS_ACKNOWLEDGED: &str = "notifications/subscriptions/acknowledged";
+    /// `notifications/tools/list_changed` — the tool list changed.
+    pub const TOOLS_LIST_CHANGED: &str = "notifications/tools/list_changed";
+    /// `notifications/resources/list_changed` — the resource list changed.
+    pub const RESOURCES_LIST_CHANGED: &str = "notifications/resources/list_changed";
+    /// `notifications/resources/updated` — a subscribed resource changed.
+    pub const RESOURCES_UPDATED: &str = "notifications/resources/updated";
+    /// `notifications/prompts/list_changed` — the prompt list changed.
+    pub const PROMPTS_LIST_CHANGED: &str = "notifications/prompts/list_changed";
 }
