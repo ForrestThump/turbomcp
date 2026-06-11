@@ -20,6 +20,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use serde_json::{Map, Value};
 
+use crate::v2025_11_25::types as legacy;
 use crate::v2026_draft::types as draft;
 
 /// A neutral content block. Phase 2 models text; the enum is `#[non_exhaustive]`
@@ -979,6 +980,259 @@ impl From<CompleteResult> for draft::CompleteResult {
     }
 }
 
+// ---- neutral → 2025-11-25 wire conversions ------------------------------------
+//
+// The legacy mirror of the draft conversions above. Differences from the draft
+// wire that these conversions absorb so handlers never see them:
+// - no `resultType` / `cacheScope` / `ttlMs` (the draft's caching envelope
+//   doesn't exist in 2025-11-25);
+// - `_meta` is a plain map (skipped when empty), not an `Option`;
+// - `CallToolResult.structuredContent` is an *object* by schema, so a neutral
+//   non-object `structured_content` value cannot be represented and is dropped
+//   (the draft wire keeps any JSON value — see `From<CallToolResult>` below);
+// - `ToolInputSchema` is closed (`properties`/`required`/`$schema`/`type`):
+//   any other top-level schema keywords a handler put in `input_schema` are
+//   not representable on this wire version and do not survive conversion.
+
+impl From<Content> for legacy::ContentBlock {
+    fn from(c: Content) -> Self {
+        match c {
+            Content::Text(text) => legacy::ContentBlock::TextContent(legacy::TextContent {
+                annotations: None,
+                meta: Map::new(),
+                text,
+                type_: "text".to_string(),
+            }),
+        }
+    }
+}
+
+impl From<Tool> for legacy::Tool {
+    fn from(t: Tool) -> Self {
+        // Deserialize the neutral JSON Schema into the (closed) legacy wrapper;
+        // a non-object value falls back to an empty object schema. `execution`
+        // (task support) is left unset here — the dispatcher patches it when
+        // the server has Tasks enabled, since a pure conversion can't know.
+        let input_schema =
+            serde_json::from_value(t.input_schema).unwrap_or(legacy::ToolInputSchema {
+                properties: BTreeMap::new(),
+                required: Vec::new(),
+                schema: None,
+                type_: "object".to_string(),
+            });
+        legacy::Tool {
+            annotations: None,
+            description: t.description,
+            execution: None,
+            icons: Vec::new(),
+            input_schema,
+            meta: Map::new(),
+            name: t.name,
+            output_schema: None,
+            title: t.title,
+        }
+    }
+}
+
+impl From<ListToolsResult> for legacy::ListToolsResult {
+    fn from(r: ListToolsResult) -> Self {
+        legacy::ListToolsResult {
+            meta: Map::new(),
+            next_cursor: r.next_cursor,
+            tools: r.tools.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<CallToolResult> for legacy::CallToolResult {
+    fn from(r: CallToolResult) -> Self {
+        // The legacy wire requires `structuredContent` to be a JSON object;
+        // a non-object neutral value is dropped (documented above).
+        let structured_content = match r.structured_content {
+            Some(Value::Object(map)) => map,
+            _ => Map::new(),
+        };
+        legacy::CallToolResult {
+            content: r.content.into_iter().map(Into::into).collect(),
+            is_error: Some(r.is_error),
+            meta: Map::new(),
+            structured_content,
+        }
+    }
+}
+
+// resources
+
+impl From<Resource> for legacy::Resource {
+    fn from(r: Resource) -> Self {
+        legacy::Resource {
+            annotations: None,
+            description: r.description,
+            icons: Vec::new(),
+            meta: Map::new(),
+            mime_type: r.mime_type,
+            name: r.name,
+            size: r.size.map(|s| i64::try_from(s).unwrap_or(i64::MAX)),
+            title: r.title,
+            uri: r.uri,
+        }
+    }
+}
+
+impl From<ResourceContents> for legacy::ReadResourceResultContentsItem {
+    fn from(c: ResourceContents) -> Self {
+        match c {
+            ResourceContents::Text {
+                uri,
+                mime_type,
+                text,
+            } => legacy::ReadResourceResultContentsItem::TextResourceContents(
+                legacy::TextResourceContents {
+                    meta: Map::new(),
+                    mime_type,
+                    text,
+                    uri,
+                },
+            ),
+            ResourceContents::Blob {
+                uri,
+                mime_type,
+                blob,
+            } => legacy::ReadResourceResultContentsItem::BlobResourceContents(
+                legacy::BlobResourceContents {
+                    blob,
+                    meta: Map::new(),
+                    mime_type,
+                    uri,
+                },
+            ),
+        }
+    }
+}
+
+impl From<ListResourcesResult> for legacy::ListResourcesResult {
+    fn from(r: ListResourcesResult) -> Self {
+        legacy::ListResourcesResult {
+            meta: Map::new(),
+            next_cursor: r.next_cursor,
+            resources: r.resources.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<ReadResourceResult> for legacy::ReadResourceResult {
+    fn from(r: ReadResourceResult) -> Self {
+        legacy::ReadResourceResult {
+            contents: r.contents.into_iter().map(Into::into).collect(),
+            meta: Map::new(),
+        }
+    }
+}
+
+impl From<ResourceTemplate> for legacy::ResourceTemplate {
+    fn from(t: ResourceTemplate) -> Self {
+        legacy::ResourceTemplate {
+            annotations: None,
+            description: t.description,
+            icons: Vec::new(),
+            meta: Map::new(),
+            mime_type: t.mime_type,
+            name: t.name,
+            title: t.title,
+            uri_template: t.uri_template,
+        }
+    }
+}
+
+impl From<ListResourceTemplatesResult> for legacy::ListResourceTemplatesResult {
+    fn from(r: ListResourceTemplatesResult) -> Self {
+        legacy::ListResourceTemplatesResult {
+            meta: Map::new(),
+            next_cursor: r.next_cursor,
+            resource_templates: r.resource_templates.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+// prompts
+
+impl From<Role> for legacy::Role {
+    fn from(r: Role) -> Self {
+        match r {
+            Role::User => legacy::Role::User,
+            Role::Assistant => legacy::Role::Assistant,
+        }
+    }
+}
+
+impl From<PromptArgument> for legacy::PromptArgument {
+    fn from(a: PromptArgument) -> Self {
+        legacy::PromptArgument {
+            description: a.description,
+            name: a.name,
+            required: Some(a.required),
+            title: a.title,
+        }
+    }
+}
+
+impl From<Prompt> for legacy::Prompt {
+    fn from(p: Prompt) -> Self {
+        legacy::Prompt {
+            arguments: p.arguments.into_iter().map(Into::into).collect(),
+            description: p.description,
+            icons: Vec::new(),
+            meta: Map::new(),
+            name: p.name,
+            title: p.title,
+        }
+    }
+}
+
+impl From<PromptMessage> for legacy::PromptMessage {
+    fn from(m: PromptMessage) -> Self {
+        legacy::PromptMessage {
+            content: m.content.into(),
+            role: m.role.into(),
+        }
+    }
+}
+
+impl From<ListPromptsResult> for legacy::ListPromptsResult {
+    fn from(r: ListPromptsResult) -> Self {
+        legacy::ListPromptsResult {
+            meta: Map::new(),
+            next_cursor: r.next_cursor,
+            prompts: r.prompts.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<GetPromptResult> for legacy::GetPromptResult {
+    fn from(r: GetPromptResult) -> Self {
+        legacy::GetPromptResult {
+            description: r.description,
+            messages: r.messages.into_iter().map(Into::into).collect(),
+            meta: Map::new(),
+        }
+    }
+}
+
+// completions
+
+impl From<CompleteResult> for legacy::CompleteResult {
+    fn from(r: CompleteResult) -> Self {
+        legacy::CompleteResult {
+            completion: legacy::CompleteResultCompletion {
+                has_more: r.has_more,
+                total: r.total.map(i64::from),
+                values: r.values,
+            },
+            meta: Map::new(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1087,5 +1341,94 @@ mod tests {
         assert_eq!(v["completion"]["values"][0], "foo");
         assert_eq!(v["completion"]["total"], 1);
         assert_eq!(v["completion"]["hasMore"], false);
+    }
+
+    // ---- legacy (2025-11-25) conversions ----------------------------------
+
+    #[test]
+    fn legacy_tool_widens_without_draft_envelope() {
+        let wire: legacy::ListToolsResult = ListToolsResult::new(alloc::vec![
+            Tool::new(
+                "echo",
+                json!({"type": "object", "properties": {"msg": {"type": "string"}}, "required": ["msg"]}),
+            )
+            .with_description("Echoes input"),
+        ])
+        .into();
+        let v = serde_json::to_value(&wire).unwrap();
+        assert_eq!(v["tools"][0]["name"], "echo");
+        assert_eq!(v["tools"][0]["inputSchema"]["type"], "object");
+        assert_eq!(
+            v["tools"][0]["inputSchema"]["properties"]["msg"]["type"],
+            "string"
+        );
+        assert_eq!(v["tools"][0]["inputSchema"]["required"][0], "msg");
+        // The draft caching envelope must not leak onto the legacy wire.
+        let obj = v.as_object().unwrap();
+        assert!(!obj.contains_key("resultType"));
+        assert!(!obj.contains_key("cacheScope"));
+        assert!(!obj.contains_key("ttlMs"));
+    }
+
+    #[test]
+    fn legacy_call_result_keeps_object_structured_content_drops_non_object() {
+        let mut ok = CallToolResult::text("done");
+        ok.structured_content = Some(json!({"answer": 42}));
+        let wire: legacy::CallToolResult = ok.into();
+        let v = serde_json::to_value(&wire).unwrap();
+        assert_eq!(v["isError"], false);
+        assert_eq!(v["content"][0]["text"], "done");
+        assert_eq!(v["structuredContent"]["answer"], 42);
+
+        let mut bad = CallToolResult::text("done");
+        bad.structured_content = Some(json!(7)); // not an object: unrepresentable
+        let wire: legacy::CallToolResult = bad.into();
+        let v = serde_json::to_value(&wire).unwrap();
+        assert!(v.as_object().unwrap().get("structuredContent").is_none());
+    }
+
+    #[test]
+    fn legacy_resources_round_trip() {
+        let wire: legacy::ListResourcesResult = ListResourcesResult::new(alloc::vec![
+            Resource::new("file://a", "a").with_mime_type("text/plain"),
+        ])
+        .into();
+        let v = serde_json::to_value(&wire).unwrap();
+        assert_eq!(v["resources"][0]["uri"], "file://a");
+        assert_eq!(v["resources"][0]["mimeType"], "text/plain");
+
+        let wire: legacy::ReadResourceResult = ReadResourceResult::text("file://a", "hi").into();
+        let v = serde_json::to_value(&wire).unwrap();
+        assert_eq!(v["contents"][0]["text"], "hi");
+
+        let wire: legacy::ListResourceTemplatesResult = ListResourceTemplatesResult::new(
+            alloc::vec![ResourceTemplate::new("file://{path}", "files")],
+        )
+        .into();
+        let v = serde_json::to_value(&wire).unwrap();
+        assert_eq!(v["resourceTemplates"][0]["uriTemplate"], "file://{path}");
+    }
+
+    #[test]
+    fn legacy_prompts_and_completion_round_trip() {
+        let wire: legacy::ListPromptsResult = ListPromptsResult::new(alloc::vec![
+            Prompt::new("summarize").with_argument(PromptArgument::new("text").required(true)),
+        ])
+        .into();
+        let v = serde_json::to_value(&wire).unwrap();
+        assert_eq!(v["prompts"][0]["arguments"][0]["required"], true);
+
+        let wire: legacy::GetPromptResult =
+            GetPromptResult::new(alloc::vec![PromptMessage::user_text("hello")]).into();
+        let v = serde_json::to_value(&wire).unwrap();
+        assert_eq!(v["messages"][0]["role"], "user");
+        assert_eq!(v["messages"][0]["content"]["type"], "text");
+
+        let wire: legacy::CompleteResult = CompleteResult::new(alloc::vec!["x".to_string()])
+            .with_total(5)
+            .into();
+        let v = serde_json::to_value(&wire).unwrap();
+        assert_eq!(v["completion"]["total"], 5);
+        assert_eq!(v["completion"]["values"][0], "x");
     }
 }

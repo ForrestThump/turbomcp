@@ -28,6 +28,15 @@ pub mod request {
     pub const PROMPTS_GET: &str = "prompts/get";
     /// `completion/complete` — argument autocompletion.
     pub const COMPLETION_COMPLETE: &str = "completion/complete";
+    /// `tasks/list` — enumerate tasks (core in `2025-11-25`; extension in draft).
+    pub const TASKS_LIST: &str = "tasks/list";
+    /// `tasks/get` — poll a task's status (core in `2025-11-25`).
+    pub const TASKS_GET: &str = "tasks/get";
+    /// `tasks/cancel` — request cancellation of a task (core in `2025-11-25`).
+    pub const TASKS_CANCEL: &str = "tasks/cancel";
+    /// `tasks/result` — retrieve a task's final result, blocking until the task
+    /// reaches a terminal status (core in `2025-11-25`).
+    pub const TASKS_RESULT: &str = "tasks/result";
 }
 
 /// Notification method names (no response).
@@ -36,4 +45,7 @@ pub mod notification {
     pub const INITIALIZED: &str = "notifications/initialized";
     /// `notifications/cancelled` — a previously issued request is cancelled.
     pub const CANCELLED: &str = "notifications/cancelled";
+    /// `notifications/tasks/status` — a task's status changed (optional per
+    /// spec; requestors must poll `tasks/get` regardless).
+    pub const TASKS_STATUS: &str = "notifications/tasks/status";
 }
