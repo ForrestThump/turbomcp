@@ -42,9 +42,10 @@ pub use turbomcp4_service::{
 
 pub use turbomcp4_server::{
     CallToolContext, CompleteContext, GetPromptContext, IntoCallToolResult, IntoGetPromptResult,
-    IntoReadResourceResult, IntoServerBuilder, ListPromptsContext, ListResourceTemplatesContext,
-    ListResourcesContext, ListToolsContext, McpServerCore, MethodRouter, ReadResourceContext,
-    ServerBuilder, VersionDispatcher, WithCompletions, WithPrompts, WithResources, WithTools,
+    IntoReadResourceResult, IntoServerBuilder, LegacySessionAdapter, ListPromptsContext,
+    ListResourceTemplatesContext, ListResourcesContext, ListToolsContext, McpServerCore,
+    MethodRouter, ReadResourceContext, ServerBuilder, SessionState, SessionStore,
+    VersionDispatcher, WithCompletions, WithPrompts, WithResources, WithTools,
 };
 
 // ---- transports -------------------------------------------------------------

@@ -6303,6 +6303,7 @@ dependencies = [
  "turbomcp4-protocol",
  "turbomcp4-server",
  "turbomcp4-service",
+ "uuid",
 ]
 
 [[package]]

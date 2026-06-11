@@ -76,8 +76,16 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
             }
 
             /// Serve over stdio until the peer closes stdin.
+            ///
+            /// Dual-stack by default: the connection is wrapped in a
+            /// [`LegacySessionAdapter`](::turbomcp4::LegacySessionAdapter), so
+            /// both stateless `DRAFT-2026-v1` clients and stateful
+            /// `2025-11-25` (`initialize`-handshake) clients are served.
             pub async fn run_stdio(self) -> ::core::result::Result<(), ::turbomcp4::ProtocolError> {
-                ::turbomcp4::serve_stdio(self.into_server().build()).await
+                ::turbomcp4::serve_stdio(::turbomcp4::LegacySessionAdapter::new(
+                    self.into_server().build(),
+                ))
+                .await
             }
         }
     };

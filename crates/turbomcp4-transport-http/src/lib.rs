@@ -10,7 +10,7 @@
 //! [`JsonRpcMessage`], handed to a per-request clone of the service, and the
 //! reply encoded back.
 //!
-//! ## Endpoint behavior (modern, stateless `DRAFT-2026-v1` path)
+//! ## Endpoint behavior (dual-stack)
 //!
 //! - **`POST {path}`** — body is one JSON-RPC message (batches are not supported,
 //!   per PLAN §13.1). A request yields `200 application/json` with the response;
@@ -18,6 +18,25 @@
 //! - **`GET {path}`** — `405`. The server→client SSE stream (for
 //!   `subscriptions/listen`) lands in Phase 6; until then this endpoint offers no
 //!   stream, which the spec permits answering with 405.
+//! - **`DELETE {path}`** — `405`. The `2025-11-25` spec lets a server refuse
+//!   client-initiated session termination; sessions expire by store eviction.
+//!
+//! ## Dual-stack request routing (PLAN §11)
+//!
+//! Modern `DRAFT-2026-v1` requests are stateless (version inside the body's
+//! `_meta`) and pass through untouched. The legacy `2025-11-25` stateful path
+//! is routed from HTTP headers, asserted toward the dispatcher via internal
+//! `_meta` keys (inbound bodies are sanitized first so clients can't forge
+//! them):
+//!
+//! 1. An explicit but unsupported `MCP-Protocol-Version` header → `400`.
+//! 2. Body is `initialize` → mint a session id, attach it to the message; on
+//!    success the response carries it back as `Mcp-Session-Id`.
+//! 3. `Mcp-Session-Id` header present → attach the session id (and, for
+//!    version-less bodies, the legacy version) and dispatch; an unknown
+//!    session answers `404` so the client re-initializes.
+//! 4. `MCP-Protocol-Version: 2025-11-25` without a session id (and not
+//!    `initialize`) → `400` (the legacy path requires a session).
 //!
 //! ## Security
 //!
@@ -38,14 +57,20 @@ use std::net::SocketAddr;
 
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
+use serde_json::json;
 use tower_http::cors::CorsLayer;
 use turbomcp4_codec::{Codec, DefaultCodec};
-use turbomcp4_core::JsonRpcMessage;
+use turbomcp4_core::{JsonRpcMessage, ProtocolVersion, meta};
 use turbomcp4_service::{CancellationToken, McpService, ProtocolError};
+
+/// The session header of the `2025-11-25` Streamable HTTP transport.
+const HEADER_SESSION_ID: HeaderName = HeaderName::from_static("mcp-session-id");
+/// The per-request version header of the `2025-11-25` Streamable HTTP transport.
+const HEADER_PROTOCOL_VERSION: HeaderName = HeaderName::from_static("mcp-protocol-version");
 
 /// Where a request's `Origin` header is checked against (DNS-rebinding guard).
 #[derive(Clone, Debug)]
@@ -167,7 +192,10 @@ where
         origins: config.origins.clone(),
     };
     let app = Router::new()
-        .route(&config.path, post(mcp_post::<S>).get(mcp_get))
+        .route(
+            &config.path,
+            post(mcp_post::<S>).get(mcp_get).delete(mcp_delete),
+        )
         .layer(DefaultBodyLimit::max(config.max_body_bytes));
     let app = if config.cors {
         app.layer(CorsLayer::permissive())
@@ -212,17 +240,69 @@ where
         return rejection;
     }
 
-    let msg: JsonRpcMessage = match state.codec.decode(&body) {
+    let mut msg: JsonRpcMessage = match state.codec.decode(&body) {
         Ok(msg) => msg,
         Err(e) => return parse_error_response(&e.to_string()),
     };
+
+    // Internal `_meta` is transport-owned: strip anything the client forged
+    // before asserting our own (see `turbomcp4_core::meta::internal`).
+    meta::sanitize_inbound(&mut msg);
+
+    // Transport spec: an explicit but invalid/unsupported version header is 400.
+    let header_version = headers
+        .get(&HEADER_PROTOCOL_VERSION)
+        .and_then(|v| v.to_str().ok());
+    if let Some(v) = header_version
+        && !ProtocolVersion::from_wire(v).is_supported()
+    {
+        return version_header_rejection(v);
+    }
+    let session_header = headers
+        .get(&HEADER_SESSION_ID)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+
+    // Dual-stack routing (module docs): mark legacy traffic via internal meta;
+    // modern stateless bodies pass through untouched.
+    let is_initialize = msg.method() == Some("initialize");
+    let mut minted_session = None;
+    if is_initialize {
+        let sid = uuid::Uuid::new_v4().to_string();
+        meta::set_request_meta(&mut msg, meta::internal::SESSION_ID, json!(sid));
+        minted_session = Some(sid);
+    } else if let Some(sid) = session_header {
+        if !message_has_version(&msg) {
+            meta::set_request_meta(
+                &mut msg,
+                meta::keys::PROTOCOL_VERSION,
+                json!(ProtocolVersion::V2025_11_25.as_str()),
+            );
+        }
+        meta::set_request_meta(&mut msg, meta::internal::SESSION_ID, json!(sid));
+    } else if header_version == Some(ProtocolVersion::V2025_11_25.as_str()) {
+        // Declared-legacy request with no session and not initialize: the
+        // stateful path requires a session (spec §Session Management).
+        return session_required_rejection();
+    }
 
     let mut svc = state.service.clone();
     if let Err(e) = poll_fn(|cx| svc.poll_ready(cx)).await {
         return protocol_error_response(&e);
     }
     match svc.call(msg).await {
-        Ok(Some(reply)) => encode_json_response(&state.codec, &reply),
+        Ok(Some(reply)) => {
+            let mut resp = encode_json_response(&state.codec, &reply);
+            // A successful initialize hands the minted session back to the
+            // client as the Mcp-Session-Id header.
+            if let Some(sid) = minted_session
+                && matches!(&reply, JsonRpcMessage::Response(r) if r.error.is_none())
+                && let Ok(value) = HeaderValue::from_str(&sid)
+            {
+                resp.headers_mut().insert(HEADER_SESSION_ID, value);
+            }
+            resp
+        }
         Ok(None) => StatusCode::ACCEPTED.into_response(), // notification: no body
         Err(e) => protocol_error_response(&e),
     }
@@ -241,7 +321,60 @@ async fn mcp_get() -> Response {
         .into_response()
 }
 
+/// The `2025-11-25` spec permits answering session-termination `DELETE` with
+/// `405` ("the server does not allow clients to terminate sessions"); sessions
+/// are reclaimed by store eviction instead. Explicit termination may land with
+/// the Phase 7 hardening pass.
+async fn mcp_delete() -> Response {
+    (
+        StatusCode::METHOD_NOT_ALLOWED,
+        [(header::ALLOW, "POST")],
+        "client-initiated session termination is not supported; sessions expire by eviction",
+    )
+        .into_response()
+}
+
 // ---- helpers -----------------------------------------------------------------
+
+/// Whether the message's `params._meta` already states a protocol version (a
+/// modern stateless request does; a legacy post-initialize request doesn't).
+fn message_has_version(msg: &JsonRpcMessage) -> bool {
+    let params = match msg {
+        JsonRpcMessage::Request(r) => r.params.as_ref(),
+        JsonRpcMessage::Notification(n) => n.params.as_ref(),
+        JsonRpcMessage::Response(_) => None,
+    };
+    params
+        .and_then(|p| p.get("_meta"))
+        .and_then(|m| m.get(meta::keys::PROTOCOL_VERSION))
+        .is_some()
+}
+
+/// `400` for an explicit but unsupported `MCP-Protocol-Version` header.
+fn version_header_rejection(requested: &str) -> Response {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": null,
+        "error": {
+            "code": -32004,
+            "message": format!("unsupported MCP-Protocol-Version header: {requested}"),
+        },
+    });
+    (StatusCode::BAD_REQUEST, Json(body)).into_response()
+}
+
+/// `400` for a declared-legacy request missing its `Mcp-Session-Id`.
+fn session_required_rejection() -> Response {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": null,
+        "error": {
+            "code": -32002,
+            "message": "the 2025-11-25 path requires an Mcp-Session-Id header (initialize first)",
+        },
+    });
+    (StatusCode::BAD_REQUEST, Json(body)).into_response()
+}
 
 /// Returns `Some(rejection)` if the request's `Origin` is disallowed, else `None`.
 fn check_origin(policy: &OriginPolicy, headers: &HeaderMap) -> Option<Response> {
@@ -288,6 +421,9 @@ fn protocol_error_response(err: &ProtocolError) -> Response {
         ProtocolError::Parse(_)
         | ProtocolError::UnsupportedVersion { .. }
         | ProtocolError::MissingCapability(_) => StatusCode::BAD_REQUEST,
+        // Spec §Session Management: an expired/unknown session answers 404 so
+        // the client starts over with a fresh initialize.
+        ProtocolError::UnknownSession(_) => StatusCode::NOT_FOUND,
         ProtocolError::Transport(_) | ProtocolError::ServerShuttingDown => {
             StatusCode::SERVICE_UNAVAILABLE
         }

@@ -17,6 +17,7 @@ axum = { workspace = true }
 tower = { workspace = true }
 tower-http = { workspace = true }
 tokio = { workspace = true, features = ["rt", "net"] }
+uuid = { workspace = true, features = ["v4"] }
 bytes = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
