@@ -30,21 +30,21 @@ use serde_json::{Map, Value};
 use tower::Service;
 
 use turbomcp4_core::{
-    Implementation, JsonRpcError, JsonRpcMessage, JsonRpcNotification, JsonRpcRequest,
-    JsonRpcResponse, McpError, ProtocolVersion, RequestContext, RequestId, meta,
+    CancellationToken, Implementation, JsonRpcError, JsonRpcMessage, JsonRpcNotification,
+    JsonRpcRequest, JsonRpcResponse, McpError, ProtocolVersion, RequestContext, RequestId, meta,
 };
 use turbomcp4_protocol::v2025_11_25::types as legacy;
 use turbomcp4_protocol::v2026_draft::types as draft;
 use turbomcp4_protocol::{methods, neutral, version};
 use turbomcp4_service::{ProtocolError, mcp_to_jsonrpc_error};
 
-use crate::session::{SessionState, SessionStore};
-
 use crate::context::{
     CallToolContext, CompleteContext, GetPromptContext, ListPromptsContext,
     ListResourceTemplatesContext, ListResourcesContext, ListToolsContext, ReadResourceContext,
 };
 use crate::router::MethodRouter;
+use crate::session::{SessionState, SessionStore};
+use crate::tasks::{TaskError, TaskSnapshot, TaskStatus, TaskStore};
 use crate::traits::McpServerCore;
 
 /// The protocol seam for a server: `Service<JsonRpcMessage>`.
@@ -56,6 +56,7 @@ pub struct VersionDispatcher<S> {
     router: Arc<MethodRouter<S>>,
     supported: Vec<ProtocolVersion>,
     sessions: Arc<SessionStore>,
+    tasks: Option<Arc<TaskStore>>,
 }
 
 impl<S: Clone> Clone for VersionDispatcher<S> {
@@ -65,6 +66,7 @@ impl<S: Clone> Clone for VersionDispatcher<S> {
             router: Arc::clone(&self.router),
             supported: self.supported.clone(),
             sessions: Arc::clone(&self.sessions),
+            tasks: self.tasks.clone(),
         }
     }
 }
@@ -80,7 +82,21 @@ impl<S: McpServerCore> VersionDispatcher<S> {
             router: Arc::new(router),
             supported,
             sessions: Arc::new(SessionStore::default()),
+            tasks: None,
         }
+    }
+
+    /// Enable core Tasks (`2025-11-25`): task-augmented `tools/call` plus
+    /// `tasks/list|get|cancel|result`, advertised via the `tasks` capability
+    /// at `initialize`. Tools then default to `execution.taskSupport:
+    /// "optional"` in `tools/list`.
+    ///
+    /// Task-augmented calls run on spawned tasks, so the dispatcher must be
+    /// driven inside a tokio runtime (all bundled transports do this).
+    #[must_use]
+    pub fn with_task_support(mut self) -> Self {
+        self.tasks = Some(Arc::new(TaskStore::default()));
+        self
     }
 }
 
@@ -100,7 +116,8 @@ impl<S: McpServerCore> Service<JsonRpcMessage> for VersionDispatcher<S> {
         let router = Arc::clone(&self.router);
         let supported = self.supported.clone();
         let sessions = Arc::clone(&self.sessions);
-        Box::pin(async move { handle(server, router, supported, sessions, msg).await })
+        let tasks = self.tasks.clone();
+        Box::pin(async move { handle(server, router, supported, sessions, tasks, msg).await })
     }
 }
 
@@ -109,12 +126,15 @@ async fn handle<S: McpServerCore>(
     router: Arc<MethodRouter<S>>,
     supported: Vec<ProtocolVersion>,
     sessions: Arc<SessionStore>,
+    tasks: Option<Arc<TaskStore>>,
     msg: JsonRpcMessage,
 ) -> Result<Option<JsonRpcMessage>, ProtocolError> {
     match msg {
-        JsonRpcMessage::Request(req) => handle_request(server, &router, &supported, &sessions, req)
-            .await
-            .map(Some),
+        JsonRpcMessage::Request(req) => {
+            handle_request(server, &router, &supported, &sessions, tasks.as_ref(), req)
+                .await
+                .map(Some)
+        }
         JsonRpcMessage::Notification(n) => {
             handle_notification(&n);
             Ok(None)
@@ -147,6 +167,7 @@ async fn handle_request<S: McpServerCore>(
     router: &MethodRouter<S>,
     supported: &[ProtocolVersion],
     sessions: &SessionStore,
+    tasks: Option<&Arc<TaskStore>>,
     req: JsonRpcRequest,
 ) -> Result<JsonRpcMessage, ProtocolError> {
     let id = req.id.clone();
@@ -162,9 +183,17 @@ async fn handle_request<S: McpServerCore>(
         methods::request::PING => Ok(JsonRpcResponse::success(id, serde_json::json!({})).into()),
 
         // Stateful handshake (2025-11-25 and earlier).
-        methods::request::INITIALIZE => Ok(handle_initialize(
-            &server, router, supported, sessions, &req,
-        )),
+        methods::request::INITIALIZE => {
+            let tasks_enabled = tasks.is_some() && router.has_tools();
+            Ok(handle_initialize(
+                &server,
+                router,
+                supported,
+                sessions,
+                tasks_enabled,
+                &req,
+            ))
+        }
 
         // Version-gated methods (every capability `*/list|read|get|call|complete`).
         methods::request::TOOLS_LIST
@@ -185,8 +214,51 @@ async fn handle_request<S: McpServerCore>(
                         Ok(ctx) => ctx,
                         Err(response) => return Ok(response),
                     };
+                    // Core Tasks hooks (2025-11-25 only): augmented tools/call
+                    // detaches into a task; tools/list advertises taskSupport.
+                    if let Some(store) = tasks {
+                        if method == methods::request::TOOLS_CALL
+                            && has_task_field(req.params.as_ref())
+                        {
+                            return Ok(task_augmented_call(server, router, store, ctx, &req, id));
+                        }
+                        if method == methods::request::TOOLS_LIST {
+                            return Ok(legacy_list_tools_with_task_support(
+                                server, router, &req, ctx, id,
+                            )
+                            .await);
+                        }
+                    }
                     Ok(dispatch_capability::<S, LegacyWire>(server, router, &req, &ctx, id).await)
                 }
+                VersionRoute::Unsupported(requested) => {
+                    Ok(unsupported_version(id, requested, supported))
+                }
+            }
+        }
+
+        // Core Tasks methods (2025-11-25; the draft serves Tasks as an
+        // extension instead — Phase 8).
+        methods::request::TASKS_LIST
+        | methods::request::TASKS_GET
+        | methods::request::TASKS_CANCEL
+        | methods::request::TASKS_RESULT => {
+            match classify_version(req.params.as_ref(), supported) {
+                VersionRoute::Legacy => {
+                    // Same session gate as every other legacy method.
+                    if let Err(response) = legacy_context(sessions, &req)? {
+                        return Ok(response);
+                    }
+                    let Some(store) = tasks else {
+                        return Ok(error_response(id, &McpError::method_not_found(method)));
+                    };
+                    // `legacy_context` proved the session id is present.
+                    let sid = session_id(req.params.as_ref())
+                        .unwrap_or_default()
+                        .to_owned();
+                    Ok(handle_tasks_method(store, &sid, method.as_str(), &req, id).await)
+                }
+                VersionRoute::Modern => Ok(error_response(id, &McpError::method_not_found(method))),
                 VersionRoute::Unsupported(requested) => {
                     Ok(unsupported_version(id, requested, supported))
                 }
@@ -413,6 +485,7 @@ fn handle_initialize<S: McpServerCore>(
     router: &MethodRouter<S>,
     supported: &[ProtocolVersion],
     sessions: &SessionStore,
+    tasks_enabled: bool,
     req: &JsonRpcRequest,
 ) -> JsonRpcMessage {
     let id = req.id.clone();
@@ -456,13 +529,24 @@ fn handle_initialize<S: McpServerCore>(
             return error_response(id, &McpError::internal(format!("serialize result: {e}")));
         }
     };
-    // The generated capability types model presence-markers (`completions: {}`)
-    // as maps that serde skips when empty, so an advertised-but-empty marker
-    // would vanish. Patch it into the serialized form instead.
-    if router.has_completions()
-        && let Some(caps) = value.get_mut("capabilities").and_then(Value::as_object_mut)
-    {
-        caps.insert("completions".to_owned(), serde_json::json!({}));
+    // The generated capability types model presence-markers (`completions: {}`,
+    // the `tasks` sub-objects) as maps that serde skips when empty, so an
+    // advertised-but-empty marker would vanish. Patch them into the serialized
+    // form instead.
+    if let Some(caps) = value.get_mut("capabilities").and_then(Value::as_object_mut) {
+        if router.has_completions() {
+            caps.insert("completions".to_owned(), serde_json::json!({}));
+        }
+        if tasks_enabled {
+            caps.insert(
+                "tasks".to_owned(),
+                serde_json::json!({
+                    "list": {},
+                    "cancel": {},
+                    "requests": { "tools": { "call": {} } },
+                }),
+            );
+        }
     }
     JsonRpcResponse::success(id, value).into()
 }
@@ -530,6 +614,280 @@ fn from_legacy_impl(i: legacy::Implementation) -> Implementation {
     let mut out = Implementation::new(i.name, i.version);
     out.title = i.title;
     out
+}
+
+// ---- core Tasks (2025-11-25) ---------------------------------------------------
+
+/// How many tasks one `tasks/list` page carries.
+const TASKS_PAGE_SIZE: usize = 50;
+
+/// Whether a `tools/call` request asks for task-augmented execution. The
+/// field's *shape* is validated in [`task_augmented_call`]; mere presence
+/// routes there. (With Tasks disabled the field is ignored entirely and the
+/// call processes normally, per spec §Task Support and Handling.)
+fn has_task_field(params: Option<&Value>) -> bool {
+    params.and_then(|p| p.get("task")).is_some()
+}
+
+#[derive(Deserialize)]
+struct RawTaskMetadata {
+    #[serde(default)]
+    ttl: Option<i64>,
+}
+
+/// `tools/call` with a `task` field: validate, register the task, spawn the
+/// handler under the task's cancellation token, and answer immediately with
+/// `CreateTaskResult` (spec §Creating Tasks).
+fn task_augmented_call<S: McpServerCore>(
+    server: S,
+    router: &MethodRouter<S>,
+    store: &Arc<TaskStore>,
+    ctx: RequestContext,
+    req: &JsonRpcRequest,
+    id: RequestId,
+) -> JsonRpcMessage {
+    let task_meta: RawTaskMetadata = match req
+        .params
+        .as_ref()
+        .and_then(|p| p.get("task"))
+        .map(|t| serde_json::from_value(t.clone()))
+    {
+        Some(Ok(m)) => m,
+        _ => {
+            return error_response(
+                id,
+                &McpError::invalid_params("invalid tools/call `task` augmentation"),
+            );
+        }
+    };
+    let params = match parse_call_tool_params(req.params.as_ref()) {
+        Ok(p) => p,
+        Err(e) => return error_response(id, &e),
+    };
+
+    // The task's token doubles as the handler's request cancellation, so
+    // `tasks/cancel` (and ttl purge) reach a cooperative handler.
+    let token = CancellationToken::new();
+    let mut ctx = ctx;
+    ctx.cancellation = token.clone();
+    let Some(fut) = router.dispatch_call_tool(server, CallToolContext::new(ctx), params) else {
+        return error_response(
+            id,
+            &McpError::method_not_found(methods::request::TOOLS_CALL),
+        );
+    };
+
+    // The legacy gate guarantees a session id by the time we're here.
+    let sid = session_id(req.params.as_ref())
+        .unwrap_or_default()
+        .to_owned();
+    let snap = match store.create(sid, task_meta.ttl, token.clone()) {
+        Ok(s) => s,
+        Err(e) => return task_error_response(id, &e),
+    };
+
+    let store = Arc::clone(store);
+    let task_id = snap.task_id.clone();
+    tokio::spawn(async move {
+        tokio::select! {
+            () = token.cancelled() => {
+                // `tasks/cancel` (or expiry purge) already transitioned the
+                // record; dropping `fut` aborts the handler.
+            }
+            out = fut => {
+                let outcome = match out {
+                    Ok(result) => {
+                        serde_json::to_value(legacy::CallToolResult::from(result)).map_err(|e| {
+                            JsonRpcError {
+                                code: -32603,
+                                message: format!("serialize result: {e}"),
+                                data: None,
+                            }
+                        })
+                    }
+                    Err(e) => Err(mcp_to_jsonrpc_error(&e)),
+                };
+                store.complete(&task_id, outcome);
+            }
+        }
+    });
+
+    ok_value(
+        id,
+        &legacy::CreateTaskResult {
+            meta: Map::new(),
+            task: to_wire_task(&snap),
+        },
+    )
+}
+
+/// Legacy `tools/list` with Tasks enabled: every tool that doesn't declare its
+/// own task support is advertised as `execution.taskSupport: "optional"`
+/// (the conversion layer can't know Tasks are on, so the dispatcher patches).
+async fn legacy_list_tools_with_task_support<S: McpServerCore>(
+    server: S,
+    router: &MethodRouter<S>,
+    req: &JsonRpcRequest,
+    ctx: RequestContext,
+    id: RequestId,
+) -> JsonRpcMessage {
+    let list_params = parse_list_params(req.params.as_ref());
+    let Some(fut) = router.dispatch_list_tools(server, ListToolsContext::new(ctx), list_params)
+    else {
+        return error_response(
+            id,
+            &McpError::method_not_found(methods::request::TOOLS_LIST),
+        );
+    };
+    match fut.await {
+        Ok(result) => {
+            let mut wire = legacy::ListToolsResult::from(result);
+            for tool in &mut wire.tools {
+                tool.execution
+                    .get_or_insert(legacy::ToolExecution { task_support: None })
+                    .task_support
+                    .get_or_insert(legacy::ToolExecutionTaskSupport::Optional);
+            }
+            ok_value(id, &wire)
+        }
+        Err(e) => error_response(id, &e),
+    }
+}
+
+async fn handle_tasks_method(
+    store: &Arc<TaskStore>,
+    sid: &str,
+    method: &str,
+    req: &JsonRpcRequest,
+    id: RequestId,
+) -> JsonRpcMessage {
+    match method {
+        methods::request::TASKS_LIST => {
+            let cursor = req
+                .params
+                .as_ref()
+                .and_then(|p| p.get("cursor"))
+                .and_then(Value::as_str);
+            match store.list(sid, cursor, TASKS_PAGE_SIZE) {
+                Ok((page, next_cursor)) => ok_value(
+                    id,
+                    &legacy::ListTasksResult {
+                        meta: Map::new(),
+                        next_cursor,
+                        tasks: page.iter().map(to_wire_task).collect(),
+                    },
+                ),
+                Err(e) => task_error_response(id, &e),
+            }
+        }
+        methods::request::TASKS_GET => match parse_task_id(req.params.as_ref()) {
+            Err(e) => error_response(id, &e),
+            Ok(tid) => match store.get(sid, &tid) {
+                Ok(s) => ok_value(
+                    id,
+                    &legacy::GetTaskResult {
+                        created_at: s.created_at.clone(),
+                        last_updated_at: s.last_updated_at.clone(),
+                        meta: Map::new(),
+                        poll_interval: Some(TaskStore::POLL_INTERVAL_MS),
+                        status: to_wire_status(s.status),
+                        status_message: s.status_message.clone(),
+                        task_id: s.task_id.clone(),
+                        ttl: Some(s.ttl_ms),
+                        extra: Map::new(),
+                    },
+                ),
+                Err(e) => task_error_response(id, &e),
+            },
+        },
+        methods::request::TASKS_CANCEL => match parse_task_id(req.params.as_ref()) {
+            Err(e) => error_response(id, &e),
+            Ok(tid) => match store.cancel(sid, &tid) {
+                Ok(s) => ok_value(
+                    id,
+                    &legacy::CancelTaskResult {
+                        created_at: s.created_at.clone(),
+                        last_updated_at: s.last_updated_at.clone(),
+                        meta: Map::new(),
+                        poll_interval: Some(TaskStore::POLL_INTERVAL_MS),
+                        status: to_wire_status(s.status),
+                        status_message: s.status_message.clone(),
+                        task_id: s.task_id.clone(),
+                        ttl: Some(s.ttl_ms),
+                        extra: Map::new(),
+                    },
+                ),
+                Err(e) => task_error_response(id, &e),
+            },
+        },
+        methods::request::TASKS_RESULT => match parse_task_id(req.params.as_ref()) {
+            Err(e) => error_response(id, &e),
+            // Blocks until the task is terminal, then answers exactly what the
+            // underlying request would have (spec §Result Retrieval).
+            Ok(tid) => match store.wait_result(sid, &tid).await {
+                Ok(Ok(value)) => JsonRpcResponse::success(id, value).into(),
+                Ok(Err(err)) => JsonRpcResponse::error(id, err).into(),
+                Err(e) => task_error_response(id, &e),
+            },
+        },
+        _ => unreachable!("handle_tasks_method called with an unrouted method"),
+    }
+}
+
+#[derive(Deserialize)]
+struct RawTaskIdParams {
+    #[serde(rename = "taskId")]
+    task_id: String,
+}
+
+fn parse_task_id(params: Option<&Value>) -> Result<String, McpError> {
+    let params = params.ok_or_else(|| McpError::invalid_params("missing `taskId`"))?;
+    let raw: RawTaskIdParams = serde_json::from_value(params.clone())
+        .map_err(|e| McpError::invalid_params(format!("invalid task params: {e}")))?;
+    Ok(raw.task_id)
+}
+
+fn to_wire_status(s: TaskStatus) -> legacy::TaskStatus {
+    match s {
+        TaskStatus::Working => legacy::TaskStatus::Working,
+        TaskStatus::Completed => legacy::TaskStatus::Completed,
+        TaskStatus::Failed => legacy::TaskStatus::Failed,
+        TaskStatus::Cancelled => legacy::TaskStatus::Cancelled,
+    }
+}
+
+fn to_wire_task(s: &TaskSnapshot) -> legacy::Task {
+    legacy::Task {
+        created_at: s.created_at.clone(),
+        last_updated_at: s.last_updated_at.clone(),
+        poll_interval: Some(TaskStore::POLL_INTERVAL_MS),
+        status: to_wire_status(s.status),
+        status_message: s.status_message.clone(),
+        task_id: s.task_id.clone(),
+        ttl: Some(s.ttl_ms),
+    }
+}
+
+/// Spec error mapping (tasks.mdx §Error Handling): unknown ids and terminal
+/// cancels are `-32602`; capacity exhaustion is an internal `-32603`.
+fn task_error_response(id: RequestId, e: &TaskError) -> JsonRpcMessage {
+    let (code, message) = match e {
+        TaskError::NotFound => (
+            -32602,
+            "unknown task id (expired, evicted, or never created)",
+        ),
+        TaskError::AlreadyTerminal => (-32602, "task is already in a terminal status"),
+        TaskError::CapacityExhausted => (-32603, "task capacity exhausted; retry later"),
+    };
+    JsonRpcResponse::error(
+        id,
+        JsonRpcError {
+            code,
+            message: message.to_owned(),
+            data: None,
+        },
+    )
+    .into()
 }
 
 // ---- response builders -------------------------------------------------------

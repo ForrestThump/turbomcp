@@ -24,6 +24,7 @@ use crate::traits::{McpServerCore, WithCompletions, WithPrompts, WithResources, 
 pub struct ServerBuilder<S> {
     server: S,
     router: MethodRouter<S>,
+    tasks: bool,
 }
 
 impl<S: McpServerCore> ServerBuilder<S> {
@@ -33,6 +34,7 @@ impl<S: McpServerCore> ServerBuilder<S> {
         Self {
             server,
             router: MethodRouter::new(),
+            tasks: false,
         }
     }
 
@@ -40,7 +42,21 @@ impl<S: McpServerCore> ServerBuilder<S> {
     /// emits once it has registered every discovered capability).
     #[must_use]
     pub fn from_parts(server: S, router: MethodRouter<S>) -> Self {
-        Self { server, router }
+        Self {
+            server,
+            router,
+            tasks: false,
+        }
+    }
+
+    /// Enable core Tasks (`2025-11-25`): task-augmented `tools/call` plus
+    /// `tasks/list|get|cancel|result`. See
+    /// [`VersionDispatcher::with_task_support`]. Meaningful only alongside a
+    /// registered tools capability.
+    #[must_use]
+    pub fn with_tasks(mut self) -> Self {
+        self.tasks = true;
+        self
     }
 
     /// Register the `tools/*` capability (requires `S: WithTools`).
@@ -86,7 +102,12 @@ impl<S: McpServerCore> ServerBuilder<S> {
     /// Finish: produce the `tower::Service<JsonRpcMessage>` for this server.
     #[must_use]
     pub fn build(self) -> VersionDispatcher<S> {
-        VersionDispatcher::new(self.server, self.router)
+        let dispatcher = VersionDispatcher::new(self.server, self.router);
+        if self.tasks {
+            dispatcher.with_task_support()
+        } else {
+            dispatcher
+        }
     }
 }
 

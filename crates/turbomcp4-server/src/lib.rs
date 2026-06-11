@@ -25,6 +25,7 @@ mod dispatcher;
 mod response;
 mod router;
 mod session;
+mod tasks;
 mod traits;
 
 pub use adapter::LegacySessionAdapter;

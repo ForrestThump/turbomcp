@@ -10,7 +10,7 @@ repository = "https://github.com/Epistates/turbomcp"
 homepage = "https://turbomcp.org"
 
 [dependencies]
-turbomcp4-core = { workspace = true }
+turbomcp4-core = { workspace = true, features = ["std"] }
 turbomcp4-protocol = { workspace = true }
 turbomcp4-service = { workspace = true }
 tower = { workspace = true }
@@ -19,6 +19,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
+tokio = { workspace = true, features = ["rt", "sync"] }
+time = { workspace = true, features = ["std", "formatting"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }
