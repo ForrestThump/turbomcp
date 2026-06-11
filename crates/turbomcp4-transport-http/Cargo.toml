@@ -16,9 +16,10 @@ turbomcp4-service = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true }
 tower-http = { workspace = true }
-tokio = { workspace = true, features = ["rt", "net"] }
+tokio = { workspace = true, features = ["rt", "net", "sync"] }
 uuid = { workspace = true, features = ["v4"] }
 bytes = { workspace = true }
+futures = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }

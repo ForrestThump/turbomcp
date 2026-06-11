@@ -14,10 +14,15 @@
 //!
 //! - **`POST {path}`** — body is one JSON-RPC message (batches are not supported,
 //!   per PLAN §13.1). A request yields `200 application/json` with the response;
-//!   a notification yields `202 Accepted` with no body.
-//! - **`GET {path}`** — `405`. The server→client SSE stream (for
-//!   `subscriptions/listen`) lands in Phase 6; until then this endpoint offers no
-//!   stream, which the spec permits answering with 405.
+//!   a notification yields `202 Accepted` with no body. A modern
+//!   `subscriptions/listen` request yields a long-lived
+//!   `200 text/event-stream` instead: the acknowledged notification first, then
+//!   the opted-in change notifications, with 15s keep-alive comments and
+//!   `X-Accel-Buffering: no` so proxies don't buffer (transports spec
+//!   §Receiving Messages). Closing the stream ends the subscription.
+//! - **`GET {path}`** — `405`. The draft replaced the GET stream with
+//!   `subscriptions/listen`; the *legacy* (`2025-11-25`) GET→SSE stream is the
+//!   Phase 6d dual-stack deliverable.
 //! - **`DELETE {path}`** — `405`. The `2025-11-25` spec lets a server refuse
 //!   client-initiated session termination; sessions expire by store eviction.
 //!
@@ -52,12 +57,15 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+use std::convert::Infallible;
 use std::future::poll_fn;
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
@@ -65,12 +73,19 @@ use serde_json::json;
 use tower_http::cors::CorsLayer;
 use turbomcp4_codec::{Codec, DefaultCodec};
 use turbomcp4_core::{JsonRpcMessage, ProtocolVersion, meta};
-use turbomcp4_service::{CancellationToken, McpService, ProtocolError};
+use turbomcp4_service::{CancellationToken, McpService, ProtocolError, outbound};
 
 /// The session header of the `2025-11-25` Streamable HTTP transport.
 const HEADER_SESSION_ID: HeaderName = HeaderName::from_static("mcp-session-id");
 /// The per-request version header of the `2025-11-25` Streamable HTTP transport.
 const HEADER_PROTOCOL_VERSION: HeaderName = HeaderName::from_static("mcp-protocol-version");
+
+/// Buffered events per SSE stream; a consumer this far behind backpressures
+/// publishers (the registry awaits `send`).
+const SSE_CHANNEL_CAPACITY: usize = 256;
+/// Default keep-alive comment interval — short enough to outlive common
+/// proxy/LB idle timeouts (often 30–60s).
+const DEFAULT_SSE_KEEPALIVE: Duration = Duration::from_secs(15);
 
 /// Where a request's `Origin` header is checked against (DNS-rebinding guard).
 #[derive(Clone, Debug)]
@@ -91,6 +106,7 @@ pub struct HttpConfig {
     origins: OriginPolicy,
     cors: bool,
     shutdown: CancellationToken,
+    sse_keepalive: Duration,
 }
 
 impl Default for HttpConfig {
@@ -101,6 +117,7 @@ impl Default for HttpConfig {
             origins: OriginPolicy::Allowlist(Vec::new()),
             cors: false,
             shutdown: CancellationToken::new(),
+            sse_keepalive: DEFAULT_SSE_KEEPALIVE,
         }
     }
 }
@@ -158,6 +175,14 @@ impl HttpConfig {
         self.shutdown = shutdown;
         self
     }
+
+    /// Set the SSE keep-alive comment interval (default 15s). Keep it shorter
+    /// than the idle timeout of any proxy in front of the server.
+    #[must_use]
+    pub fn sse_keepalive(mut self, interval: Duration) -> Self {
+        self.sse_keepalive = interval;
+        self
+    }
 }
 
 /// Errors from running the HTTP transport.
@@ -176,6 +201,7 @@ struct HttpState<S> {
     service: S,
     codec: DefaultCodec,
     origins: OriginPolicy,
+    sse_keepalive: Duration,
 }
 
 /// Build the configured axum [`Router`] for `service` without binding a socket —
@@ -190,6 +216,7 @@ where
         service,
         codec: DefaultCodec::default(),
         origins: config.origins.clone(),
+        sse_keepalive: config.sse_keepalive,
     };
     let app = Router::new()
         .route(
@@ -286,6 +313,14 @@ where
         return session_required_rejection();
     }
 
+    // A modern `subscriptions/listen` request answers with a long-lived SSE
+    // stream rather than a JSON body. (A legacy-stamped or malformed listen
+    // comes back from the dispatcher as an error *response*, which the SSE
+    // path renders as plain JSON — so the divert is safe on method alone.)
+    if msg.method() == Some("subscriptions/listen") {
+        return listen_sse(&state, msg).await;
+    }
+
     let mut svc = state.service.clone();
     if let Err(e) = poll_fn(|cx| svc.poll_ready(cx)).await {
         return protocol_error_response(&e);
@@ -308,15 +343,83 @@ where
     }
 }
 
-/// The server→client SSE stream is a Phase 6 (subscriptions) deliverable. Until
-/// then this endpoint offers no stream; the spec permits answering `GET` with
-/// `405`. Phase 6 replaces this with a long-lived `text/event-stream` response
-/// carrying `X-Accel-Buffering: no` and `Connection: keep-alive`.
+/// Open the SSE stream for a `subscriptions/listen` request: register a
+/// per-stream writer (under a minted connection id) so the dispatcher's
+/// subscription registry can reach this response, dispatch the listen, and —
+/// if it was accepted — stream every pushed message as an SSE event.
+///
+/// The writer registration travels inside the stream state, so a client
+/// disconnect (axum drops the body) unregisters it; the registry prunes the
+/// subscription at its next publish (transports spec §Cancellation: closing
+/// the stream is the cancellation signal).
+async fn listen_sse<S>(state: &HttpState<S>, mut msg: JsonRpcMessage) -> Response
+where
+    S: McpService + Clone + Sync,
+    S::Future: Send + 'static,
+{
+    let connection_id = format!("http-sse-{}", uuid::Uuid::new_v4());
+    let (tx, rx) = tokio::sync::mpsc::channel::<JsonRpcMessage>(SSE_CHANNEL_CAPACITY);
+    let registration = outbound::register(&connection_id, tx);
+    meta::set_request_meta(
+        &mut msg,
+        meta::internal::CONNECTION_ID,
+        json!(connection_id),
+    );
+
+    let mut svc = state.service.clone();
+    if let Err(e) = poll_fn(|cx| svc.poll_ready(cx)).await {
+        return protocol_error_response(&e);
+    }
+    match svc.call(msg).await {
+        // Accepted: no JSON-RPC response; the ack notification is already in
+        // the channel as the stream's first event.
+        Ok(None) => {}
+        // Rejected in-band (bad filter, legacy path, unsupported version).
+        Ok(Some(reply)) => return encode_json_response(&state.codec, &reply),
+        Err(e) => return protocol_error_response(&e),
+    }
+
+    let codec = state.codec;
+    let stream = futures::stream::unfold(
+        (rx, registration, codec),
+        |(mut rx, registration, codec)| async move {
+            let msg = rx.recv().await?;
+            let event = match codec.encode(&msg) {
+                Ok(bytes) => Event::default().data(String::from_utf8_lossy(&bytes)),
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to encode SSE event; skipped");
+                    Event::default().comment("event encoding failed; skipped")
+                }
+            };
+            Some((Ok::<_, Infallible>(event), (rx, registration, codec)))
+        },
+    );
+
+    let sse = Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(state.sse_keepalive)
+            .text("keep-alive"),
+    );
+    // X-Accel-Buffering tells reverse proxies (nginx) not to buffer the
+    // stream (transports spec: SHOULD include it on SSE responses).
+    (
+        [(
+            HeaderName::from_static("x-accel-buffering"),
+            HeaderValue::from_static("no"),
+        )],
+        sse,
+    )
+        .into_response()
+}
+
+/// The draft has no GET stream (`subscriptions/listen` over POST replaced it);
+/// the `2025-11-25` GET→SSE server-message stream is the Phase 6d dual-stack
+/// deliverable. Until then the spec permits answering `GET` with `405`.
 async fn mcp_get() -> Response {
     (
         StatusCode::METHOD_NOT_ALLOWED,
         [(header::ALLOW, "POST")],
-        "server→client SSE stream not available until subscriptions (Phase 6)",
+        "no GET stream: the draft subscribes via subscriptions/listen over POST",
     )
         .into_response()
 }
