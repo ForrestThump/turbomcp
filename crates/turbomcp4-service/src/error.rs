@@ -28,6 +28,12 @@ pub enum ProtocolError {
     /// A required capability for the requested method is not available (`-32003`).
     #[error("missing required capability: {0}")]
     MissingCapability(String),
+    /// The request referenced a session this server does not know — expired,
+    /// evicted, or never created. Per the `2025-11-25` Streamable HTTP spec the
+    /// HTTP transport answers this with `404 Not Found`, prompting the client
+    /// to re-`initialize`.
+    #[error("unknown session: {0}")]
+    UnknownSession(String),
     /// The underlying transport failed (connection closed, I/O error).
     #[error("transport error: {0}")]
     Transport(String),
@@ -47,6 +53,7 @@ impl ProtocolError {
             Self::Parse(_) => -32700,
             Self::UnsupportedVersion { .. } => -32004,
             Self::MissingCapability(_) => -32003,
+            Self::UnknownSession(_) => -32002,
             Self::Transport(_) | Self::ServerShuttingDown => -32001,
             Self::Internal(_) => -32603,
         }

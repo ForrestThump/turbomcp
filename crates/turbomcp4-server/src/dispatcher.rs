@@ -7,14 +7,17 @@
 //! concentrating *all* per-version branching in one place. Above it (RPC
 //! middleware) and below it (typed handlers) are version-agnostic.
 //!
-//! Per-version status (Phase 2): the modern `DRAFT-2026-v1` path is live; the
-//! legacy `2025-11-25` (stateful) path is recognized and stubbed so wiring it in
-//! Phase 5 is an additive change, not a redesign.
+//! Per-version status (Phase 5): both paths are live. The modern
+//! `DRAFT-2026-v1` path is stateless (version in each request's `_meta`); the
+//! legacy `2025-11-25` path is stateful — `initialize` negotiates a version and
+//! mints a session (via the transport-supplied internal session id, see
+//! [`turbomcp4_core::meta::internal`]), and later requests are dispatched with
+//! the session's negotiated client info/capabilities injected into their
+//! [`RequestContext`]. Both paths converge on the same neutral handlers; only
+//! the wire types differ (selected via the private `WireFamily` trait).
 //!
-//! Two pieces are deliberately deferred and noted inline: `_meta`→context
-//! extraction will move to a `MetaExtractLayer` (Phase 4), and `poll_ready`
-//! backpressure (bounded queue) lands with the writer-actor (Phase 4). Today the
-//! dispatcher extracts `_meta` itself and is always ready.
+//! `_meta`→context extraction may still move to a `MetaExtractLayer` once
+//! Auth/RateLimit need to observe it between layers (Phase 6/7).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -27,12 +30,15 @@ use serde_json::{Map, Value};
 use tower::Service;
 
 use turbomcp4_core::{
-    Implementation, JsonRpcMessage, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, McpError,
-    ProtocolVersion, RequestContext, RequestId,
+    Implementation, JsonRpcError, JsonRpcMessage, JsonRpcNotification, JsonRpcRequest,
+    JsonRpcResponse, McpError, ProtocolVersion, RequestContext, RequestId, meta,
 };
+use turbomcp4_protocol::v2025_11_25::types as legacy;
 use turbomcp4_protocol::v2026_draft::types as draft;
 use turbomcp4_protocol::{methods, neutral, version};
 use turbomcp4_service::{ProtocolError, mcp_to_jsonrpc_error};
+
+use crate::session::{SessionState, SessionStore};
 
 use crate::context::{
     CallToolContext, CompleteContext, GetPromptContext, ListPromptsContext,
@@ -49,6 +55,7 @@ pub struct VersionDispatcher<S> {
     server: S,
     router: Arc<MethodRouter<S>>,
     supported: Vec<ProtocolVersion>,
+    sessions: Arc<SessionStore>,
 }
 
 impl<S: Clone> Clone for VersionDispatcher<S> {
@@ -57,6 +64,7 @@ impl<S: Clone> Clone for VersionDispatcher<S> {
             server: self.server.clone(),
             router: Arc::clone(&self.router),
             supported: self.supported.clone(),
+            sessions: Arc::clone(&self.sessions),
         }
     }
 }
@@ -71,6 +79,7 @@ impl<S: McpServerCore> VersionDispatcher<S> {
             server,
             router: Arc::new(router),
             supported,
+            sessions: Arc::new(SessionStore::default()),
         }
     }
 }
@@ -90,7 +99,8 @@ impl<S: McpServerCore> Service<JsonRpcMessage> for VersionDispatcher<S> {
         let server = self.server.clone();
         let router = Arc::clone(&self.router);
         let supported = self.supported.clone();
-        Box::pin(async move { Ok(handle(server, router, supported, msg).await) })
+        let sessions = Arc::clone(&self.sessions);
+        Box::pin(async move { handle(server, router, supported, sessions, msg).await })
     }
 }
 
@@ -98,21 +108,22 @@ async fn handle<S: McpServerCore>(
     server: S,
     router: Arc<MethodRouter<S>>,
     supported: Vec<ProtocolVersion>,
+    sessions: Arc<SessionStore>,
     msg: JsonRpcMessage,
-) -> Option<JsonRpcMessage> {
+) -> Result<Option<JsonRpcMessage>, ProtocolError> {
     match msg {
-        JsonRpcMessage::Request(req) => {
-            Some(handle_request(server, &router, &supported, req).await)
-        }
+        JsonRpcMessage::Request(req) => handle_request(server, &router, &supported, &sessions, req)
+            .await
+            .map(Some),
         JsonRpcMessage::Notification(n) => {
             handle_notification(&n);
-            None
+            Ok(None)
         }
         JsonRpcMessage::Response(_) => {
             // A client→server response replies to a server-initiated request
             // (sampling/MRTR). No outbound requests exist until Phase 6.
             tracing::debug!("ignoring unsolicited client->server response");
-            None
+            Ok(None)
         }
     }
 }
@@ -135,21 +146,25 @@ async fn handle_request<S: McpServerCore>(
     server: S,
     router: &MethodRouter<S>,
     supported: &[ProtocolVersion],
+    sessions: &SessionStore,
     req: JsonRpcRequest,
-) -> JsonRpcMessage {
+) -> Result<JsonRpcMessage, ProtocolError> {
     let id = req.id.clone();
     let method = req.method.clone();
 
     match method.as_str() {
         // Version-agnostic methods: a client may call these before it knows
         // which version to pin (discovery) or merely to probe liveness.
-        methods::request::DISCOVER => {
-            ok_value(id, &build_discover_result(&server, router, supported))
-        }
-        methods::request::PING => JsonRpcResponse::success(id, serde_json::json!({})).into(),
+        methods::request::DISCOVER => Ok(ok_value(
+            id,
+            &build_discover_result(&server, router, supported),
+        )),
+        methods::request::PING => Ok(JsonRpcResponse::success(id, serde_json::json!({})).into()),
 
-        // Stateful handshake — recognized, routed in Phase 5.
-        methods::request::INITIALIZE => legacy_not_implemented(id, "initialize"),
+        // Stateful handshake (2025-11-25 and earlier).
+        methods::request::INITIALIZE => Ok(handle_initialize(
+            &server, router, supported, sessions, &req,
+        )),
 
         // Version-gated methods (every capability `*/list|read|get|call|complete`).
         methods::request::TOOLS_LIST
@@ -162,16 +177,23 @@ async fn handle_request<S: McpServerCore>(
         | methods::request::COMPLETION_COMPLETE => {
             match classify_version(req.params.as_ref(), supported) {
                 VersionRoute::Modern => {
-                    dispatch_modern(server, router, &req, method.as_str(), id).await
+                    let ctx = build_context(&req);
+                    Ok(dispatch_capability::<S, DraftWire>(server, router, &req, &ctx, id).await)
                 }
-                VersionRoute::Legacy => legacy_not_implemented(id, method.as_str()),
+                VersionRoute::Legacy => {
+                    let ctx = match legacy_context(sessions, &req)? {
+                        Ok(ctx) => ctx,
+                        Err(response) => return Ok(response),
+                    };
+                    Ok(dispatch_capability::<S, LegacyWire>(server, router, &req, &ctx, id).await)
+                }
                 VersionRoute::Unsupported(requested) => {
-                    unsupported_version(id, requested, supported)
+                    Ok(unsupported_version(id, requested, supported))
                 }
             }
         }
 
-        other => error_response(id, &McpError::method_not_found(other)),
+        other => Ok(error_response(id, &McpError::method_not_found(other))),
     }
 }
 
@@ -195,19 +217,63 @@ where
     }
 }
 
-async fn dispatch_modern<S: McpServerCore>(
+/// The per-version wire surface: one associated type per capability result.
+/// Both versions dispatch through the same generic path; only the
+/// `From<neutral>` target differs (the conversions live in
+/// `turbomcp4_protocol::neutral`).
+trait WireFamily {
+    type ListTools: Serialize + From<neutral::ListToolsResult>;
+    type CallTool: Serialize + From<neutral::CallToolResult>;
+    type ListResources: Serialize + From<neutral::ListResourcesResult>;
+    type ListResourceTemplates: Serialize + From<neutral::ListResourceTemplatesResult>;
+    type ReadResource: Serialize + From<neutral::ReadResourceResult>;
+    type ListPrompts: Serialize + From<neutral::ListPromptsResult>;
+    type GetPrompt: Serialize + From<neutral::GetPromptResult>;
+    type Complete: Serialize + From<neutral::CompleteResult>;
+}
+
+/// `DRAFT-2026-v1` (modern, stateless).
+struct DraftWire;
+
+impl WireFamily for DraftWire {
+    type ListTools = draft::ListToolsResult;
+    type CallTool = draft::CallToolResult;
+    type ListResources = draft::ListResourcesResult;
+    type ListResourceTemplates = draft::ListResourceTemplatesResult;
+    type ReadResource = draft::ReadResourceResult;
+    type ListPrompts = draft::ListPromptsResult;
+    type GetPrompt = draft::GetPromptResult;
+    type Complete = draft::CompleteResult;
+}
+
+/// `2025-11-25` (legacy, stateful).
+struct LegacyWire;
+
+impl WireFamily for LegacyWire {
+    type ListTools = legacy::ListToolsResult;
+    type CallTool = legacy::CallToolResult;
+    type ListResources = legacy::ListResourcesResult;
+    type ListResourceTemplates = legacy::ListResourceTemplatesResult;
+    type ReadResource = legacy::ReadResourceResult;
+    type ListPrompts = legacy::ListPromptsResult;
+    type GetPrompt = legacy::GetPromptResult;
+    type Complete = legacy::CompleteResult;
+}
+
+async fn dispatch_capability<S: McpServerCore, W: WireFamily>(
     server: S,
     router: &MethodRouter<S>,
     req: &JsonRpcRequest,
-    method: &str,
+    ctx: &RequestContext,
     id: RequestId,
 ) -> JsonRpcMessage {
-    let ctx = build_context(req);
+    let method = req.method.as_str();
+    let ctx = ctx.clone();
     let list_params = parse_list_params(req.params.as_ref());
     match method {
         methods::request::TOOLS_LIST => {
             let fut = router.dispatch_list_tools(server, ListToolsContext::new(ctx), list_params);
-            finish::<_, draft::ListToolsResult>(id, method, fut).await
+            finish::<_, W::ListTools>(id, method, fut).await
         }
         methods::request::TOOLS_CALL => {
             let params = match parse_call_tool_params(req.params.as_ref()) {
@@ -215,12 +281,12 @@ async fn dispatch_modern<S: McpServerCore>(
                 Err(e) => return error_response(id, &e),
             };
             let fut = router.dispatch_call_tool(server, CallToolContext::new(ctx), params);
-            finish::<_, draft::CallToolResult>(id, method, fut).await
+            finish::<_, W::CallTool>(id, method, fut).await
         }
         methods::request::RESOURCES_LIST => {
             let fut =
                 router.dispatch_list_resources(server, ListResourcesContext::new(ctx), list_params);
-            finish::<_, draft::ListResourcesResult>(id, method, fut).await
+            finish::<_, W::ListResources>(id, method, fut).await
         }
         methods::request::RESOURCES_TEMPLATES_LIST => {
             let fut = router.dispatch_list_resource_templates(
@@ -228,7 +294,7 @@ async fn dispatch_modern<S: McpServerCore>(
                 ListResourceTemplatesContext::new(ctx),
                 list_params,
             );
-            finish::<_, draft::ListResourceTemplatesResult>(id, method, fut).await
+            finish::<_, W::ListResourceTemplates>(id, method, fut).await
         }
         methods::request::RESOURCES_READ => {
             let params = match parse_read_resource_params(req.params.as_ref()) {
@@ -236,12 +302,12 @@ async fn dispatch_modern<S: McpServerCore>(
                 Err(e) => return error_response(id, &e),
             };
             let fut = router.dispatch_read_resource(server, ReadResourceContext::new(ctx), params);
-            finish::<_, draft::ReadResourceResult>(id, method, fut).await
+            finish::<_, W::ReadResource>(id, method, fut).await
         }
         methods::request::PROMPTS_LIST => {
             let fut =
                 router.dispatch_list_prompts(server, ListPromptsContext::new(ctx), list_params);
-            finish::<_, draft::ListPromptsResult>(id, method, fut).await
+            finish::<_, W::ListPrompts>(id, method, fut).await
         }
         methods::request::PROMPTS_GET => {
             let params = match parse_get_prompt_params(req.params.as_ref()) {
@@ -249,7 +315,7 @@ async fn dispatch_modern<S: McpServerCore>(
                 Err(e) => return error_response(id, &e),
             };
             let fut = router.dispatch_get_prompt(server, GetPromptContext::new(ctx), params);
-            finish::<_, draft::GetPromptResult>(id, method, fut).await
+            finish::<_, W::GetPrompt>(id, method, fut).await
         }
         methods::request::COMPLETION_COMPLETE => {
             let params = match parse_complete_params(req.params.as_ref()) {
@@ -257,9 +323,9 @@ async fn dispatch_modern<S: McpServerCore>(
                 Err(e) => return error_response(id, &e),
             };
             let fut = router.dispatch_complete(server, CompleteContext::new(ctx), params);
-            finish::<_, draft::CompleteResult>(id, method, fut).await
+            finish::<_, W::Complete>(id, method, fut).await
         }
-        _ => unreachable!("dispatch_modern called with an unrouted method"),
+        _ => unreachable!("dispatch_capability called with an unrouted method"),
     }
 }
 
@@ -284,6 +350,186 @@ fn classify_version(params: Option<&Value>, supported: &[ProtocolVersion]) -> Ve
         // client that omitted `_meta` can re-issue with a known version.
         None => VersionRoute::Unsupported(None),
     }
+}
+
+// ---- legacy (2025-11-25) session path ------------------------------------------
+
+/// Read the transport-asserted session id from a request's `params._meta`.
+/// Transports sanitize inbound messages before injecting this key, so its
+/// presence is trustworthy in-process (see [`meta::internal`]).
+fn session_id(params: Option<&Value>) -> Option<&str> {
+    params?
+        .get("_meta")?
+        .get(meta::internal::SESSION_ID)?
+        .as_str()
+}
+
+/// Resolve the session for a legacy request and build its [`RequestContext`]
+/// (negotiated version + client info/capabilities from `initialize`, plus this
+/// request's propagated `_meta`).
+///
+/// Three-way outcome, hence the nested `Result`:
+/// - `Err(ProtocolError::UnknownSession)` — id supplied but not live; the HTTP
+///   transport maps this to `404` so the client re-initializes (spec §Session
+///   Management).
+/// - `Ok(Err(response))` — no session id at all: the connection never ran
+///   `initialize`, answered in-band as a JSON-RPC error.
+/// - `Ok(Ok(ctx))` — live session.
+fn legacy_context(
+    sessions: &SessionStore,
+    req: &JsonRpcRequest,
+) -> Result<Result<RequestContext, JsonRpcMessage>, ProtocolError> {
+    let Some(sid) = session_id(req.params.as_ref()) else {
+        let err = JsonRpcError {
+            code: -32002,
+            message: "server not initialized: send `initialize` first".to_owned(),
+            data: None,
+        };
+        return Ok(Err(JsonRpcResponse::error(req.id.clone(), err).into()));
+    };
+    let Some(state) = sessions.get(sid) else {
+        return Err(ProtocolError::UnknownSession(sid.to_owned()));
+    };
+    let mut ctx = RequestContext::new(state.version).with_client_info(state.client_info);
+    ctx.client_capabilities = Some(state.client_capabilities);
+    if let Some(m) = req
+        .params
+        .as_ref()
+        .and_then(|p| p.get("_meta"))
+        .and_then(Value::as_object)
+    {
+        let (_consumed, propagated) = meta::partition(m.clone());
+        ctx = ctx.with_propagated_meta(propagated);
+    }
+    Ok(Ok(ctx))
+}
+
+/// Answer the `initialize` handshake (lifecycle spec §Version Negotiation):
+/// echo the requested version when supported, otherwise our latest
+/// `initialize`-speaking version. When the transport supplied a session id,
+/// the negotiated state is stored under it for later context injection.
+fn handle_initialize<S: McpServerCore>(
+    server: &S,
+    router: &MethodRouter<S>,
+    supported: &[ProtocolVersion],
+    sessions: &SessionStore,
+    req: &JsonRpcRequest,
+) -> JsonRpcMessage {
+    let id = req.id.clone();
+    let Some(params) = req.params.as_ref() else {
+        return error_response(id, &McpError::invalid_params("initialize requires params"));
+    };
+    let params: legacy::InitializeRequestParams = match serde_json::from_value(params.clone()) {
+        Ok(p) => p,
+        Err(e) => {
+            return error_response(
+                id,
+                &McpError::invalid_params(format!("invalid initialize params: {e}")),
+            );
+        }
+    };
+
+    let negotiated = negotiate_initialize_version(&params.protocol_version, supported);
+
+    if let Some(sid) = session_id(req.params.as_ref()) {
+        let client_capabilities = serde_json::to_value(&params.capabilities).unwrap_or(Value::Null);
+        sessions.insert(
+            sid,
+            SessionState {
+                version: negotiated.clone(),
+                client_info: from_legacy_impl(params.client_info),
+                client_capabilities,
+            },
+        );
+    }
+
+    let result = legacy::InitializeResult {
+        capabilities: build_legacy_capabilities(router),
+        instructions: server.instructions(),
+        meta: Map::new(),
+        protocol_version: negotiated.as_str().to_owned(),
+        server_info: to_legacy_impl(server.server_info()),
+    };
+    let mut value = match serde_json::to_value(&result) {
+        Ok(v) => v,
+        Err(e) => {
+            return error_response(id, &McpError::internal(format!("serialize result: {e}")));
+        }
+    };
+    // The generated capability types model presence-markers (`completions: {}`)
+    // as maps that serde skips when empty, so an advertised-but-empty marker
+    // would vanish. Patch it into the serialized form instead.
+    if router.has_completions()
+        && let Some(caps) = value.get_mut("capabilities").and_then(Value::as_object_mut)
+    {
+        caps.insert("completions".to_owned(), serde_json::json!({}));
+    }
+    JsonRpcResponse::success(id, value).into()
+}
+
+/// Pick the version to answer `initialize` with. The spec: echo the requested
+/// version if supported, else "another version [the server] supports … SHOULD
+/// be the latest". Our latest *`initialize`-speaking* version is `2025-11-25`,
+/// so prefer it over the draft (which negotiates per-request instead).
+fn negotiate_initialize_version(requested: &str, supported: &[ProtocolVersion]) -> ProtocolVersion {
+    let requested = ProtocolVersion::from_wire(requested);
+    if supported.contains(&requested) {
+        return requested;
+    }
+    if supported.contains(&ProtocolVersion::V2025_11_25) {
+        return ProtocolVersion::V2025_11_25;
+    }
+    supported
+        .first()
+        .cloned()
+        .unwrap_or(ProtocolVersion::LATEST)
+}
+
+fn build_legacy_capabilities<S: McpServerCore>(
+    router: &MethodRouter<S>,
+) -> legacy::ServerCapabilities {
+    legacy::ServerCapabilities {
+        // `completions` is a presence marker the generated type can't express
+        // (empty map ⇒ skipped); patched post-serialization in
+        // `handle_initialize`.
+        completions: Map::new(),
+        experimental: BTreeMap::new(),
+        logging: Map::new(),
+        prompts: router
+            .has_prompts()
+            .then_some(legacy::ServerCapabilitiesPrompts {
+                list_changed: Some(false),
+            }),
+        resources: router
+            .has_resources()
+            .then_some(legacy::ServerCapabilitiesResources {
+                list_changed: Some(false),
+                subscribe: Some(false),
+            }),
+        tasks: None,
+        tools: router
+            .has_tools()
+            .then_some(legacy::ServerCapabilitiesTools {
+                list_changed: Some(false),
+            }),
+    }
+}
+
+fn to_legacy_impl(i: Implementation) -> legacy::Implementation {
+    legacy::Implementation {
+        description: None,
+        icons: Vec::new(),
+        name: i.name,
+        title: i.title,
+        version: i.version,
+        website_url: None,
+    }
+}
+
+fn from_legacy_impl(i: legacy::Implementation) -> Implementation {
+    let mut out = Implementation::new(i.name, i.version);
+    out.title = i.title;
+    out
 }
 
 // ---- response builders -------------------------------------------------------
@@ -502,13 +748,4 @@ fn unsupported_version(
         supported: supported.iter().map(|v| v.as_str().to_owned()).collect(),
     };
     err.into_response(id).into()
-}
-
-fn legacy_not_implemented(id: RequestId, method: &str) -> JsonRpcMessage {
-    error_response(
-        id,
-        &McpError::internal(format!(
-            "{method}: legacy 2025-11-25 dispatch not yet implemented (Phase 5)"
-        )),
-    )
 }

@@ -6258,6 +6258,7 @@ dependencies = [
  "turbomcp4-core",
  "turbomcp4-protocol",
  "turbomcp4-service",
+ "uuid",
 ]
 
 [[package]]

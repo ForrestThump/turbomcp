@@ -12,18 +12,22 @@
 //!   routes to the typed handler, and serializes the response. All per-version
 //!   branching is concentrated here.
 //!
-//! Phase 2 wires the modern `DRAFT-2026-v1` path end to end; the legacy
-//! `2025-11-25` path is recognized and stubbed (Phase 5).
+//! Both protocol paths are live: the modern `DRAFT-2026-v1` stateless path and
+//! the legacy `2025-11-25` stateful path (`initialize` handshake +
+//! [`SessionStore`]; see [`LegacySessionAdapter`] for byte-pipe transports).
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod adapter;
 mod builder;
 mod context;
 mod dispatcher;
 mod response;
 mod router;
+mod session;
 mod traits;
 
+pub use adapter::LegacySessionAdapter;
 pub use builder::{IntoServerBuilder, ServerBuilder};
 pub use context::{
     CallToolContext, CompleteContext, GetPromptContext, ListPromptsContext,
@@ -32,6 +36,7 @@ pub use context::{
 pub use dispatcher::VersionDispatcher;
 pub use response::{IntoCallToolResult, IntoGetPromptResult, IntoReadResourceResult};
 pub use router::MethodRouter;
+pub use session::{SessionState, SessionStore};
 pub use traits::{McpServerCore, WithCompletions, WithPrompts, WithResources, WithTools};
 
 /// Support items called by `#[server]`-generated code. Not part of the stable
@@ -202,15 +207,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_version_is_stubbed() {
+    async fn legacy_version_without_session_is_not_initialized() {
         let mut svc = dispatcher();
         let meta = json!({ "io.modelcontextprotocol/protocolVersion": "2025-11-25" });
         let req = JsonRpcRequest::new(5, "tools/list", Some(json!({ "_meta": meta })));
         let JsonRpcMessage::Response(r) = call(&mut svc, req).await else {
             panic!()
         };
-        let err = r.error.expect("legacy path stubbed");
-        assert!(err.message.contains("Phase 5"));
+        let err = r.error.expect("legacy request without a session must fail");
+        assert_eq!(err.code, -32002);
+        assert!(err.message.contains("initialize"));
     }
 
     #[tokio::test]
