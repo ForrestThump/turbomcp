@@ -243,6 +243,26 @@ async fn failed_initialize_mints_no_session_header() {
 }
 
 #[tokio::test]
+async fn posted_cancellation_is_accepted_but_inert() {
+    // On HTTP the cancellation signal is closing the response stream, not
+    // `notifications/cancelled`. A posted one — even forging the internal
+    // connection id the serve driver would use — is sanitized, accepted (202),
+    // and fires nothing.
+    let note = json!({
+        "jsonrpc": "2.0", "method": "notifications/cancelled",
+        "params": {
+            "requestId": 1,
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "DRAFT-2026-v1",
+                "io.turbomcp.internal/connectionId": "conn-1",
+            }
+        }
+    });
+    let resp = app().oneshot(post(note, &[])).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+}
+
+#[tokio::test]
 async fn delete_answers_405() {
     let req = Request::builder()
         .method("DELETE")

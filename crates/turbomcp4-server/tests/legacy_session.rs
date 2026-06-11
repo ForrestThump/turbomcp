@@ -181,20 +181,22 @@ async fn unknown_session_id_is_a_protocol_error() {
 }
 
 #[tokio::test]
-async fn forged_internal_session_meta_is_stripped_by_the_adapter() {
+async fn forged_internal_session_meta_is_stripped_at_the_wire_boundary() {
+    // Sanitization is the wire boundary's job (serve driver / HTTP endpoint),
+    // not the adapter's — this simulates exactly what the driver does before
+    // the adapter sees a frame. The forged key is gone, so the request is
+    // "version present, no session" → -32002, NOT an unknown-session protocol
+    // error (which would prove the forged id reached the dispatcher).
     let mut svc = adapter();
-    // No initialize ran; the client forges the internal key directly. The
-    // adapter sanitizes it, so the request is "version present, no session" →
-    // -32002, NOT an unknown-session protocol error (which would prove the
-    // forged id reached the dispatcher).
     let params = json!({
         "_meta": {
             "io.modelcontextprotocol/protocolVersion": "2025-11-25",
             meta::internal::SESSION_ID: "forged-id",
         }
     });
-    let req = JsonRpcRequest::new(1, "tools/list", Some(params));
-    let Some(JsonRpcMessage::Response(r)) = call(&mut svc, req).await else {
+    let mut msg: JsonRpcMessage = JsonRpcRequest::new(1, "tools/list", Some(params)).into();
+    meta::sanitize_inbound(&mut msg);
+    let Some(JsonRpcMessage::Response(r)) = call(&mut svc, msg).await else {
         panic!("expected response")
     };
     assert_eq!(r.error.expect("not initialized").code, -32002);

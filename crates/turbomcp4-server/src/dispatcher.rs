@@ -42,6 +42,7 @@ use crate::context::{
     CallToolContext, CompleteContext, GetPromptContext, ListPromptsContext,
     ListResourceTemplatesContext, ListResourcesContext, ListToolsContext, ReadResourceContext,
 };
+use crate::inflight::InFlightRegistry;
 use crate::router::MethodRouter;
 use crate::session::{SessionState, SessionStore};
 use crate::tasks::{TaskError, TaskSnapshot, TaskStatus, TaskStore};
@@ -57,6 +58,7 @@ pub struct VersionDispatcher<S> {
     supported: Vec<ProtocolVersion>,
     sessions: Arc<SessionStore>,
     tasks: Option<Arc<TaskStore>>,
+    inflight: Arc<InFlightRegistry>,
 }
 
 impl<S: Clone> Clone for VersionDispatcher<S> {
@@ -67,6 +69,7 @@ impl<S: Clone> Clone for VersionDispatcher<S> {
             supported: self.supported.clone(),
             sessions: Arc::clone(&self.sessions),
             tasks: self.tasks.clone(),
+            inflight: Arc::clone(&self.inflight),
         }
     }
 }
@@ -83,6 +86,7 @@ impl<S: McpServerCore> VersionDispatcher<S> {
             supported,
             sessions: Arc::new(SessionStore::default()),
             tasks: None,
+            inflight: Arc::new(InFlightRegistry::default()),
         }
     }
 
@@ -117,7 +121,10 @@ impl<S: McpServerCore> Service<JsonRpcMessage> for VersionDispatcher<S> {
         let supported = self.supported.clone();
         let sessions = Arc::clone(&self.sessions);
         let tasks = self.tasks.clone();
-        Box::pin(async move { handle(server, router, supported, sessions, tasks, msg).await })
+        let inflight = Arc::clone(&self.inflight);
+        Box::pin(
+            async move { handle(server, router, supported, sessions, tasks, inflight, msg).await },
+        )
     }
 }
 
@@ -127,16 +134,36 @@ async fn handle<S: McpServerCore>(
     supported: Vec<ProtocolVersion>,
     sessions: Arc<SessionStore>,
     tasks: Option<Arc<TaskStore>>,
+    inflight: Arc<InFlightRegistry>,
     msg: JsonRpcMessage,
 ) -> Result<Option<JsonRpcMessage>, ProtocolError> {
     match msg {
         JsonRpcMessage::Request(req) => {
-            handle_request(server, &router, &supported, &sessions, tasks.as_ref(), req)
-                .await
-                .map(Some)
+            // Track the request for `notifications/cancelled` while it
+            // dispatches — but only on an identified connection (the serve
+            // driver injects the id; HTTP cancels by closing the stream).
+            let cancel = CancellationToken::new();
+            let _guard = connection_id(req.params.as_ref())
+                .map(|conn| inflight.register(conn, &req.id, cancel.clone()));
+            let dispatch = handle_request(
+                server,
+                &router,
+                &supported,
+                &sessions,
+                tasks.as_ref(),
+                req,
+                cancel.clone(),
+            );
+            tokio::select! {
+                // Cancelled mid-flight: drop the handler future and send
+                // nothing (cancellation spec: "stop processing … not send a
+                // response for the cancelled request").
+                () = cancel.cancelled() => Ok(None),
+                out = dispatch => out.map(Some),
+            }
         }
         JsonRpcMessage::Notification(n) => {
-            handle_notification(&n);
+            handle_notification(&inflight, &n);
             Ok(None)
         }
         JsonRpcMessage::Response(_) => {
@@ -148,12 +175,38 @@ async fn handle<S: McpServerCore>(
     }
 }
 
-fn handle_notification(n: &JsonRpcNotification) {
+#[derive(Deserialize)]
+struct RawCancelledParams {
+    #[serde(rename = "requestId")]
+    request_id: RequestId,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+fn handle_notification(inflight: &InFlightRegistry, n: &JsonRpcNotification) {
     match n.method.as_str() {
         methods::notification::CANCELLED => {
-            // Cancellation wiring (look up in-flight request, fire its token)
-            // needs the in-flight registry built in Phase 6. Logged for now.
-            tracing::debug!("received notifications/cancelled (no-op until Phase 6)");
+            // Fire-and-forget per spec: malformed params, unknown ids, and
+            // already-finished requests are all silently ignored.
+            let Some(conn) = connection_id(n.params.as_ref()) else {
+                tracing::debug!("notifications/cancelled without a connection; ignored");
+                return;
+            };
+            let Some(parsed) = n
+                .params
+                .as_ref()
+                .and_then(|p| serde_json::from_value::<RawCancelledParams>(p.clone()).ok())
+            else {
+                tracing::debug!("malformed notifications/cancelled; ignored");
+                return;
+            };
+            let fired = inflight.cancel(conn, &parsed.request_id);
+            tracing::debug!(
+                request_id = ?parsed.request_id,
+                reason = parsed.reason.as_deref().unwrap_or(""),
+                fired,
+                "notifications/cancelled"
+            );
         }
         methods::notification::INITIALIZED => {
             tracing::debug!("received notifications/initialized");
@@ -169,6 +222,7 @@ async fn handle_request<S: McpServerCore>(
     sessions: &SessionStore,
     tasks: Option<&Arc<TaskStore>>,
     req: JsonRpcRequest,
+    cancel: CancellationToken,
 ) -> Result<JsonRpcMessage, ProtocolError> {
     let id = req.id.clone();
     let method = req.method.clone();
@@ -206,14 +260,16 @@ async fn handle_request<S: McpServerCore>(
         | methods::request::COMPLETION_COMPLETE => {
             match classify_version(req.params.as_ref(), supported) {
                 VersionRoute::Modern => {
-                    let ctx = build_context(&req);
+                    let mut ctx = build_context(&req);
+                    ctx.cancellation = cancel;
                     Ok(dispatch_capability::<S, DraftWire>(server, router, &req, &ctx, id).await)
                 }
                 VersionRoute::Legacy => {
-                    let ctx = match legacy_context(sessions, &req)? {
+                    let mut ctx = match legacy_context(sessions, &req)? {
                         Ok(ctx) => ctx,
                         Err(response) => return Ok(response),
                     };
+                    ctx.cancellation = cancel;
                     // Core Tasks hooks (2025-11-25 only): augmented tools/call
                     // detaches into a task; tools/list advertises taskSupport.
                     if let Some(store) = tasks {
@@ -433,6 +489,15 @@ fn session_id(params: Option<&Value>) -> Option<&str> {
     params?
         .get("_meta")?
         .get(meta::internal::SESSION_ID)?
+        .as_str()
+}
+
+/// Read the driver-asserted connection id from `params._meta` (same trust
+/// model as [`session_id`]: the boundary sanitizes before injecting).
+fn connection_id(params: Option<&Value>) -> Option<&str> {
+    params?
+        .get("_meta")?
+        .get(meta::internal::CONNECTION_ID)?
         .as_str()
 }
 

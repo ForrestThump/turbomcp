@@ -22,6 +22,7 @@ mod adapter;
 mod builder;
 mod context;
 mod dispatcher;
+mod inflight;
 mod response;
 mod router;
 mod session;

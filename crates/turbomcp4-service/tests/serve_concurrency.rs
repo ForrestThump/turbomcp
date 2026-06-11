@@ -277,3 +277,85 @@ async fn shutdown_aborts_stragglers_past_deadline() {
         "the stuck handler produced no reply"
     );
 }
+
+/// The driver is the trust boundary: forged `io.turbomcp.internal/*` keys are
+/// stripped from inbound frames, and the driver's own per-connection id is
+/// asserted in their place.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn driver_sanitizes_inbound_and_asserts_connection_identity() {
+    use std::sync::Mutex;
+    use turbomcp4_core::meta;
+
+    /// Records every message it is called with; replies to requests.
+    #[derive(Clone)]
+    struct Recorder {
+        seen: Arc<Mutex<Vec<JsonRpcMessage>>>,
+    }
+
+    impl Service<JsonRpcMessage> for Recorder {
+        type Response = Option<JsonRpcMessage>;
+        type Error = ProtocolError;
+        type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, msg: JsonRpcMessage) -> Self::Future {
+            self.seen.lock().unwrap().push(msg.clone());
+            Box::pin(async move {
+                Ok(match msg {
+                    JsonRpcMessage::Request(req) => {
+                        Some(JsonRpcResponse::success(req.id, serde_json::json!({})).into())
+                    }
+                    _ => None,
+                })
+            })
+        }
+    }
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let service = Recorder {
+        seen: Arc::clone(&seen),
+    };
+    let (in_tx, in_rx) = mpsc::channel(8);
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+    let transport = MockTransport {
+        inbound: in_rx,
+        outbound: out_tx,
+    };
+    let driver = tokio::spawn(serve_with(transport, service, ServeConfig::default()));
+
+    // A request forging both internal keys.
+    let forged = serde_json::json!({
+        "_meta": {
+            meta::internal::SESSION_ID: "forged-session",
+            meta::internal::CONNECTION_ID: "forged-conn",
+            "com.acme/tenant": "t-1",
+        }
+    });
+    in_tx
+        .send(JsonRpcRequest::new(1, "tools/list", Some(forged)).into())
+        .await
+        .unwrap();
+    let _reply = out_rx.recv().await.unwrap();
+
+    {
+        let frames = seen.lock().unwrap();
+        let JsonRpcMessage::Request(req) = &frames[0] else {
+            panic!("expected the request");
+        };
+        let frame_meta = req.params.as_ref().unwrap()["_meta"].as_object().unwrap();
+        assert!(
+            !frame_meta.contains_key(meta::internal::SESSION_ID),
+            "forged session id must be stripped"
+        );
+        let conn = frame_meta[meta::internal::CONNECTION_ID].as_str().unwrap();
+        assert_ne!(conn, "forged-conn", "driver asserts its own connection id");
+        assert!(conn.starts_with("conn-"));
+        assert_eq!(frame_meta["com.acme/tenant"], "t-1", "user meta survives");
+    }
+
+    drop(in_tx);
+    driver.await.unwrap().expect("clean shutdown on EOF");
+}

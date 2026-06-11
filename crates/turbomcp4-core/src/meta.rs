@@ -36,6 +36,13 @@ pub mod internal {
     /// stdio `LegacySessionAdapter` (per-connection).
     pub const SESSION_ID: &str = "io.turbomcp.internal/sessionId";
 
+    /// The connection this message arrived on. Injected by the serve driver
+    /// (one id per `serve` call), scoping in-flight request cancellation —
+    /// `notifications/cancelled` can only reach requests from the same
+    /// connection. HTTP deliberately injects none: there, closing the response
+    /// stream is the cancellation signal (transports spec §Cancellation).
+    pub const CONNECTION_ID: &str = "io.turbomcp.internal/connectionId";
+
     /// Whether `key` is in the internal (in-process only) namespace.
     #[must_use]
     pub fn is_internal_key(key: &str) -> bool {

@@ -6,16 +6,20 @@
 //! *connection* is the session. This adapter wraps the dispatcher and supplies
 //! what the pipe can't say in-band:
 //!
-//! 1. Every inbound message is sanitized ([`meta::sanitize_inbound`]) so a
-//!    client can't forge internal assertions.
-//! 2. On `initialize`, a session id is minted and attached; once the inner
+//! 1. On `initialize`, a session id is minted and attached; once the inner
 //!    service answers successfully, the connection is marked legacy.
-//! 3. Subsequent messages that don't carry their own protocol version (a
+//! 2. Subsequent messages that don't carry their own protocol version (a
 //!    modern client states it per request) are stamped with the negotiated
 //!    legacy version and the connection's session id.
 //!
 //! The adapter is itself an `McpService`, so it slots into `serve`/
 //! `serve_stdio` wherever a bare dispatcher would.
+//!
+//! **Trust model:** the adapter does *not* sanitize inbound `_meta` — that is
+//! the wire boundary's job (the `serve` driver and the HTTP endpoint both call
+//! [`meta::sanitize_inbound`] before injecting their own internal keys, and the
+//! driver's per-connection id must survive this adapter). Compose the adapter
+//! under one of those boundaries, never directly against raw client input.
 
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -71,8 +75,6 @@ where
     }
 
     fn call(&mut self, mut msg: JsonRpcMessage) -> Self::Future {
-        meta::sanitize_inbound(&mut msg);
-
         let is_initialize = matches!(
             &msg,
             JsonRpcMessage::Request(r) if r.method == methods::request::INITIALIZE

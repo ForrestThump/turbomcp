@@ -26,16 +26,26 @@
 //! [`CancellationToken`] stops the reader, then in-flight handlers are given
 //! `drain_timeout` to finish and flush their replies before the transport is
 //! closed; stragglers past the deadline are aborted.
+//!
+//! ## The driver is the trust boundary
+//!
+//! The driver is the first code to see a frame off the wire, so it owns the
+//! internal-`_meta` hygiene ([`meta::sanitize_inbound`]): forged
+//! `io.turbomcp.internal/*` keys are stripped, then the driver asserts its own
+//! [`meta::internal::CONNECTION_ID`] (one id per `serve` call). Layers below
+//! (session adapter, dispatcher) trust internal keys — they must always sit
+//! under a sanitizing boundary like this driver or the HTTP endpoint.
 
 use std::future::poll_fn;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use tokio::sync::{Semaphore, mpsc};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use turbomcp4_core::JsonRpcMessage;
+use turbomcp4_core::{JsonRpcMessage, meta};
 
 use crate::{McpService, ProtocolError, Transport};
 
@@ -102,6 +112,12 @@ where
     } = config;
     let capacity = max_in_flight.max(1);
 
+    // In-process connection identity: lets the dispatcher scope in-flight
+    // request cancellation to this connection. Needs only process-uniqueness
+    // (it never leaves the process), so a counter beats a uuid.
+    static NEXT_CONNECTION: AtomicU64 = AtomicU64::new(1);
+    let connection_id = format!("conn-{}", NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed));
+
     let (tx, mut rx) = mpsc::channel::<JsonRpcMessage>(capacity);
     let limiter = Arc::new(Semaphore::new(capacity));
     let mut handlers: JoinSet<()> = JoinSet::new();
@@ -128,7 +144,15 @@ where
                 match frame {
                     Err(e) => break Err(ProtocolError::Transport(e.to_string())),
                     Ok(None) => break Ok(()), // clean EOF
-                    Ok(Some(msg)) => {
+                    Ok(Some(mut msg)) => {
+                        // Trust boundary: strip forged internal keys, then
+                        // assert this connection's identity.
+                        meta::sanitize_inbound(&mut msg);
+                        meta::set_request_meta(
+                            &mut msg,
+                            meta::internal::CONNECTION_ID,
+                            connection_id.clone().into(),
+                        );
                         // Backpressure: park the reader until a slot frees.
                         let Ok(permit) = Arc::clone(&limiter).acquire_owned().await else {
                             break Ok(()); // semaphore closed — shouldn't happen
