@@ -672,7 +672,10 @@ where
                 );
             }
             let mut result = Map::new();
-            result.insert("resultType".to_owned(), serde_json::json!("input_required"));
+            result.insert(
+                "resultType".to_owned(),
+                serde_json::json!(neutral::result_type::INPUT_REQUIRED),
+            );
             if !collected.is_empty() {
                 result.insert(
                     "inputRequests".to_owned(),
@@ -1334,12 +1337,17 @@ fn build_discover_result<S: McpServerCore>(
             }),
     };
     draft::DiscoverResult {
+        // Conservative cache defaults, consistent with the list conversions in
+        // `neutral.rs`: private + immediately stale. A configurable cache
+        // policy is tracked as deferred.
+        cache_scope: draft::DiscoverResultCacheScope::Private,
         capabilities,
         instructions: server.instructions(),
         meta: None,
-        result_type: draft::ResultType::Complete,
+        result_type: neutral::result_type::COMPLETE.to_string(),
         server_info: to_draft_impl(server.server_info()),
         supported_versions: supported.iter().map(|v| v.as_str().to_owned()).collect(),
+        ttl_ms: 0,
     }
 }
 

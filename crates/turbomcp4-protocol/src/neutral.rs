@@ -23,6 +23,18 @@ use serde_json::{Map, Value};
 use crate::v2025_11_25::types as legacy;
 use crate::v2026_draft::types as draft;
 
+/// Canonical draft `resultType` wire strings.
+///
+/// The draft schema made `ResultType` an open string (SEP-2322: extensible
+/// result types); these are the two values the spec defines. Clients MUST
+/// treat an absent field as `"complete"`.
+pub mod result_type {
+    /// The request completed; the result carries the final content.
+    pub const COMPLETE: &str = "complete";
+    /// The request needs more input; the result is an `InputRequiredResult`.
+    pub const INPUT_REQUIRED: &str = "input_required";
+}
+
 /// A neutral content block. Phase 2 models text; the enum is `#[non_exhaustive]`
 /// so image/audio/resource blocks slot in without breaking callers.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -837,7 +849,7 @@ impl From<ListToolsResult> for draft::ListToolsResult {
             cache_scope: draft::ListToolsResultCacheScope::Private,
             meta: None,
             next_cursor: r.next_cursor,
-            result_type: draft::ResultType::Complete,
+            result_type: result_type::COMPLETE.to_string(),
             tools: r.tools.into_iter().map(Into::into).collect(),
             ttl_ms: 0,
         }
@@ -850,7 +862,7 @@ impl From<CallToolResult> for draft::CallToolResult {
             content: r.content.into_iter().map(Into::into).collect(),
             is_error: Some(r.is_error),
             meta: None,
-            result_type: draft::ResultType::Complete,
+            result_type: result_type::COMPLETE.to_string(),
             structured_content: r.structured_content,
         }
     }
@@ -912,7 +924,7 @@ impl From<ListResourcesResult> for draft::ListResourcesResult {
             meta: None,
             next_cursor: r.next_cursor,
             resources: r.resources.into_iter().map(Into::into).collect(),
-            result_type: draft::ResultType::Complete,
+            result_type: result_type::COMPLETE.to_string(),
             ttl_ms: 0,
         }
     }
@@ -924,7 +936,7 @@ impl From<ReadResourceResult> for draft::ReadResourceResult {
             cache_scope: draft::ReadResourceResultCacheScope::Private,
             contents: r.contents.into_iter().map(Into::into).collect(),
             meta: None,
-            result_type: draft::ResultType::Complete,
+            result_type: result_type::COMPLETE.to_string(),
             ttl_ms: 0,
         }
     }
@@ -952,7 +964,7 @@ impl From<ListResourceTemplatesResult> for draft::ListResourceTemplatesResult {
             meta: None,
             next_cursor: r.next_cursor,
             resource_templates: r.resource_templates.into_iter().map(Into::into).collect(),
-            result_type: draft::ResultType::Complete,
+            result_type: result_type::COMPLETE.to_string(),
             ttl_ms: 0,
         }
     }
@@ -1009,7 +1021,7 @@ impl From<ListPromptsResult> for draft::ListPromptsResult {
             meta: None,
             next_cursor: r.next_cursor,
             prompts: r.prompts.into_iter().map(Into::into).collect(),
-            result_type: draft::ResultType::Complete,
+            result_type: result_type::COMPLETE.to_string(),
             ttl_ms: 0,
         }
     }
@@ -1021,7 +1033,7 @@ impl From<GetPromptResult> for draft::GetPromptResult {
             description: r.description,
             messages: r.messages.into_iter().map(Into::into).collect(),
             meta: None,
-            result_type: draft::ResultType::Complete,
+            result_type: result_type::COMPLETE.to_string(),
         }
     }
 }
@@ -1037,7 +1049,7 @@ impl From<CompleteResult> for draft::CompleteResult {
                 values: r.values,
             },
             meta: None,
-            result_type: draft::ResultType::Complete,
+            result_type: result_type::COMPLETE.to_string(),
         }
     }
 }
