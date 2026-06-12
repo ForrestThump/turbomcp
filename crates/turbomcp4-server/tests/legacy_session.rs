@@ -109,7 +109,7 @@ async fn full_legacy_handshake_and_tool_call_over_adapter() {
     assert_eq!(init["protocolVersion"], "2025-11-25");
     assert_eq!(init["serverInfo"]["name"], "echo-server");
     assert_eq!(init["instructions"], "echoes");
-    assert_eq!(init["capabilities"]["tools"]["listChanged"], false);
+    assert_eq!(init["capabilities"]["tools"]["listChanged"], true);
     // Legacy initialize result carries no draft envelope.
     assert!(init.get("resultType").is_none());
 

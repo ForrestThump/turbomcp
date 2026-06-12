@@ -217,3 +217,115 @@ async fn dropped_stream_is_pruned_and_later_streams_keep_working() {
         "2"
     );
 }
+
+// ---- legacy (2025-11-25) GET stream --------------------------------------------
+
+#[derive(Clone)]
+struct Resourceful;
+
+impl McpServerCore for Resourceful {
+    fn server_info(&self) -> Implementation {
+        Implementation::new("resourceful", "0.1.0")
+    }
+}
+
+impl turbomcp4_server::WithResources for Resourceful {
+    async fn list_resources(
+        &self,
+        _ctx: &turbomcp4_server::ListResourcesContext,
+        _params: neutral::ListParams,
+    ) -> McpResult<neutral::ListResourcesResult> {
+        Ok(neutral::ListResourcesResult::new(vec![]))
+    }
+
+    async fn read_resource(
+        &self,
+        _ctx: &turbomcp4_server::ReadResourceContext,
+        params: neutral::ReadResourceParams,
+    ) -> McpResult<neutral::ReadResourceResult> {
+        Ok(neutral::ReadResourceResult::text(params.uri, "x"))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_get_stream_delivers_subscribed_resource_updates() {
+    let dispatcher = VersionDispatcher::new(Resourceful, MethodRouter::new().with_resources());
+    let notifier = dispatcher.notifier();
+    let app = router(dispatcher, HttpConfig::new());
+
+    // 1. initialize mints the session.
+    let init = json!({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "clientInfo": { "name": "legacy-http", "version": "1" },
+        }
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(init.to_string()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let sid = resp.headers()["mcp-session-id"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+
+    // 2. resources/subscribe over POST with the session header.
+    let sub = json!({
+        "jsonrpc": "2.0", "id": 2, "method": "resources/subscribe",
+        "params": { "uri": "file://a" }
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("mcp-session-id", &sid)
+        .body(Body::from(sub.to_string()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // 3. GET with the session header opens the session's SSE stream.
+    let req = Request::builder()
+        .method("GET")
+        .uri("/mcp")
+        .header(header::ACCEPT, "text/event-stream")
+        .header("mcp-session-id", &sid)
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(
+        resp.headers()[header::CONTENT_TYPE]
+            .to_str()
+            .unwrap()
+            .starts_with("text/event-stream")
+    );
+    let mut body = resp.into_body();
+    let mut buffer = String::new();
+
+    // 4. A publish lands on the GET stream in legacy wire shape (no _meta).
+    notifier.resource_updated("file://a").await;
+    let event = event_json(&next_sse_chunk(&mut body, &mut buffer).await);
+    assert_eq!(event["method"], "notifications/resources/updated");
+    assert_eq!(event["params"]["uri"], "file://a");
+    assert!(event["params"].get("_meta").is_none());
+}
+
+#[tokio::test]
+async fn get_without_session_header_stays_405() {
+    let (app, _notifier) = app(HttpConfig::new());
+    let req = Request::builder()
+        .method("GET")
+        .uri("/mcp")
+        .header(header::ACCEPT, "text/event-stream")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+}

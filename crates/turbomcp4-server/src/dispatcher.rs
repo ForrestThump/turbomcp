@@ -178,6 +178,7 @@ async fn handle<S: McpServerCore>(
                 &supported,
                 &sessions,
                 tasks.as_ref(),
+                &subs,
                 req,
                 cancel.clone(),
             );
@@ -251,12 +252,14 @@ fn handle_notification(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // one per dispatcher store; mirrors the struct
 async fn handle_request<S: McpServerCore>(
     server: S,
     router: &MethodRouter<S>,
     supported: &[ProtocolVersion],
     sessions: &SessionStore,
     tasks: Option<&Arc<TaskStore>>,
+    subs: &Arc<SubscriptionRegistry>,
     req: JsonRpcRequest,
     cancel: CancellationToken,
 ) -> Result<JsonRpcMessage, ProtocolError> {
@@ -275,14 +278,16 @@ async fn handle_request<S: McpServerCore>(
         // Stateful handshake (2025-11-25 and earlier).
         methods::request::INITIALIZE => {
             let tasks_enabled = tasks.is_some() && router.has_tools();
-            Ok(handle_initialize(
-                &server,
-                router,
-                supported,
-                sessions,
-                tasks_enabled,
-                &req,
-            ))
+            let reply =
+                handle_initialize(&server, router, supported, sessions, tasks_enabled, &req);
+            // A successfully initialized session gets a delivery route, so
+            // list_changed notifications can reach it from the start.
+            if matches!(&reply, JsonRpcMessage::Response(r) if r.error.is_none())
+                && let Some(sid) = session_id(req.params.as_ref())
+            {
+                subs.legacy_touch(sid, connection_id(req.params.as_ref()));
+            }
+            Ok(reply)
         }
 
         // Version-gated methods (every capability `*/list|read|get|call|complete`).
@@ -306,6 +311,11 @@ async fn handle_request<S: McpServerCore>(
                         Err(response) => return Ok(response),
                     };
                     ctx.cancellation = cancel;
+                    // Keep the session's stdio delivery route fresh for
+                    // server-initiated notifications.
+                    if let Some(sid) = session_id(req.params.as_ref()) {
+                        subs.legacy_touch(sid, connection_id(req.params.as_ref()));
+                    }
                     // Core Tasks hooks (2025-11-25 only): augmented tools/call
                     // detaches into a task; tools/list advertises taskSupport.
                     if let Some(store) = tasks {
@@ -323,6 +333,37 @@ async fn handle_request<S: McpServerCore>(
                     }
                     Ok(dispatch_capability::<S, LegacyWire>(server, router, &req, &ctx, id).await)
                 }
+                VersionRoute::Unsupported(requested) => {
+                    Ok(unsupported_version(id, requested, supported))
+                }
+            }
+        }
+
+        // Legacy resource subscriptions (2025-11-25; the draft subscribes via
+        // `subscriptions/listen` instead).
+        methods::request::RESOURCES_SUBSCRIBE | methods::request::RESOURCES_UNSUBSCRIBE => {
+            match classify_version(req.params.as_ref(), supported) {
+                VersionRoute::Legacy => {
+                    if let Err(response) = legacy_context(sessions, &req)? {
+                        return Ok(response);
+                    }
+                    if !router.has_resources() {
+                        return Ok(error_response(id, &McpError::method_not_found(method)));
+                    }
+                    let uri = match parse_uri_param(req.params.as_ref(), &method) {
+                        Ok(uri) => uri,
+                        Err(e) => return Ok(error_response(id, &e)),
+                    };
+                    // `legacy_context` proved the session id is present.
+                    let sid = session_id(req.params.as_ref()).unwrap_or_default();
+                    if method == methods::request::RESOURCES_SUBSCRIBE {
+                        subs.legacy_subscribe(sid, connection_id(req.params.as_ref()), uri);
+                    } else {
+                        subs.legacy_unsubscribe(sid, &uri);
+                    }
+                    Ok(JsonRpcResponse::success(id, serde_json::json!({})).into())
+                }
+                VersionRoute::Modern => Ok(error_response(id, &McpError::method_not_found(method))),
                 VersionRoute::Unsupported(requested) => {
                     Ok(unsupported_version(id, requested, supported))
                 }
@@ -777,6 +818,9 @@ fn negotiate_initialize_version(requested: &str, supported: &[ProtocolVersion]) 
 fn build_legacy_capabilities<S: McpServerCore>(
     router: &MethodRouter<S>,
 ) -> legacy::ServerCapabilities {
+    // `listChanged`/`subscribe` are true: the subscription registry delivers
+    // them for every registered capability (`resources/subscribe` + the
+    // session's notification stream).
     legacy::ServerCapabilities {
         // `completions` is a presence marker the generated type can't express
         // (empty map ⇒ skipped); patched post-serialization in
@@ -787,19 +831,19 @@ fn build_legacy_capabilities<S: McpServerCore>(
         prompts: router
             .has_prompts()
             .then_some(legacy::ServerCapabilitiesPrompts {
-                list_changed: Some(false),
+                list_changed: Some(true),
             }),
         resources: router
             .has_resources()
             .then_some(legacy::ServerCapabilitiesResources {
-                list_changed: Some(false),
-                subscribe: Some(false),
+                list_changed: Some(true),
+                subscribe: Some(true),
             }),
         tasks: None,
         tools: router
             .has_tools()
             .then_some(legacy::ServerCapabilitiesTools {
-                list_changed: Some(false),
+                list_changed: Some(true),
             }),
     }
 }
@@ -1197,14 +1241,19 @@ struct RawReadResourceParams {
     uri: String,
 }
 
+/// Extract the `uri` field shared by `resources/read|subscribe|unsubscribe`.
+fn parse_uri_param(params: Option<&Value>, method: &str) -> Result<String, McpError> {
+    let params =
+        params.ok_or_else(|| McpError::invalid_params(format!("{method} requires params")))?;
+    let raw: RawReadResourceParams = serde_json::from_value(params.clone())
+        .map_err(|e| McpError::invalid_params(format!("invalid {method} params: {e}")))?;
+    Ok(raw.uri)
+}
+
 fn parse_read_resource_params(
     params: Option<&Value>,
 ) -> Result<neutral::ReadResourceParams, McpError> {
-    let params =
-        params.ok_or_else(|| McpError::invalid_params("resources/read requires params"))?;
-    let raw: RawReadResourceParams = serde_json::from_value(params.clone())
-        .map_err(|e| McpError::invalid_params(format!("invalid resources/read params: {e}")))?;
-    Ok(neutral::ReadResourceParams::new(raw.uri))
+    parse_uri_param(params, methods::request::RESOURCES_READ).map(neutral::ReadResourceParams::new)
 }
 
 #[derive(Deserialize)]

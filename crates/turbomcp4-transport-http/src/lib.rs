@@ -20,9 +20,10 @@
 //!   the opted-in change notifications, with 15s keep-alive comments and
 //!   `X-Accel-Buffering: no` so proxies don't buffer (transports spec
 //!   §Receiving Messages). Closing the stream ends the subscription.
-//! - **`GET {path}`** — `405`. The draft replaced the GET stream with
-//!   `subscriptions/listen`; the *legacy* (`2025-11-25`) GET→SSE stream is the
-//!   Phase 6d dual-stack deliverable.
+//! - **`GET {path}`** — with an `Mcp-Session-Id` header: the legacy
+//!   (`2025-11-25`) server→client SSE stream for that session (list_changed,
+//!   resources/updated). Without one: `405` — the draft replaced the GET
+//!   stream with `subscriptions/listen`.
 //! - **`DELETE {path}`** — `405`. The `2025-11-25` spec lets a server refuse
 //!   client-initiated session termination; sessions expire by store eviction.
 //!
@@ -221,7 +222,7 @@ where
     let app = Router::new()
         .route(
             &config.path,
-            post(mcp_post::<S>).get(mcp_get).delete(mcp_delete),
+            post(mcp_post::<S>).get(mcp_get::<S>).delete(mcp_delete),
         )
         .layer(DefaultBodyLimit::max(config.max_body_bytes));
     let app = if config.cors {
@@ -379,7 +380,19 @@ where
         Err(e) => return protocol_error_response(&e),
     }
 
-    let codec = state.codec;
+    sse_response(state.codec, rx, registration, state.sse_keepalive)
+}
+
+/// The common SSE response shape for both stream kinds (modern listen, legacy
+/// GET): every channel message becomes one `data:` event; keep-alive comments
+/// flow in between; the writer registration travels inside the stream state so
+/// dropping the response body unregisters it.
+fn sse_response(
+    codec: DefaultCodec,
+    rx: tokio::sync::mpsc::Receiver<JsonRpcMessage>,
+    registration: outbound::WriterGuard,
+    keepalive: Duration,
+) -> Response {
     let stream = futures::stream::unfold(
         (rx, registration, codec),
         |(mut rx, registration, codec)| async move {
@@ -395,11 +408,7 @@ where
         },
     );
 
-    let sse = Sse::new(stream).keep_alive(
-        KeepAlive::new()
-            .interval(state.sse_keepalive)
-            .text("keep-alive"),
-    );
+    let sse = Sse::new(stream).keep_alive(KeepAlive::new().interval(keepalive).text("keep-alive"));
     // X-Accel-Buffering tells reverse proxies (nginx) not to buffer the
     // stream (transports spec: SHOULD include it on SSE responses).
     (
@@ -412,16 +421,38 @@ where
         .into_response()
 }
 
-/// The draft has no GET stream (`subscriptions/listen` over POST replaced it);
-/// the `2025-11-25` GET→SSE server-message stream is the Phase 6d dual-stack
-/// deliverable. Until then the spec permits answering `GET` with `405`.
-async fn mcp_get() -> Response {
-    (
-        StatusCode::METHOD_NOT_ALLOWED,
-        [(header::ALLOW, "POST")],
-        "no GET stream: the draft subscribes via subscriptions/listen over POST",
-    )
-        .into_response()
+/// The legacy (`2025-11-25`) server→client SSE stream: `GET` with an
+/// `Mcp-Session-Id` opens the session's notification stream (transports spec
+/// §Listening for Messages). The stream's writer is registered under the
+/// session's [`outbound::session_stream_id`]; a newer GET stream replaces an
+/// older one (the spec forbids broadcasting one message across streams).
+/// Resumability (`Last-Event-ID`) is not supported.
+///
+/// The draft never GETs — it subscribes via `subscriptions/listen` over POST —
+/// so a session-less GET answers `405`, which the spec permits.
+async fn mcp_get<S>(State(state): State<HttpState<S>>, headers: HeaderMap) -> Response
+where
+    S: McpService + Clone + Sync,
+    S::Future: Send + 'static,
+{
+    if let Some(rejection) = check_origin(&state.origins, &headers) {
+        return rejection;
+    }
+    let Some(sid) = headers
+        .get(&HEADER_SESSION_ID)
+        .and_then(|v| v.to_str().ok())
+    else {
+        return (
+            StatusCode::METHOD_NOT_ALLOWED,
+            [(header::ALLOW, "POST")],
+            "no GET stream without Mcp-Session-Id: the draft subscribes via subscriptions/listen",
+        )
+            .into_response();
+    };
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<JsonRpcMessage>(SSE_CHANNEL_CAPACITY);
+    let registration = outbound::register(outbound::session_stream_id(sid), tx);
+    sse_response(state.codec, rx, registration, state.sse_keepalive)
 }
 
 /// The `2025-11-25` spec permits answering session-termination `DELETE` with

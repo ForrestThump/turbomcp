@@ -1,17 +1,26 @@
-//! Subscription registry + [`ServerNotifier`] (draft `subscriptions/listen`).
+//! Subscription registry + [`ServerNotifier`] — both protocol versions.
 //!
-//! A subscription is `(connection, listen-request id)` plus the filter subset
-//! the server agreed to honor (subscriptions spec: the server **MUST NOT**
-//! send notification types the client didn't opt in to). Delivery resolves the
-//! connection's ordered writer lazily via [`turbomcp4_service::outbound`] —
-//! a missing writer means the connection closed, and the subscription is
-//! pruned on the spot (on stdio the server holds no subscription state across
-//! reconnections, per spec).
+//! **Draft (`subscriptions/listen`):** a subscription is `(connection,
+//! listen-request id)` plus the filter subset the server agreed to honor
+//! (subscriptions spec: the server **MUST NOT** send notification types the
+//! client didn't opt in to). Delivery resolves the connection's ordered writer
+//! lazily via [`turbomcp4_service::outbound`] — a missing writer means the
+//! connection closed, and the subscription is pruned on the spot (on stdio the
+//! server holds no subscription state across reconnections, per spec).
+//!
+//! **Legacy (`2025-11-25`):** subscriptions are per *session* —
+//! `resources/subscribe` adds a URI; `*_list_changed` goes to every live
+//! legacy session unconditionally (the old protocol has no opt-in filter; the
+//! capability advertisement is the contract). Delivery prefers the session's
+//! HTTP `GET` SSE stream ([`outbound::session_stream_id`]) and falls back to
+//! the byte-pipe connection the session was last seen on (stdio). Routes
+//! without a reachable writer are kept — an HTTP client may open its GET
+//! stream later — bounded by [`MAX_LEGACY_ROUTES`].
 //!
 //! `*_list_changed` publishes are coalesced: bursts inside
 //! [`COALESCE_WINDOW_MS`] collapse into one notification per kind.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -60,10 +69,27 @@ impl ListChangedKind {
     }
 }
 
+/// Upper bound on tracked legacy session routes; at capacity, an arbitrary
+/// existing route is evicted to admit the new one (matches the session store's
+/// bounded-memory posture; explicit lifecycle eviction is a Phase 7 item).
+pub(crate) const MAX_LEGACY_ROUTES: usize = 4096;
+
+/// A legacy session's delivery route: where its messages go and which
+/// resource URIs it subscribed to.
+#[derive(Default)]
+struct LegacyRoute {
+    /// The byte-pipe connection the session was last seen on (stdio delivery
+    /// fallback); empty for HTTP-only sessions.
+    connection: String,
+    uris: HashSet<String>,
+}
+
 /// Shared map of live subscriptions; dispatcher clones share it via `Arc`.
 #[derive(Default)]
 pub(crate) struct SubscriptionRegistry {
     inner: Mutex<HashMap<(String, RequestId), draft::SubscriptionFilter>>,
+    /// Legacy (`2025-11-25`) per-session routes, keyed by session id.
+    legacy: Mutex<HashMap<String, LegacyRoute>>,
     /// One pending-flush flag per [`ListChangedKind`] slot.
     pending: [AtomicBool; 3],
 }
@@ -87,6 +113,58 @@ impl SubscriptionRegistry {
             .is_some()
     }
 
+    // ---- legacy (2025-11-25) session routes -----------------------------------
+
+    /// Record (or refresh) where a legacy session's messages can be delivered.
+    /// Called on every legacy dispatch so the stdio fallback stays current.
+    pub(crate) fn legacy_touch(&self, session: &str, connection: Option<&str>) {
+        let mut routes = self.lock_legacy();
+        if !routes.contains_key(session) && routes.len() >= MAX_LEGACY_ROUTES {
+            // Bounded memory: evict an arbitrary route to admit the new one.
+            if let Some(victim) = routes.keys().next().cloned() {
+                routes.remove(&victim);
+            }
+        }
+        let route = routes.entry(session.to_owned()).or_default();
+        if let Some(conn) = connection {
+            conn.clone_into(&mut route.connection);
+        }
+    }
+
+    /// Legacy `resources/subscribe`: deliver `notifications/resources/updated`
+    /// for `uri` to this session.
+    pub(crate) fn legacy_subscribe(&self, session: &str, connection: Option<&str>, uri: String) {
+        self.legacy_touch(session, connection);
+        self.lock_legacy()
+            .get_mut(session)
+            .expect("touched above")
+            .uris
+            .insert(uri);
+    }
+
+    /// Legacy `resources/unsubscribe` (idempotent — unknown URIs are a no-op).
+    pub(crate) fn legacy_unsubscribe(&self, session: &str, uri: &str) {
+        if let Some(route) = self.lock_legacy().get_mut(session) {
+            route.uris.remove(uri);
+        }
+    }
+
+    /// Resolve a legacy session's writer: the HTTP `GET` SSE stream first,
+    /// then the stdio connection the session was last seen on. `None` is not
+    /// an error — an HTTP client may simply not have its stream open.
+    fn legacy_writer(
+        session: &str,
+        connection: &str,
+    ) -> Option<tokio::sync::mpsc::Sender<JsonRpcMessage>> {
+        outbound::writer(&outbound::session_stream_id(session)).or_else(|| {
+            (!connection.is_empty())
+                .then(|| outbound::writer(connection))
+                .flatten()
+        })
+    }
+
+    // ---- publishing ------------------------------------------------------------
+
     /// Coalesced `*_list_changed`: the first call in a window schedules one
     /// flush; further calls inside the window are absorbed.
     pub(crate) fn schedule_list_changed(self: &Arc<Self>, kind: ListChangedKind) {
@@ -100,11 +178,14 @@ impl SubscriptionRegistry {
             registry
                 .publish(kind.method(), None, |f| kind.wants(f))
                 .await;
+            // Legacy has no opt-in filter: every live session gets it (the
+            // advertised `listChanged` capability is the contract).
+            registry.publish_legacy(kind.method(), None, |_| true).await;
         });
     }
 
     /// Immediate `notifications/resources/updated` to every subscription that
-    /// listed `uri` in its `resourceSubscriptions`.
+    /// listed `uri` (draft filters and legacy `resources/subscribe` alike).
     pub(crate) async fn publish_resource_updated(&self, uri: &str) {
         self.publish(
             methods::notification::RESOURCES_UPDATED,
@@ -112,6 +193,39 @@ impl SubscriptionRegistry {
             |f| f.resource_subscriptions.iter().any(|u| u == uri),
         )
         .await;
+        self.publish_legacy(
+            methods::notification::RESOURCES_UPDATED,
+            Some(("uri", json!(uri))),
+            |route| route.uris.contains(uri),
+        )
+        .await;
+    }
+
+    /// Deliver `method` to every legacy session whose route passes `wants`,
+    /// on the legacy wire (no `subscriptionId` — the old protocol has none).
+    async fn publish_legacy(
+        &self,
+        method: &str,
+        extra: Option<(&str, Value)>,
+        wants: impl Fn(&LegacyRoute) -> bool,
+    ) {
+        let targets: Vec<(String, String)> = self
+            .lock_legacy()
+            .iter()
+            .filter(|(_, route)| wants(route))
+            .map(|(session, route)| (session.clone(), route.connection.clone()))
+            .collect();
+
+        for (session, connection) in targets {
+            let Some(writer) = Self::legacy_writer(&session, &connection) else {
+                continue; // no stream right now; the route stays (HTTP may reconnect)
+            };
+            let params = extra
+                .as_ref()
+                .map(|(key, value)| json!({ *key: value.clone() }));
+            let note = JsonRpcNotification::new(method, params);
+            let _ = writer.send(note.into()).await;
+        }
     }
 
     /// Deliver `method` to every subscription whose filter passes `wants`,
@@ -146,6 +260,10 @@ impl SubscriptionRegistry {
         &self,
     ) -> std::sync::MutexGuard<'_, HashMap<(String, RequestId), draft::SubscriptionFilter>> {
         self.inner.lock().expect("subscription registry poisoned")
+    }
+
+    fn lock_legacy(&self) -> std::sync::MutexGuard<'_, HashMap<String, LegacyRoute>> {
+        self.legacy.lock().expect("legacy route registry poisoned")
     }
 }
 

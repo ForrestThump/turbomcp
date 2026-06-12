@@ -67,6 +67,19 @@ pub fn writer(connection_id: &str) -> Option<mpsc::Sender<JsonRpcMessage>> {
         .cloned()
 }
 
+/// The table key for a legacy (`2025-11-25`) session's server→client stream.
+///
+/// The HTTP transport registers its `GET`-opened SSE stream under this key;
+/// the dispatcher's subscription registry resolves legacy deliveries through
+/// it first (falling back to the session's byte-pipe connection on stdio).
+/// One key per session also enforces the spec's "MUST NOT broadcast the same
+/// message across multiple streams": a newer GET stream replaces the older
+/// registration.
+#[must_use]
+pub fn session_stream_id(session_id: &str) -> String {
+    format!("http-get-{session_id}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

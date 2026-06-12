@@ -111,7 +111,7 @@ async fn legacy_http_session_flow_end_to_end() {
         .to_owned();
     let v = body_json(resp).await;
     assert_eq!(v["result"]["protocolVersion"], "2025-11-25");
-    assert_eq!(v["result"]["capabilities"]["tools"]["listChanged"], false);
+    assert_eq!(v["result"]["capabilities"]["tools"]["listChanged"], true);
 
     let legacy_headers: [(&str, &str); 2] = [
         ("mcp-session-id", sid.as_str()),
