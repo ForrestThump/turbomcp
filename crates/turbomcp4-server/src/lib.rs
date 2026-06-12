@@ -24,6 +24,7 @@ mod context;
 mod dispatcher;
 mod inflight;
 mod mrtr;
+mod progress;
 mod response;
 mod router;
 mod session;
@@ -39,6 +40,7 @@ pub use context::{
 };
 pub use dispatcher::VersionDispatcher;
 pub use mrtr::ClientHandle;
+pub use progress::ProgressReporter;
 pub use response::{IntoCallToolResult, IntoGetPromptResult, IntoReadResourceResult};
 pub use router::MethodRouter;
 pub use session::{SessionState, SessionStore};

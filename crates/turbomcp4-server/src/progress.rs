@@ -1,0 +1,168 @@
+//! Progress reporting (`notifications/progress`).
+//!
+//! A request opts in by carrying `_meta.progressToken` (progress spec
+//! §Progress Flow); the handler's context then exposes a [`ProgressReporter`]
+//! whose notifications ride the originating request's own stream — the stdio
+//! pipe, or the request-scoped POST SSE response on HTTP (the transports spec
+//! routes request-related messages there). Without a token the reporter is
+//! inert: reports are silently dropped, which the spec allows ("the receiver
+//! is not obligated to provide these notifications" — and the sender here is
+//! never obligated to ask).
+//!
+//! The wire shape is identical on both protocol versions.
+
+use serde_json::{Value, json};
+use std::sync::{Arc, Mutex};
+use turbomcp4_core::JsonRpcNotification;
+use turbomcp4_protocol::methods;
+
+use crate::subscriptions::request_writer;
+
+/// Reports progress for one in-flight request. Cheap to clone; all clones
+/// share the monotonicity guard.
+///
+/// Available on the work-doing contexts ([`CallToolContext`](crate::CallToolContext),
+/// [`ReadResourceContext`](crate::ReadResourceContext),
+/// [`GetPromptContext`](crate::GetPromptContext)). Spec constraints enforced
+/// here so handlers can't violate them:
+///
+/// - notifications only reference a token the client provided (no token →
+///   inert reporter);
+/// - `progress` strictly increases — a non-increasing report is dropped with
+///   a warning;
+/// - notifications stop after completion (the per-request channel closes with
+///   the request).
+#[derive(Clone, Debug)]
+pub struct ProgressReporter {
+    inner: Option<Arc<Inner>>,
+}
+
+#[derive(Debug)]
+struct Inner {
+    /// The client's opaque token (string or integer), echoed verbatim.
+    token: Value,
+    /// The originating request's connection (its own response stream).
+    connection: String,
+    /// Legacy fallback: the session's `GET` stream. Empty on the draft, which
+    /// forbids delivering request-scoped messages anywhere else.
+    session: String,
+    /// Last reported value (spec: MUST increase with each notification).
+    last: Mutex<Option<f64>>,
+}
+
+impl ProgressReporter {
+    /// A reporter for a request that carried no `progressToken`: every report
+    /// is dropped.
+    #[must_use]
+    pub(crate) fn disabled() -> Self {
+        Self { inner: None }
+    }
+
+    /// A live reporter for the request identified by `connection` (and, on
+    /// the legacy path, `session`).
+    #[must_use]
+    pub(crate) fn new(token: Value, connection: String, session: String) -> Self {
+        Self {
+            inner: Some(Arc::new(Inner {
+                token,
+                connection,
+                session,
+                last: Mutex::new(None),
+            })),
+        }
+    }
+
+    /// Whether the client asked for progress on this request. Handlers MAY
+    /// skip expensive bookkeeping when it didn't.
+    #[must_use]
+    pub fn is_requested(&self) -> bool {
+        self.inner.is_some()
+    }
+
+    /// Send one `notifications/progress` for this request.
+    ///
+    /// `progress` must be strictly greater than the previous report (spec
+    /// MUST); violations are dropped with a warning rather than sent. A
+    /// missing token or a closed stream makes this a no-op — progress is
+    /// best-effort by design, so the call is infallible.
+    pub async fn report(&self, progress: f64, total: Option<f64>, message: Option<&str>) {
+        let Some(inner) = &self.inner else { return };
+
+        {
+            let mut last = inner.last.lock().expect("progress guard poisoned");
+            if last.is_some_and(|prev| progress <= prev) {
+                tracing::warn!(
+                    progress,
+                    previous = last.unwrap_or_default(),
+                    "progress must strictly increase (spec MUST); report dropped"
+                );
+                return;
+            }
+            *last = Some(progress);
+        }
+
+        let Some(writer) = request_writer(&inner.connection, &inner.session) else {
+            tracing::debug!("no stream for progress notification; dropped");
+            return;
+        };
+        let mut params = json!({
+            "progressToken": inner.token,
+            "progress": progress,
+        });
+        if let Some(obj) = params.as_object_mut() {
+            if let Some(total) = total {
+                obj.insert("total".to_owned(), json!(total));
+            }
+            if let Some(message) = message {
+                obj.insert("message".to_owned(), json!(message));
+            }
+        }
+        if writer
+            .send(JsonRpcNotification::new(methods::notification::PROGRESS, Some(params)).into())
+            .await
+            .is_err()
+        {
+            tracing::debug!("request stream closed before progress notification; dropped");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn disabled_reporter_is_inert() {
+        let reporter = ProgressReporter::disabled();
+        assert!(!reporter.is_requested());
+        reporter.report(1.0, None, None).await; // must not panic
+    }
+
+    #[tokio::test]
+    async fn non_increasing_reports_are_dropped() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let _guard = turbomcp4_service::outbound::register("prog-test-conn", tx);
+        let reporter = ProgressReporter::new(json!("t1"), "prog-test-conn".into(), String::new());
+
+        reporter.report(2.0, Some(10.0), None).await;
+        reporter.report(2.0, None, None).await; // equal: dropped
+        reporter.report(1.0, None, None).await; // lower: dropped
+        reporter.report(3.0, None, Some("step 3")).await;
+
+        let first = rx.try_recv().expect("first report sent");
+        let second = rx.try_recv().expect("second report sent");
+        assert!(rx.try_recv().is_err(), "exactly two notifications");
+        let (first, second) = match (first, second) {
+            (
+                turbomcp4_core::JsonRpcMessage::Notification(a),
+                turbomcp4_core::JsonRpcMessage::Notification(b),
+            ) => (a, b),
+            other => panic!("expected notifications, got {other:?}"),
+        };
+        assert_eq!(first.params.as_ref().unwrap()["progress"], 2.0);
+        assert_eq!(first.params.as_ref().unwrap()["total"], 10.0);
+        assert_eq!(second.params.as_ref().unwrap()["progress"], 3.0);
+        assert_eq!(second.params.as_ref().unwrap()["message"], "step 3");
+        assert_eq!(second.params.as_ref().unwrap()["progressToken"], "t1");
+    }
+}

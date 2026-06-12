@@ -184,33 +184,40 @@ where
         }
     };
 
-    // Drain. Unregister the outbound writer first (its sender clone would hold
-    // the channel open forever), then drop our sender so `rx` closes once the
-    // last handler's clone drops; keep writing replies and reaping handlers
-    // until everything is flushed or the deadline forces an abort.
-    drop(writer_registration);
-    drop(tx);
+    // Drain, phase 1: in-flight handlers may still emit server-initiated
+    // messages (progress, inline bidi requests) through the outbound table, so
+    // the writer registration stays live until they finish. Keep writing
+    // replies and reaping handlers until the set is empty or the deadline
+    // forces an abort.
     let deadline = Instant::now() + drain_timeout;
-    let mut outbound_open = true;
     loop {
-        if !outbound_open && handlers.is_empty() {
-            break; // fully drained
+        if handlers.is_empty() {
+            break;
         }
         tokio::select! {
             biased;
-            maybe_out = rx.recv(), if outbound_open => match maybe_out {
-                Some(out) => {
-                    if transport.send(out).await.is_err() {
-                        break;
-                    }
+            Some(out) = rx.recv() => {
+                if transport.send(out).await.is_err() {
+                    handlers.abort_all();
+                    break;
                 }
-                None => outbound_open = false, // all senders dropped
-            },
-            Some(_joined) = handlers.join_next(), if !handlers.is_empty() => {}
+            }
+            Some(_joined) = handlers.join_next() => {}
             () = tokio::time::sleep_until(deadline) => {
                 handlers.abort_all();
                 break;
             }
+        }
+    }
+
+    // Drain, phase 2: unregister the outbound writer (its sender clone would
+    // hold the channel open forever) and drop our own sender, so `rx` reports
+    // closure once the last straggler clone drops; flush what's left.
+    drop(writer_registration);
+    drop(tx);
+    while let Some(out) = rx.recv().await {
+        if transport.send(out).await.is_err() {
+            break;
         }
     }
 

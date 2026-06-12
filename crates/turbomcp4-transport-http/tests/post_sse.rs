@@ -89,6 +89,97 @@ async fn quiet_request_answers_plain_json() {
     assert_eq!(v["result"]["content"][0]["text"], "ok");
 }
 
+// ---- progress upgrades the POST to a request-scoped stream ---------------------
+
+#[derive(Clone)]
+struct Slow;
+
+impl McpServerCore for Slow {
+    fn server_info(&self) -> Implementation {
+        Implementation::new("slow", "0.1.0")
+    }
+}
+
+impl WithTools for Slow {
+    async fn list_tools(
+        &self,
+        _ctx: &ListToolsContext,
+        _params: neutral::ListParams,
+    ) -> McpResult<neutral::ListToolsResult> {
+        Ok(neutral::ListToolsResult::new(vec![]))
+    }
+
+    async fn call_tool(
+        &self,
+        ctx: &CallToolContext,
+        _params: neutral::CallToolParams,
+    ) -> McpResult<neutral::CallToolResult> {
+        ctx.progress.report(1.0, Some(2.0), Some("halfway")).await;
+        ctx.progress.report(2.0, Some(2.0), None).await;
+        Ok(neutral::CallToolResult::text("done"))
+    }
+}
+
+fn call_with_token(id: i64) -> Request<Body> {
+    let body = json!({
+        "jsonrpc": "2.0", "id": id, "method": "tools/call",
+        "params": {
+            "name": "slow",
+            "arguments": {},
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "DRAFT-2026-v1",
+                "progressToken": "tok-9",
+            },
+        }
+    });
+    Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+/// Collect every `data:` event until the stream ends.
+async fn all_sse_events(body: Body) -> Vec<Value> {
+    let bytes = tokio::time::timeout(Duration::from_secs(5), body.collect())
+        .await
+        .expect("the stream should terminate")
+        .unwrap()
+        .to_bytes();
+    String::from_utf8_lossy(&bytes)
+        .lines()
+        .filter_map(|l| l.strip_prefix("data: ").or_else(|| l.strip_prefix("data:")))
+        .map(|d| serde_json::from_str(d).expect("SSE data is JSON"))
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn progress_notifications_ride_the_posts_own_stream() {
+    let app = router(
+        VersionDispatcher::new(Slow, MethodRouter::new().with_tools()),
+        HttpConfig::new(),
+    );
+    let resp = app.oneshot(call_with_token(5)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(
+        resp.headers()[header::CONTENT_TYPE]
+            .to_str()
+            .unwrap()
+            .starts_with("text/event-stream"),
+        "progress upgrades the response to SSE"
+    );
+
+    let events = all_sse_events(resp.into_body()).await;
+    assert_eq!(events.len(), 3, "two progress events + the final response");
+    assert_eq!(events[0]["method"], "notifications/progress");
+    assert_eq!(events[0]["params"]["progressToken"], "tok-9");
+    assert_eq!(events[0]["params"]["progress"], 1.0);
+    assert_eq!(events[1]["params"]["progress"], 2.0);
+    assert_eq!(events[2]["id"], 5);
+    assert_eq!(events[2]["result"]["content"][0]["text"], "done");
+}
+
 // ---- a pushing handler upgrades; dropping the stream cancels it ----------------
 
 /// Sets the flag when the in-flight call future is dropped before completing.

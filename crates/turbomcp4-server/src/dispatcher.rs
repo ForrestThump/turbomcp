@@ -44,6 +44,7 @@ use crate::context::{
 };
 use crate::inflight::InFlightRegistry;
 use crate::mrtr::{ClientHandle, PendingRequests, StateSigner};
+use crate::progress::ProgressReporter;
 use crate::router::MethodRouter;
 use crate::session::{SessionState, SessionStore};
 use crate::subscriptions::{ServerNotifier, SubscriptionRegistry, subscription_id_value};
@@ -523,7 +524,9 @@ async fn dispatch_capability<S: McpServerCore, W: WireFamily>(
             };
             let fut = router.dispatch_call_tool(
                 server,
-                CallToolContext::new(ctx).with_client(handle.clone()),
+                CallToolContext::new(ctx)
+                    .with_client(handle.clone())
+                    .with_progress(progress_reporter::<W>(req)),
                 params,
             );
             finish_mrtr::<_, W::CallTool>(id, method, fut, &handle, signer, W::MRTR).await
@@ -552,7 +555,9 @@ async fn dispatch_capability<S: McpServerCore, W: WireFamily>(
             };
             let fut = router.dispatch_read_resource(
                 server,
-                ReadResourceContext::new(ctx).with_client(handle.clone()),
+                ReadResourceContext::new(ctx)
+                    .with_client(handle.clone())
+                    .with_progress(progress_reporter::<W>(req)),
                 params,
             );
             finish_mrtr::<_, W::ReadResource>(id, method, fut, &handle, signer, W::MRTR).await
@@ -573,7 +578,9 @@ async fn dispatch_capability<S: McpServerCore, W: WireFamily>(
             };
             let fut = router.dispatch_get_prompt(
                 server,
-                GetPromptContext::new(ctx).with_client(handle.clone()),
+                GetPromptContext::new(ctx)
+                    .with_client(handle.clone())
+                    .with_progress(progress_reporter::<W>(req)),
                 params,
             );
             finish_mrtr::<_, W::GetPrompt>(id, method, fut, &handle, signer, W::MRTR).await
@@ -842,6 +849,37 @@ fn connection_id(params: Option<&Value>) -> Option<&str> {
         .get("_meta")?
         .get(meta::internal::CONNECTION_ID)?
         .as_str()
+}
+
+/// Build the request's [`ProgressReporter`]: live when the request carried a
+/// `_meta.progressToken` (string or integer per the progress spec — anything
+/// else is treated as absent, with a warning), inert otherwise. Notifications
+/// route to the request's own stream; the legacy family may fall back to the
+/// session `GET` stream, the draft never does.
+fn progress_reporter<W: WireFamily>(req: &JsonRpcRequest) -> ProgressReporter {
+    let token = req
+        .params
+        .as_ref()
+        .and_then(|p| p.get("_meta"))
+        .and_then(|m| m.get(meta::keys::PROGRESS_TOKEN));
+    let Some(token) = token else {
+        return ProgressReporter::disabled();
+    };
+    if !(token.is_string() || token.is_i64() || token.is_u64()) {
+        tracing::warn!(?token, "progressToken must be a string or integer; ignored");
+        return ProgressReporter::disabled();
+    }
+    let connection = connection_id(req.params.as_ref())
+        .unwrap_or_default()
+        .to_owned();
+    let session = if W::MRTR {
+        String::new()
+    } else {
+        session_id(req.params.as_ref())
+            .unwrap_or_default()
+            .to_owned()
+    };
+    ProgressReporter::new(token.clone(), connection, session)
 }
 
 /// Resolve the session for a legacy request and build its [`RequestContext`]
