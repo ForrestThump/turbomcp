@@ -43,7 +43,7 @@ use crate::context::{
     ListResourceTemplatesContext, ListResourcesContext, ListToolsContext, ReadResourceContext,
 };
 use crate::inflight::InFlightRegistry;
-use crate::mrtr::{ClientHandle, StateSigner};
+use crate::mrtr::{ClientHandle, PendingRequests, StateSigner};
 use crate::router::MethodRouter;
 use crate::session::{SessionState, SessionStore};
 use crate::subscriptions::{ServerNotifier, SubscriptionRegistry, subscription_id_value};
@@ -63,6 +63,7 @@ pub struct VersionDispatcher<S> {
     inflight: Arc<InFlightRegistry>,
     subs: Arc<SubscriptionRegistry>,
     signer: Arc<StateSigner>,
+    pending: Arc<PendingRequests>,
 }
 
 impl<S: Clone> Clone for VersionDispatcher<S> {
@@ -76,6 +77,7 @@ impl<S: Clone> Clone for VersionDispatcher<S> {
             inflight: Arc::clone(&self.inflight),
             subs: Arc::clone(&self.subs),
             signer: Arc::clone(&self.signer),
+            pending: Arc::clone(&self.pending),
         }
     }
 }
@@ -95,6 +97,7 @@ impl<S: McpServerCore> VersionDispatcher<S> {
             inflight: Arc::new(InFlightRegistry::default()),
             subs: Arc::new(SubscriptionRegistry::default()),
             signer: Arc::new(StateSigner::new()),
+            pending: Arc::new(PendingRequests::default()),
         }
     }
 
@@ -139,9 +142,10 @@ impl<S: McpServerCore> Service<JsonRpcMessage> for VersionDispatcher<S> {
         let inflight = Arc::clone(&self.inflight);
         let subs = Arc::clone(&self.subs);
         let signer = Arc::clone(&self.signer);
+        let pending = Arc::clone(&self.pending);
         Box::pin(async move {
             handle(
-                server, router, supported, sessions, tasks, inflight, subs, signer, msg,
+                server, router, supported, sessions, tasks, inflight, subs, signer, pending, msg,
             )
             .await
         })
@@ -158,6 +162,7 @@ async fn handle<S: McpServerCore>(
     inflight: Arc<InFlightRegistry>,
     subs: Arc<SubscriptionRegistry>,
     signer: Arc<StateSigner>,
+    pending: Arc<PendingRequests>,
     msg: JsonRpcMessage,
 ) -> Result<Option<JsonRpcMessage>, ProtocolError> {
     match msg {
@@ -186,6 +191,7 @@ async fn handle<S: McpServerCore>(
                 tasks.as_ref(),
                 &subs,
                 &signer,
+                &pending,
                 req,
                 cancel.clone(),
             );
@@ -201,10 +207,13 @@ async fn handle<S: McpServerCore>(
             handle_notification(&inflight, &subs, &n);
             Ok(None)
         }
-        JsonRpcMessage::Response(_) => {
-            // A client→server response replies to a server-initiated request
-            // (sampling/MRTR). No outbound requests exist until Phase 6.
-            tracing::debug!("ignoring unsolicited client->server response");
+        JsonRpcMessage::Response(resp) => {
+            // A client→server response answers a server-initiated inline bidi
+            // request (legacy elicitation/sampling/roots): route it to the
+            // awaiting handler. Unsolicited responses are ignored.
+            if !pending.complete(resp) {
+                tracing::debug!("ignoring unsolicited client->server response");
+            }
             Ok(None)
         }
     }
@@ -268,6 +277,7 @@ async fn handle_request<S: McpServerCore>(
     tasks: Option<&Arc<TaskStore>>,
     subs: &Arc<SubscriptionRegistry>,
     signer: &Arc<StateSigner>,
+    pending: &Arc<PendingRequests>,
     req: JsonRpcRequest,
     cancel: CancellationToken,
 ) -> Result<JsonRpcMessage, ProtocolError> {
@@ -311,10 +321,10 @@ async fn handle_request<S: McpServerCore>(
                 VersionRoute::Modern => {
                     let mut ctx = build_context(&req);
                     ctx.cancellation = cancel;
-                    Ok(
-                        dispatch_capability::<S, DraftWire>(server, router, &req, &ctx, signer, id)
-                            .await,
+                    Ok(dispatch_capability::<S, DraftWire>(
+                        server, router, &req, &ctx, signer, pending, id,
                     )
+                    .await)
                 }
                 VersionRoute::Legacy => {
                     let mut ctx = match legacy_context(sessions, &req)? {
@@ -342,12 +352,10 @@ async fn handle_request<S: McpServerCore>(
                             .await);
                         }
                     }
-                    Ok(
-                        dispatch_capability::<S, LegacyWire>(
-                            server, router, &req, &ctx, signer, id,
-                        )
-                        .await,
+                    Ok(dispatch_capability::<S, LegacyWire>(
+                        server, router, &req, &ctx, signer, pending, id,
                     )
+                    .await)
                 }
                 VersionRoute::Unsupported(requested) => {
                     Ok(unsupported_version(id, requested, supported))
@@ -486,12 +494,14 @@ impl WireFamily for LegacyWire {
     type Complete = legacy::CompleteResult;
 }
 
+#[allow(clippy::too_many_arguments)] // one per dispatcher store; mirrors the struct
 async fn dispatch_capability<S: McpServerCore, W: WireFamily>(
     server: S,
     router: &MethodRouter<S>,
     req: &JsonRpcRequest,
     ctx: &RequestContext,
     signer: &StateSigner,
+    pending: &Arc<PendingRequests>,
     id: RequestId,
 ) -> JsonRpcMessage {
     let method = req.method.as_str();
@@ -507,7 +517,7 @@ async fn dispatch_capability<S: McpServerCore, W: WireFamily>(
                 Ok(p) => p,
                 Err(e) => return error_response(id, &e),
             };
-            let handle = match mrtr_handle::<W>(req, &ctx, signer) {
+            let handle = match mrtr_handle::<W>(req, &ctx, signer, pending) {
                 Ok(h) => h,
                 Err(e) => return error_response(id, &e),
             };
@@ -536,7 +546,7 @@ async fn dispatch_capability<S: McpServerCore, W: WireFamily>(
                 Ok(p) => p,
                 Err(e) => return error_response(id, &e),
             };
-            let handle = match mrtr_handle::<W>(req, &ctx, signer) {
+            let handle = match mrtr_handle::<W>(req, &ctx, signer, pending) {
                 Ok(h) => h,
                 Err(e) => return error_response(id, &e),
             };
@@ -557,7 +567,7 @@ async fn dispatch_capability<S: McpServerCore, W: WireFamily>(
                 Ok(p) => p,
                 Err(e) => return error_response(id, &e),
             };
-            let handle = match mrtr_handle::<W>(req, &ctx, signer) {
+            let handle = match mrtr_handle::<W>(req, &ctx, signer, pending) {
                 Ok(h) => h,
                 Err(e) => return error_response(id, &e),
             };
@@ -593,17 +603,26 @@ struct RawMrtrFields {
 /// Build the request's [`ClientHandle`]: on the draft, an MRTR coordinator
 /// seeded with the retry's `inputResponses` and verified `requestState`
 /// (verification failure rejects the request before the handler runs — the
-/// blob is attacker-controlled); on the legacy family, a placeholder until
-/// inline bidi lands (Phase 6f).
+/// blob is attacker-controlled); on the legacy family, an inline-bidi handle
+/// bound to the request's session.
 fn mrtr_handle<W: WireFamily>(
     req: &JsonRpcRequest,
     ctx: &RequestContext,
     signer: &StateSigner,
+    pending: &Arc<PendingRequests>,
 ) -> Result<ClientHandle, McpError> {
     if !W::MRTR {
-        return Ok(ClientHandle::unavailable(
-            "inline bidirectional requests on 2025-11-25 land in Phase 6f",
-        ));
+        // The legacy session gate ran before dispatch, so the session id is
+        // present on this path; its absence means no client channel.
+        return Ok(match session_id(req.params.as_ref()) {
+            Some(session) => ClientHandle::bidi(
+                session,
+                connection_id(req.params.as_ref()).unwrap_or_default(),
+                Arc::clone(pending),
+                ctx.client_capabilities.clone(),
+            ),
+            None => ClientHandle::unavailable("no session for inline bidirectional requests"),
+        });
     }
     let fields: RawMrtrFields = req
         .params

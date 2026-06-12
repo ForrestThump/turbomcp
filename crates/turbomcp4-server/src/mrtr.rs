@@ -14,8 +14,14 @@
 //! state is HMAC-SHA256-signed with a per-dispatcher secret and the protected
 //! payload carries the method name and an expiry; inbound state that fails
 //! any check is rejected with `-32602` before the handler runs.
+//!
+//! On `2025-11-25` the same handle calls go out as **inline bidirectional
+//! requests**: a real `elicitation/create` (etc.) JSON-RPC request is written
+//! to the session's server→client channel and the handler blocks until the
+//! client's response routes back through [`PendingRequests`]. No re-execution
+//! happens on this path — handlers written for MRTR re-entry work unchanged.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -26,8 +32,11 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
 use sha2::Sha256;
-use turbomcp4_core::{McpError, McpResult};
+use tokio::sync::oneshot;
+use turbomcp4_core::{JsonRpcRequest, JsonRpcResponse, McpError, McpResult, RequestId};
 use turbomcp4_protocol::neutral;
+
+use crate::subscriptions::legacy_writer;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -121,12 +130,83 @@ impl StateSigner {
     }
 }
 
+// ---- pending server→client requests (legacy inline bidi) -----------------------
+
+/// How long an inline bidi request waits for the client's response before the
+/// handler fails with a timeout.
+const BIDI_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Routes inbound client→server *responses* back to the handler awaiting
+/// them. Keys are server-minted uuid request ids, so entries are unguessable
+/// and can't collide with client-issued ids; the guard removes its entry when
+/// the awaiting handler finishes (or is dropped by cancellation).
+#[derive(Default)]
+pub(crate) struct PendingRequests {
+    map: Mutex<HashMap<RequestId, oneshot::Sender<JsonRpcResponse>>>,
+}
+
+impl PendingRequests {
+    fn register(
+        self: &Arc<Self>,
+        id: RequestId,
+    ) -> (oneshot::Receiver<JsonRpcResponse>, PendingGuard) {
+        let (tx, rx) = oneshot::channel();
+        self.map
+            .lock()
+            .expect("pending map poisoned")
+            .insert(id.clone(), tx);
+        (
+            rx,
+            PendingGuard {
+                pending: Arc::clone(self),
+                id,
+            },
+        )
+    }
+
+    /// Deliver a client response to its awaiting handler. `false` if nothing
+    /// was waiting (late, duplicate, or unsolicited — ignored per JSON-RPC).
+    pub(crate) fn complete(&self, response: JsonRpcResponse) -> bool {
+        let sender = self
+            .map
+            .lock()
+            .expect("pending map poisoned")
+            .remove(&response.id);
+        match sender {
+            Some(tx) => tx.send(response).is_ok(),
+            None => false,
+        }
+    }
+}
+
+struct PendingGuard {
+    pending: Arc<PendingRequests>,
+    id: RequestId,
+}
+
+impl Drop for PendingGuard {
+    fn drop(&mut self) {
+        self.pending
+            .map
+            .lock()
+            .expect("pending map poisoned")
+            .remove(&self.id);
+    }
+}
+
 // ---- the coordinator -------------------------------------------------------------
 
 /// How this request's [`ClientHandle`] reaches the client.
 enum HandleMode {
     /// Draft path: record requests, abort, answer `InputRequiredResult`.
     Mrtr,
+    /// Legacy path: inline bidirectional requests over the session's
+    /// server→client channel.
+    Bidi {
+        session: String,
+        connection: String,
+        pending: Arc<PendingRequests>,
+    },
     /// No client-interaction channel on this path (reason in the error).
     Unavailable(&'static str),
 }
@@ -199,32 +279,62 @@ impl ClientHandle {
         }
     }
 
+    /// A legacy-path inline-bidi handle bound to one session.
+    pub(crate) fn bidi(
+        session: &str,
+        connection: &str,
+        pending: Arc<PendingRequests>,
+        client_capabilities: Option<Value>,
+    ) -> Self {
+        Self {
+            inner: Arc::new(Inner {
+                mode: HandleMode::Bidi {
+                    session: session.to_owned(),
+                    connection: connection.to_owned(),
+                    pending,
+                },
+                client_capabilities,
+                responses: BTreeMap::new(),
+                collected: Mutex::new(BTreeMap::new()),
+                state_in: None,
+                state_out: Mutex::new(None),
+            }),
+        }
+    }
+
     /// Ask the user for structured input (form-mode elicitation).
     ///
     /// `key` is this elicitation's stable identity across re-executions —
     /// reuse the same key for the same question or the cached response won't
-    /// be found on retry.
+    /// be found on retry. (On the legacy inline-bidi path the key is unused
+    /// on the wire but keeps handler code version-portable.)
     pub async fn elicit(
         &self,
         key: &str,
         params: neutral::ElicitParams,
     ) -> McpResult<neutral::ElicitOutcome> {
-        self.require_capability("elicitation")?;
-        if let Some(raw) = self.inner.responses.get(key) {
-            return parse_elicit_outcome(raw);
-        }
-        self.record(key, elicit_request_value(&params));
-        Err(McpError::InputRequired)
+        let raw = self
+            .obtain(key, "elicitation", elicit_request_value(&params))
+            .await?;
+        parse_elicit_outcome(&raw)
     }
 
     /// Ask for several inputs in **one** round trip (PLAN MR-4): all missing
     /// requests are packaged into a single `InputRequiredResult` instead of
     /// one abort per `elicit` call. Outcomes are returned in request order.
+    /// (On the legacy inline-bidi path this degrades to sequential requests.)
     pub async fn elicit_all(
         &self,
         requests: Vec<(&str, neutral::ElicitParams)>,
     ) -> McpResult<Vec<neutral::ElicitOutcome>> {
         self.require_capability("elicitation")?;
+        if matches!(self.inner.mode, HandleMode::Bidi { .. }) {
+            let mut outcomes = Vec::with_capacity(requests.len());
+            for (key, params) in requests {
+                outcomes.push(self.elicit(key, params).await?);
+            }
+            return Ok(outcomes);
+        }
         if requests
             .iter()
             .all(|(key, _)| self.inner.responses.contains_key(*key))
@@ -308,12 +418,35 @@ impl ClientHandle {
         capability: &str,
         params: Value,
     ) -> McpResult<Value> {
+        self.obtain(
+            key,
+            capability,
+            json!({ "method": method, "params": params }),
+        )
+        .await
+    }
+
+    /// Get the client's answer for one input request, by whichever delivery
+    /// the mode prescribes: cached-response-or-abort (MRTR) or a blocking
+    /// inline request (bidi).
+    async fn obtain(&self, key: &str, capability: &str, request: Value) -> McpResult<Value> {
         self.require_capability(capability)?;
-        if let Some(raw) = self.inner.responses.get(key) {
-            return Ok(raw.clone());
+        match &self.inner.mode {
+            HandleMode::Mrtr => {
+                if let Some(raw) = self.inner.responses.get(key) {
+                    return Ok(raw.clone());
+                }
+                self.record(key, request);
+                Err(McpError::InputRequired)
+            }
+            HandleMode::Bidi {
+                session,
+                connection,
+                pending,
+            } => send_and_await(session, connection, pending, request).await,
+            // `require_capability` already rejected this mode.
+            HandleMode::Unavailable(reason) => Err(McpError::internal(*reason)),
         }
-        self.record(key, json!({ "method": method, "params": params }));
-        Err(McpError::InputRequired)
     }
 
     /// Record an input request under `key`, warning on unstable keys
@@ -348,6 +481,51 @@ impl ClientHandle {
             .lock()
             .expect("state lock poisoned")
             .clone()
+    }
+}
+
+/// Send one inline bidi request on the session's server→client channel and
+/// block until the client's response routes back (or [`BIDI_TIMEOUT`]).
+async fn send_and_await(
+    session: &str,
+    connection: &str,
+    pending: &Arc<PendingRequests>,
+    request: Value,
+) -> McpResult<Value> {
+    let method = request
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let params = request.get("params").cloned();
+
+    // A uuid id can't collide with client-issued ids and can't be guessed.
+    let id = RequestId::from(format!("srv-{}", uuid::Uuid::new_v4()));
+    let (rx, _guard) = pending.register(id.clone());
+
+    let writer = legacy_writer(session, connection).ok_or_else(|| {
+        McpError::transport(
+            "no server→client channel for this session (open the GET stream or keep the pipe alive)",
+        )
+    })?;
+    writer
+        .send(JsonRpcRequest::new(id, method, params).into())
+        .await
+        .map_err(|_| McpError::transport("server→client channel closed"))?;
+
+    let response = tokio::time::timeout(BIDI_TIMEOUT, rx)
+        .await
+        .map_err(|_| McpError::timeout("client did not answer the input request in time"))?
+        .map_err(|_| McpError::transport("server→client request dropped"))?;
+    match (response.result, response.error) {
+        (Some(result), None) => Ok(result),
+        (_, Some(e)) => Err(McpError::internal(format!(
+            "client answered input request with error {}: {}",
+            e.code, e.message
+        ))),
+        _ => Err(McpError::internal(
+            "client answered input request with an empty response",
+        )),
     }
 }
 

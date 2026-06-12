@@ -10,9 +10,7 @@
 //! - **Resources / prompts**: a handler error *propagates* as a JSON-RPC error,
 //!   since `resources/read` and `prompts/get` have no `is_error` channel.
 
-use core::fmt::Display;
-
-use turbomcp4_core::McpResult;
+use turbomcp4_core::{McpError, McpResult};
 use turbomcp4_protocol::neutral;
 
 /// Convert a `#[tool]` return value into a [`neutral::CallToolResult`].
@@ -39,16 +37,18 @@ impl IntoCallToolResult for &str {
     }
 }
 
-/// A fallible tool: an error becomes an `is_error` result (spec convention), so
-/// any `Display` error type is accepted — its text is the tool-failure message.
-impl<T, E> IntoCallToolResult for Result<T, E>
+/// A fallible tool: an error becomes an `is_error` result (spec convention) —
+/// its text is the tool-failure message. The one exception is the MRTR abort
+/// sentinel, which must keep propagating so the dispatcher can answer an
+/// `InputRequiredResult` instead of a failed tool call.
+impl<T> IntoCallToolResult for McpResult<T>
 where
     T: IntoCallToolResult,
-    E: Display,
 {
     fn into_call_tool_result(self) -> McpResult<neutral::CallToolResult> {
         match self {
             Ok(v) => v.into_call_tool_result(),
+            Err(e @ McpError::InputRequired) => Err(e),
             Err(e) => Ok(neutral::CallToolResult::error(e.to_string())),
         }
     }

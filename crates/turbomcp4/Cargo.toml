@@ -51,3 +51,6 @@ name = "hello_world"
 [[example]]
 name = "dual_transport"
 required-features = ["http"]
+
+[[example]]
+name = "elicitation"

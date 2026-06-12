@@ -149,20 +149,6 @@ impl SubscriptionRegistry {
         }
     }
 
-    /// Resolve a legacy session's writer: the HTTP `GET` SSE stream first,
-    /// then the stdio connection the session was last seen on. `None` is not
-    /// an error — an HTTP client may simply not have its stream open.
-    fn legacy_writer(
-        session: &str,
-        connection: &str,
-    ) -> Option<tokio::sync::mpsc::Sender<JsonRpcMessage>> {
-        outbound::writer(&outbound::session_stream_id(session)).or_else(|| {
-            (!connection.is_empty())
-                .then(|| outbound::writer(connection))
-                .flatten()
-        })
-    }
-
     // ---- publishing ------------------------------------------------------------
 
     /// Coalesced `*_list_changed`: the first call in a window schedules one
@@ -217,7 +203,7 @@ impl SubscriptionRegistry {
             .collect();
 
         for (session, connection) in targets {
-            let Some(writer) = Self::legacy_writer(&session, &connection) else {
+            let Some(writer) = legacy_writer(&session, &connection) else {
                 continue; // no stream right now; the route stays (HTTP may reconnect)
             };
             let params = extra
@@ -265,6 +251,21 @@ impl SubscriptionRegistry {
     fn lock_legacy(&self) -> std::sync::MutexGuard<'_, HashMap<String, LegacyRoute>> {
         self.legacy.lock().expect("legacy route registry poisoned")
     }
+}
+
+/// Resolve a legacy session's server→client writer: the HTTP `GET` SSE stream
+/// first, then the byte-pipe connection the session was last seen on. `None`
+/// is not an error — an HTTP client may simply not have its stream open.
+/// Shared by subscription publishing and inline bidi requests.
+pub(crate) fn legacy_writer(
+    session: &str,
+    connection: &str,
+) -> Option<tokio::sync::mpsc::Sender<JsonRpcMessage>> {
+    outbound::writer(&outbound::session_stream_id(session)).or_else(|| {
+        (!connection.is_empty())
+            .then(|| outbound::writer(connection))
+            .flatten()
+    })
 }
 
 /// The `_meta.subscriptionId` value for a listen request id. The spec's
