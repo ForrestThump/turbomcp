@@ -13,13 +13,18 @@
 //! ## Endpoint behavior (dual-stack)
 //!
 //! - **`POST {path}`** — body is one JSON-RPC message (batches are not supported,
-//!   per PLAN §13.1). A request yields `200 application/json` with the response;
-//!   a notification yields `202 Accepted` with no body. A modern
-//!   `subscriptions/listen` request yields a long-lived
-//!   `200 text/event-stream` instead: the acknowledged notification first, then
-//!   the opted-in change notifications, with 15s keep-alive comments and
-//!   `X-Accel-Buffering: no` so proxies don't buffer (transports spec
-//!   §Receiving Messages). Closing the stream ends the subscription.
+//!   per PLAN §13.1). A notification yields `202 Accepted` with no body. A
+//!   request yields either `200 application/json` with the response, or — if
+//!   the handler emits server→client messages mid-flight (inline bidi
+//!   requests on the legacy path, progress, log messages) — a
+//!   `200 text/event-stream` *scoped to that request*: the request-related
+//!   messages as events, then the final response, which terminates the stream
+//!   (transports spec §Sending Messages). A modern `subscriptions/listen`
+//!   request yields a long-lived `200 text/event-stream` instead: the
+//!   acknowledged notification first, then the opted-in change notifications.
+//!   Every SSE response carries keep-alive comments (default 15s) and
+//!   `X-Accel-Buffering: no` so proxies don't buffer. Closing a stream is the
+//!   cancellation signal for the work it carries.
 //! - **`GET {path}`** — with an `Mcp-Session-Id` header: the legacy
 //!   (`2025-11-25`) server→client SSE stream for that session (list_changed,
 //!   resources/updated). Without one: `405` — the draft replaced the GET
@@ -58,9 +63,11 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+use std::collections::VecDeque;
 use std::convert::Infallible;
-use std::future::poll_fn;
+use std::future::{Future, poll_fn};
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::time::Duration;
 
 use axum::body::Bytes;
@@ -73,7 +80,7 @@ use axum::{Json, Router};
 use serde_json::json;
 use tower_http::cors::CorsLayer;
 use turbomcp4_codec::{Codec, DefaultCodec};
-use turbomcp4_core::{JsonRpcMessage, ProtocolVersion, meta};
+use turbomcp4_core::{JsonRpcMessage, ProtocolVersion, RequestId, meta};
 use turbomcp4_service::{CancellationToken, McpService, ProtocolError, outbound};
 
 /// The session header of the `2025-11-25` Streamable HTTP transport.
@@ -322,6 +329,14 @@ where
         return listen_sse(&state, msg).await;
     }
 
+    // Every other *request* takes the lazy-upgrade path: plain JSON unless the
+    // handler emits server→client messages mid-flight. `initialize` stays on
+    // the inline path below — its response must carry the minted session
+    // header, and the handshake never streams.
+    if !is_initialize && matches!(&msg, JsonRpcMessage::Request(_)) {
+        return request_post(&state, msg).await;
+    }
+
     let mut svc = state.service.clone();
     if let Err(e) = poll_fn(|cx| svc.poll_ready(cx)).await {
         return protocol_error_response(&e);
@@ -383,10 +398,220 @@ where
     sse_response(state.codec, rx, registration, state.sse_keepalive)
 }
 
-/// The common SSE response shape for both stream kinds (modern listen, legacy
-/// GET): every channel message becomes one `data:` event; keep-alive comments
-/// flow in between; the writer registration travels inside the stream state so
-/// dropping the response body unregisters it.
+/// Dispatch one JSON-RPC request with a per-request server→client channel
+/// (transports spec §Sending Messages: the server answers each POSTed request
+/// with either a single JSON object or an SSE stream scoped to that request).
+///
+/// The channel is registered in [`outbound`] under a minted per-request
+/// connection id before dispatch, so anything the handler emits mid-flight —
+/// inline bidi requests on the legacy path, progress, log messages — reaches
+/// this response. If nothing is emitted the reply stays plain JSON; the first
+/// mid-flight message upgrades the response to `text/event-stream`, carrying
+/// the request-related messages followed by the final response, which
+/// terminates the stream. A client disconnect drops the in-flight call —
+/// HTTP's cancellation signal.
+async fn request_post<S>(state: &HttpState<S>, mut msg: JsonRpcMessage) -> Response
+where
+    S: McpService + Clone + Sync,
+    S::Future: Send + 'static,
+{
+    let JsonRpcMessage::Request(req) = &msg else {
+        unreachable!("request_post is only called for requests");
+    };
+    let request_id = req.id.clone();
+    let connection_id = format!("http-post-{}", uuid::Uuid::new_v4());
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<JsonRpcMessage>(SSE_CHANNEL_CAPACITY);
+    let registration = outbound::register(&connection_id, tx);
+    meta::set_request_meta(
+        &mut msg,
+        meta::internal::CONNECTION_ID,
+        json!(connection_id),
+    );
+
+    let mut svc = state.service.clone();
+    if let Err(e) = poll_fn(|cx| svc.poll_ready(cx)).await {
+        return protocol_error_response(&e);
+    }
+    let mut call = Box::pin(svc.call(msg));
+
+    tokio::select! {
+        biased;
+        result = call.as_mut() => {
+            // Completed without upgrading — but messages may have raced into
+            // the channel just before completion; don't lose them.
+            let mut events = drain(&mut rx);
+            drop(registration);
+            match result {
+                Ok(Some(reply)) if events.is_empty() => {
+                    encode_json_response(&state.codec, &reply)
+                }
+                Ok(Some(reply)) => {
+                    events.push_back(reply);
+                    finished_sse(state.codec, events)
+                }
+                // A request always gets a response from the dispatcher; these
+                // arms are defensive.
+                Ok(None) if events.is_empty() => StatusCode::ACCEPTED.into_response(),
+                Ok(None) => finished_sse(state.codec, events),
+                Err(e) => protocol_error_response(&e),
+            }
+        }
+        first = rx.recv() => {
+            let Some(first) = first else {
+                // Unreachable while `registration` holds the sender.
+                return protocol_error_response(&ProtocolError::Internal(
+                    "per-request channel closed while registered".to_owned(),
+                ));
+            };
+            streaming_post_sse(
+                state.codec,
+                first,
+                rx,
+                call,
+                registration,
+                request_id,
+                state.sse_keepalive,
+            )
+        }
+    }
+}
+
+/// State for an upgraded per-request SSE response: keep streaming channel
+/// messages while driving the in-flight call; when the call completes, append
+/// its final response and end the stream.
+enum PostStream<F> {
+    /// The request is still in flight.
+    Run {
+        rx: tokio::sync::mpsc::Receiver<JsonRpcMessage>,
+        call: Pin<Box<F>>,
+        id: RequestId,
+        registration: outbound::WriterGuard,
+    },
+    /// The call finished; flush the remaining events and close.
+    Tail(VecDeque<JsonRpcMessage>),
+}
+
+/// The upgraded per-request SSE response (see [`request_post`]). The final
+/// response (or a JSON-RPC error built from a [`ProtocolError`]) is the last
+/// event; dropping the response body drops the call future.
+fn streaming_post_sse<F>(
+    codec: DefaultCodec,
+    first: JsonRpcMessage,
+    rx: tokio::sync::mpsc::Receiver<JsonRpcMessage>,
+    call: Pin<Box<F>>,
+    registration: outbound::WriterGuard,
+    id: RequestId,
+    keepalive: Duration,
+) -> Response
+where
+    F: Future<Output = Result<Option<JsonRpcMessage>, ProtocolError>> + Send + 'static,
+{
+    let head = futures::stream::iter([Ok::<_, Infallible>(sse_event(&codec, &first))]);
+    let tail = futures::stream::unfold(
+        PostStream::Run {
+            rx,
+            call,
+            id,
+            registration,
+        },
+        move |state| async move {
+            match state {
+                PostStream::Run {
+                    mut rx,
+                    mut call,
+                    id,
+                    registration,
+                } => {
+                    tokio::select! {
+                        result = call.as_mut() => {
+                            let mut events = drain(&mut rx);
+                            drop(registration);
+                            match result {
+                                Ok(Some(reply)) => events.push_back(reply),
+                                Ok(None) => {}
+                                Err(e) => events.push_back(e.into_response(id).into()),
+                            }
+                            let msg = events.pop_front()?;
+                            Some((
+                                Ok::<_, Infallible>(sse_event(&codec, &msg)),
+                                PostStream::Tail(events),
+                            ))
+                        }
+                        msg = rx.recv() => {
+                            let msg = msg.expect("sender held by registration");
+                            Some((
+                                Ok::<_, Infallible>(sse_event(&codec, &msg)),
+                                PostStream::Run { rx, call, id, registration },
+                            ))
+                        }
+                    }
+                }
+                PostStream::Tail(mut events) => {
+                    let msg = events.pop_front()?;
+                    Some((
+                        Ok::<_, Infallible>(sse_event(&codec, &msg)),
+                        PostStream::Tail(events),
+                    ))
+                }
+            }
+        },
+    );
+    let stream = futures::StreamExt::chain(head, tail);
+    let sse = Sse::new(stream).keep_alive(KeepAlive::new().interval(keepalive).text("keep-alive"));
+    (
+        [(
+            HeaderName::from_static("x-accel-buffering"),
+            HeaderValue::from_static("no"),
+        )],
+        sse,
+    )
+        .into_response()
+}
+
+/// A short, complete SSE response for a request that finished before the
+/// upgrade decision but raced messages into its channel: the messages, the
+/// final response, end of stream.
+fn finished_sse(codec: DefaultCodec, events: VecDeque<JsonRpcMessage>) -> Response {
+    let stream = futures::stream::iter(
+        events
+            .into_iter()
+            .map(move |msg| Ok::<_, Infallible>(sse_event(&codec, &msg))),
+    );
+    (
+        [(
+            HeaderName::from_static("x-accel-buffering"),
+            HeaderValue::from_static("no"),
+        )],
+        Sse::new(stream),
+    )
+        .into_response()
+}
+
+/// Empty the channel without awaiting (post-completion stragglers).
+fn drain(rx: &mut tokio::sync::mpsc::Receiver<JsonRpcMessage>) -> VecDeque<JsonRpcMessage> {
+    let mut events = VecDeque::new();
+    while let Ok(msg) = rx.try_recv() {
+        events.push_back(msg);
+    }
+    events
+}
+
+/// Encode one message as one `data:` event; an encode failure becomes a
+/// comment so the stream survives.
+fn sse_event(codec: &DefaultCodec, msg: &JsonRpcMessage) -> Event {
+    match codec.encode(msg) {
+        Ok(bytes) => Event::default().data(String::from_utf8_lossy(&bytes)),
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to encode SSE event; skipped");
+            Event::default().comment("event encoding failed; skipped")
+        }
+    }
+}
+
+/// The common SSE response shape for the two long-lived stream kinds (modern
+/// listen, legacy GET): every channel message becomes one `data:` event;
+/// keep-alive comments flow in between; the writer registration travels inside
+/// the stream state so dropping the response body unregisters it.
 fn sse_response(
     codec: DefaultCodec,
     rx: tokio::sync::mpsc::Receiver<JsonRpcMessage>,
@@ -397,13 +622,7 @@ fn sse_response(
         (rx, registration, codec),
         |(mut rx, registration, codec)| async move {
             let msg = rx.recv().await?;
-            let event = match codec.encode(&msg) {
-                Ok(bytes) => Event::default().data(String::from_utf8_lossy(&bytes)),
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to encode SSE event; skipped");
-                    Event::default().comment("event encoding failed; skipped")
-                }
-            };
+            let event = sse_event(&codec, &msg);
             Some((Ok::<_, Infallible>(event), (rx, registration, codec)))
         },
     );

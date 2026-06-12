@@ -253,10 +253,10 @@ impl SubscriptionRegistry {
     }
 }
 
-/// Resolve a legacy session's server→client writer: the HTTP `GET` SSE stream
+/// Resolve a legacy session's server→client writer for *session-scoped*
+/// publishes (list_changed, resources/updated): the HTTP `GET` SSE stream
 /// first, then the byte-pipe connection the session was last seen on. `None`
 /// is not an error — an HTTP client may simply not have its stream open.
-/// Shared by subscription publishing and inline bidi requests.
 pub(crate) fn legacy_writer(
     session: &str,
     connection: &str,
@@ -266,6 +266,26 @@ pub(crate) fn legacy_writer(
             .then(|| outbound::writer(connection))
             .flatten()
     })
+}
+
+/// Resolve the channel for a *request-related* server→client message (inline
+/// bidi requests; progress and log notifications): the originating request's
+/// own stream first — its POST SSE response on HTTP, the pipe on stdio — per
+/// the transports spec's SHOULD; then the session's `GET` stream (legacy MAY).
+/// Draft callers pass an empty `session`: the draft forbids delivering
+/// request-scoped messages on any stream but the request's own.
+pub(crate) fn request_writer(
+    connection: &str,
+    session: &str,
+) -> Option<tokio::sync::mpsc::Sender<JsonRpcMessage>> {
+    (!connection.is_empty())
+        .then(|| outbound::writer(connection))
+        .flatten()
+        .or_else(|| {
+            (!session.is_empty())
+                .then(|| outbound::writer(&outbound::session_stream_id(session)))
+                .flatten()
+        })
 }
 
 /// The `_meta.subscriptionId` value for a listen request id. The spec's

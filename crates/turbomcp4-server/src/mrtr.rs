@@ -36,7 +36,7 @@ use tokio::sync::oneshot;
 use turbomcp4_core::{JsonRpcRequest, JsonRpcResponse, McpError, McpResult, RequestId};
 use turbomcp4_protocol::neutral;
 
-use crate::subscriptions::legacy_writer;
+use crate::subscriptions::request_writer;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -484,8 +484,10 @@ impl ClientHandle {
     }
 }
 
-/// Send one inline bidi request on the session's server→client channel and
-/// block until the client's response routes back (or [`BIDI_TIMEOUT`]).
+/// Send one inline bidi request on the originating request's server→client
+/// channel (the request's own stream first, then the session `GET` stream —
+/// see [`request_writer`](crate::subscriptions::request_writer)) and block
+/// until the client's response routes back (or [`BIDI_TIMEOUT`]).
 async fn send_and_await(
     session: &str,
     connection: &str,
@@ -503,7 +505,7 @@ async fn send_and_await(
     let id = RequestId::from(format!("srv-{}", uuid::Uuid::new_v4()));
     let (rx, _guard) = pending.register(id.clone());
 
-    let writer = legacy_writer(session, connection).ok_or_else(|| {
+    let writer = request_writer(connection, session).ok_or_else(|| {
         McpError::transport(
             "no server→client channel for this session (open the GET stream or keep the pipe alive)",
         )

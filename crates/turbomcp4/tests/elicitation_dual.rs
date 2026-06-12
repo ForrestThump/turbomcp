@@ -227,36 +227,34 @@ async fn elicitation_works_on_both_versions_over_http() {
         .unwrap()
         .to_owned();
 
-    // …the GET stream is the server→client channel…
-    let get = Request::builder()
-        .method("GET")
-        .uri("/mcp")
-        .header(header::ACCEPT, "text/event-stream")
-        .header("mcp-session-id", &sid)
-        .body(Body::empty())
-        .unwrap();
-    let resp = app.clone().oneshot(get).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let mut stream = resp.into_body();
-    let mut buffer = String::new();
-
-    // …the call blocks while its elicitation arrives on that stream…
+    // …the call's own POST upgrades to a request-scoped SSE stream carrying
+    // the server's elicitation request (transports spec SHOULD: request-
+    // related messages ride the request's own response stream)…
     let call = json!({
         "jsonrpc": "2.0", "id": 2, "method": "tools/call",
         "params": { "name": "delete", "arguments": { "path": "/tmp/z" } }
     });
-    let call_headers = [("mcp-session-id", sid.as_str())];
-    let pending_call = tokio::spawn({
-        let app = app.clone();
-        let req = post(call, &call_headers);
-        async move { app.oneshot(req).await.unwrap() }
-    });
+    let resp = app
+        .clone()
+        .oneshot(post(call, &[("mcp-session-id", sid.as_str())]))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(
+        resp.headers()[header::CONTENT_TYPE]
+            .to_str()
+            .unwrap()
+            .starts_with("text/event-stream"),
+        "a mid-flight server request upgrades the POST response to SSE"
+    );
+    let mut stream = resp.into_body();
+    let mut buffer = String::new();
 
     let elicit = next_sse_event(&mut stream, &mut buffer).await;
     assert_eq!(elicit["method"], "elicitation/create");
     assert_eq!(elicit["params"]["message"], "Delete /tmp/z?");
 
-    // …and the client POSTs the response back (202), unblocking the call.
+    // …the client POSTs the response back on its own request (202)…
     let answer = json!({ "jsonrpc": "2.0", "id": elicit["id"], "result": accept() });
     let resp = app
         .clone()
@@ -265,10 +263,13 @@ async fn elicitation_works_on_both_versions_over_http() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::ACCEPTED);
 
-    let resp = tokio::time::timeout(Duration::from_secs(5), pending_call)
-        .await
-        .expect("the blocked call should resolve")
-        .unwrap();
-    let done = body_json(resp).await;
+    // …and the final response is the stream's last event; the response
+    // terminates the stream.
+    let done = next_sse_event(&mut stream, &mut buffer).await;
+    assert_eq!(done["id"], 2);
     assert_eq!(done["result"]["content"][0]["text"], "deleted /tmp/z");
+    let end = tokio::time::timeout(Duration::from_secs(5), stream.frame())
+        .await
+        .expect("the stream should end after the final response");
+    assert!(end.is_none(), "no events after the final response");
 }
