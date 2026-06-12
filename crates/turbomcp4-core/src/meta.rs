@@ -23,6 +23,11 @@ pub mod keys {
     pub const BAGGAGE: &str = "baggage";
     /// Subscription stream correlation id (draft `subscriptions/listen`).
     pub const SUBSCRIPTION_ID: &str = "io.modelcontextprotocol/subscriptionId";
+    /// Per-request client implementation info (draft stateless model).
+    pub const CLIENT_INFO: &str = "io.modelcontextprotocol/clientInfo";
+    /// Per-request client capabilities (draft stateless model). Gates which
+    /// MRTR input requests a server may send (SEP-2322 MUST).
+    pub const CLIENT_CAPABILITIES: &str = "io.modelcontextprotocol/clientCapabilities";
 }
 
 /// Internal `_meta` keys: the in-process side-channel a transport (or session
@@ -62,6 +67,8 @@ pub fn is_framework_key(key: &str) -> bool {
             | keys::TRACESTATE
             | keys::BAGGAGE
             | keys::SUBSCRIPTION_ID
+            | keys::CLIENT_INFO
+            | keys::CLIENT_CAPABILITIES
     ) || internal::is_internal_key(key)
 }
 

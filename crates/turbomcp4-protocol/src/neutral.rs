@@ -632,6 +632,68 @@ impl GetPromptParams {
     }
 }
 
+// ---- elicitation (client interaction) ------------------------------------------
+
+/// What a handler asks the user for via `ctx.client.elicit(…)` (form mode).
+///
+/// On the draft this is packaged into an `InputRequiredResult` (MRTR,
+/// SEP-2322); on `2025-11-25` it goes out as an inline `elicitation/create`
+/// request. URL-mode elicitation is not yet modeled.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct ElicitParams {
+    /// The message presented to the user describing what is being requested.
+    pub message: String,
+    /// The requested form schema — the spec's restricted JSON Schema subset
+    /// (top-level primitive properties only, no nesting).
+    pub requested_schema: Value,
+}
+
+impl ElicitParams {
+    /// An elicitation showing `message` and requesting `requested_schema`.
+    pub fn new(message: impl Into<String>, requested_schema: Value) -> Self {
+        Self {
+            message: message.into(),
+            requested_schema,
+        }
+    }
+}
+
+/// The user's action in response to an elicitation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ElicitAction {
+    /// The user submitted the form / confirmed the action.
+    Accept,
+    /// The user explicitly declined.
+    Decline,
+    /// The user dismissed without an explicit choice.
+    Cancel,
+}
+
+/// What the client answered to an elicitation.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct ElicitOutcome {
+    /// The user's action.
+    pub action: ElicitAction,
+    /// Submitted form values (present only on `Accept` in form mode).
+    pub content: Map<String, Value>,
+}
+
+impl ElicitOutcome {
+    /// An outcome with the given action and submitted content.
+    #[must_use]
+    pub fn new(action: ElicitAction, content: Map<String, Value>) -> Self {
+        Self { action, content }
+    }
+
+    /// Whether the user accepted.
+    #[must_use]
+    pub fn accepted(&self) -> bool {
+        self.action == ElicitAction::Accept
+    }
+}
+
 // ---- completions --------------------------------------------------------------
 
 /// Result of `completion/complete`: up to 100 suggested values.

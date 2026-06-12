@@ -23,6 +23,7 @@ mod builder;
 mod context;
 mod dispatcher;
 mod inflight;
+mod mrtr;
 mod response;
 mod router;
 mod session;
@@ -37,6 +38,7 @@ pub use context::{
     ListResourceTemplatesContext, ListResourcesContext, ListToolsContext, ReadResourceContext,
 };
 pub use dispatcher::VersionDispatcher;
+pub use mrtr::ClientHandle;
 pub use response::{IntoCallToolResult, IntoGetPromptResult, IntoReadResourceResult};
 pub use router::MethodRouter;
 pub use session::{SessionState, SessionStore};

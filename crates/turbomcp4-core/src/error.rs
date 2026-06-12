@@ -62,6 +62,13 @@ pub enum McpError {
     /// A mirrored `Mcp-Param-*` header did not match the request body.
     /// JSON-RPC `-32001`, HTTP 400.
     HeaderMismatch(String),
+    /// MRTR abort sentinel (SEP-2322): a handler asked the client for input
+    /// (`ctx.client.elicit(…)`) that the request didn't carry yet. It exists
+    /// so the abort can ride `?` through user code; the dispatcher intercepts
+    /// it and answers an `InputRequiredResult` — it is never a user-visible
+    /// error. The codes below are defensive fallbacks only.
+    #[doc(hidden)]
+    InputRequired,
 }
 
 impl McpError {
@@ -117,7 +124,7 @@ impl McpError {
     #[must_use]
     pub fn jsonrpc_code(&self) -> i32 {
         match self {
-            Self::Internal(_) | Self::ToolExecutionFailed { .. } => -32603,
+            Self::Internal(_) | Self::ToolExecutionFailed { .. } | Self::InputRequired => -32603,
             Self::InvalidParams(_) | Self::ResourceNotFound(_) => -32602,
             Self::MethodNotFound(_) | Self::ToolNotFound(_) => -32601,
             Self::Authentication(_)
@@ -134,7 +141,7 @@ impl McpError {
     #[must_use]
     pub fn http_status(&self) -> u16 {
         match self {
-            Self::Internal(_) => 500,
+            Self::Internal(_) | Self::InputRequired => 500,
             Self::InvalidParams(_)
             | Self::UnsupportedProtocolVersion(_)
             | Self::MissingRequiredCapability(_)
@@ -177,6 +184,7 @@ impl fmt::Display for McpError {
                 write!(f, "missing required capability: {m}")
             }
             Self::HeaderMismatch(m) => write!(f, "header mismatch: {m}"),
+            Self::InputRequired => write!(f, "input required (unintercepted MRTR abort)"),
         }
     }
 }

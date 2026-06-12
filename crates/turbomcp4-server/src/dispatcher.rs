@@ -43,6 +43,7 @@ use crate::context::{
     ListResourceTemplatesContext, ListResourcesContext, ListToolsContext, ReadResourceContext,
 };
 use crate::inflight::InFlightRegistry;
+use crate::mrtr::{ClientHandle, StateSigner};
 use crate::router::MethodRouter;
 use crate::session::{SessionState, SessionStore};
 use crate::subscriptions::{ServerNotifier, SubscriptionRegistry, subscription_id_value};
@@ -61,6 +62,7 @@ pub struct VersionDispatcher<S> {
     tasks: Option<Arc<TaskStore>>,
     inflight: Arc<InFlightRegistry>,
     subs: Arc<SubscriptionRegistry>,
+    signer: Arc<StateSigner>,
 }
 
 impl<S: Clone> Clone for VersionDispatcher<S> {
@@ -73,6 +75,7 @@ impl<S: Clone> Clone for VersionDispatcher<S> {
             tasks: self.tasks.clone(),
             inflight: Arc::clone(&self.inflight),
             subs: Arc::clone(&self.subs),
+            signer: Arc::clone(&self.signer),
         }
     }
 }
@@ -91,6 +94,7 @@ impl<S: McpServerCore> VersionDispatcher<S> {
             tasks: None,
             inflight: Arc::new(InFlightRegistry::default()),
             subs: Arc::new(SubscriptionRegistry::default()),
+            signer: Arc::new(StateSigner::new()),
         }
     }
 
@@ -134,9 +138,10 @@ impl<S: McpServerCore> Service<JsonRpcMessage> for VersionDispatcher<S> {
         let tasks = self.tasks.clone();
         let inflight = Arc::clone(&self.inflight);
         let subs = Arc::clone(&self.subs);
+        let signer = Arc::clone(&self.signer);
         Box::pin(async move {
             handle(
-                server, router, supported, sessions, tasks, inflight, subs, msg,
+                server, router, supported, sessions, tasks, inflight, subs, signer, msg,
             )
             .await
         })
@@ -152,6 +157,7 @@ async fn handle<S: McpServerCore>(
     tasks: Option<Arc<TaskStore>>,
     inflight: Arc<InFlightRegistry>,
     subs: Arc<SubscriptionRegistry>,
+    signer: Arc<StateSigner>,
     msg: JsonRpcMessage,
 ) -> Result<Option<JsonRpcMessage>, ProtocolError> {
     match msg {
@@ -179,6 +185,7 @@ async fn handle<S: McpServerCore>(
                 &sessions,
                 tasks.as_ref(),
                 &subs,
+                &signer,
                 req,
                 cancel.clone(),
             );
@@ -260,6 +267,7 @@ async fn handle_request<S: McpServerCore>(
     sessions: &SessionStore,
     tasks: Option<&Arc<TaskStore>>,
     subs: &Arc<SubscriptionRegistry>,
+    signer: &Arc<StateSigner>,
     req: JsonRpcRequest,
     cancel: CancellationToken,
 ) -> Result<JsonRpcMessage, ProtocolError> {
@@ -303,7 +311,10 @@ async fn handle_request<S: McpServerCore>(
                 VersionRoute::Modern => {
                     let mut ctx = build_context(&req);
                     ctx.cancellation = cancel;
-                    Ok(dispatch_capability::<S, DraftWire>(server, router, &req, &ctx, id).await)
+                    Ok(
+                        dispatch_capability::<S, DraftWire>(server, router, &req, &ctx, signer, id)
+                            .await,
+                    )
                 }
                 VersionRoute::Legacy => {
                     let mut ctx = match legacy_context(sessions, &req)? {
@@ -331,7 +342,12 @@ async fn handle_request<S: McpServerCore>(
                             .await);
                         }
                     }
-                    Ok(dispatch_capability::<S, LegacyWire>(server, router, &req, &ctx, id).await)
+                    Ok(
+                        dispatch_capability::<S, LegacyWire>(
+                            server, router, &req, &ctx, signer, id,
+                        )
+                        .await,
+                    )
                 }
                 VersionRoute::Unsupported(requested) => {
                     Ok(unsupported_version(id, requested, supported))
@@ -427,6 +443,9 @@ where
 /// `From<neutral>` target differs (the conversions live in
 /// `turbomcp4_protocol::neutral`).
 trait WireFamily {
+    /// Whether this wire family delivers client interaction via MRTR
+    /// (`InputRequiredResult`); the legacy family uses inline bidi instead.
+    const MRTR: bool;
     type ListTools: Serialize + From<neutral::ListToolsResult>;
     type CallTool: Serialize + From<neutral::CallToolResult>;
     type ListResources: Serialize + From<neutral::ListResourcesResult>;
@@ -441,6 +460,7 @@ trait WireFamily {
 struct DraftWire;
 
 impl WireFamily for DraftWire {
+    const MRTR: bool = true;
     type ListTools = draft::ListToolsResult;
     type CallTool = draft::CallToolResult;
     type ListResources = draft::ListResourcesResult;
@@ -455,6 +475,7 @@ impl WireFamily for DraftWire {
 struct LegacyWire;
 
 impl WireFamily for LegacyWire {
+    const MRTR: bool = false;
     type ListTools = legacy::ListToolsResult;
     type CallTool = legacy::CallToolResult;
     type ListResources = legacy::ListResourcesResult;
@@ -470,6 +491,7 @@ async fn dispatch_capability<S: McpServerCore, W: WireFamily>(
     router: &MethodRouter<S>,
     req: &JsonRpcRequest,
     ctx: &RequestContext,
+    signer: &StateSigner,
     id: RequestId,
 ) -> JsonRpcMessage {
     let method = req.method.as_str();
@@ -485,8 +507,16 @@ async fn dispatch_capability<S: McpServerCore, W: WireFamily>(
                 Ok(p) => p,
                 Err(e) => return error_response(id, &e),
             };
-            let fut = router.dispatch_call_tool(server, CallToolContext::new(ctx), params);
-            finish::<_, W::CallTool>(id, method, fut).await
+            let handle = match mrtr_handle::<W>(req, &ctx, signer) {
+                Ok(h) => h,
+                Err(e) => return error_response(id, &e),
+            };
+            let fut = router.dispatch_call_tool(
+                server,
+                CallToolContext::new(ctx).with_client(handle.clone()),
+                params,
+            );
+            finish_mrtr::<_, W::CallTool>(id, method, fut, &handle, signer, W::MRTR).await
         }
         methods::request::RESOURCES_LIST => {
             let fut =
@@ -506,8 +536,16 @@ async fn dispatch_capability<S: McpServerCore, W: WireFamily>(
                 Ok(p) => p,
                 Err(e) => return error_response(id, &e),
             };
-            let fut = router.dispatch_read_resource(server, ReadResourceContext::new(ctx), params);
-            finish::<_, W::ReadResource>(id, method, fut).await
+            let handle = match mrtr_handle::<W>(req, &ctx, signer) {
+                Ok(h) => h,
+                Err(e) => return error_response(id, &e),
+            };
+            let fut = router.dispatch_read_resource(
+                server,
+                ReadResourceContext::new(ctx).with_client(handle.clone()),
+                params,
+            );
+            finish_mrtr::<_, W::ReadResource>(id, method, fut, &handle, signer, W::MRTR).await
         }
         methods::request::PROMPTS_LIST => {
             let fut =
@@ -519,8 +557,16 @@ async fn dispatch_capability<S: McpServerCore, W: WireFamily>(
                 Ok(p) => p,
                 Err(e) => return error_response(id, &e),
             };
-            let fut = router.dispatch_get_prompt(server, GetPromptContext::new(ctx), params);
-            finish::<_, W::GetPrompt>(id, method, fut).await
+            let handle = match mrtr_handle::<W>(req, &ctx, signer) {
+                Ok(h) => h,
+                Err(e) => return error_response(id, &e),
+            };
+            let fut = router.dispatch_get_prompt(
+                server,
+                GetPromptContext::new(ctx).with_client(handle.clone()),
+                params,
+            );
+            finish_mrtr::<_, W::GetPrompt>(id, method, fut, &handle, signer, W::MRTR).await
         }
         methods::request::COMPLETION_COMPLETE => {
             let params = match parse_complete_params(req.params.as_ref()) {
@@ -531,6 +577,100 @@ async fn dispatch_capability<S: McpServerCore, W: WireFamily>(
             finish::<_, W::Complete>(id, method, fut).await
         }
         _ => unreachable!("dispatch_capability called with an unrouted method"),
+    }
+}
+
+// ---- MRTR (SEP-2322) -----------------------------------------------------------
+
+#[derive(Deserialize, Default)]
+struct RawMrtrFields {
+    #[serde(rename = "inputResponses", default)]
+    input_responses: Option<BTreeMap<String, Value>>,
+    #[serde(rename = "requestState", default)]
+    request_state: Option<String>,
+}
+
+/// Build the request's [`ClientHandle`]: on the draft, an MRTR coordinator
+/// seeded with the retry's `inputResponses` and verified `requestState`
+/// (verification failure rejects the request before the handler runs — the
+/// blob is attacker-controlled); on the legacy family, a placeholder until
+/// inline bidi lands (Phase 6f).
+fn mrtr_handle<W: WireFamily>(
+    req: &JsonRpcRequest,
+    ctx: &RequestContext,
+    signer: &StateSigner,
+) -> Result<ClientHandle, McpError> {
+    if !W::MRTR {
+        return Ok(ClientHandle::unavailable(
+            "inline bidirectional requests on 2025-11-25 land in Phase 6f",
+        ));
+    }
+    let fields: RawMrtrFields = req
+        .params
+        .as_ref()
+        .and_then(|p| serde_json::from_value(p.clone()).ok())
+        .unwrap_or_default();
+    let state_in = match &fields.request_state {
+        Some(token) => Some(signer.verify(&req.method, token)?),
+        None => None,
+    };
+    Ok(ClientHandle::mrtr(
+        ctx.client_capabilities.clone(),
+        fields.input_responses.unwrap_or_default(),
+        state_in,
+    ))
+}
+
+/// [`finish`], plus MRTR-abort interception: when the handler bailed with the
+/// [`McpError::InputRequired`] sentinel on an MRTR-capable wire, answer an
+/// `InputRequiredResult` carrying the recorded input requests and the signed
+/// outbound `requestState` (the spec's MUST: at least one of the two).
+async fn finish_mrtr<N, WIRE>(
+    id: RequestId,
+    method: &str,
+    fut: Option<BoxFuture<'static, Result<N, McpError>>>,
+    handle: &ClientHandle,
+    signer: &StateSigner,
+    mrtr_enabled: bool,
+) -> JsonRpcMessage
+where
+    WIRE: Serialize + From<N>,
+{
+    let Some(f) = fut else {
+        return error_response(id, &McpError::method_not_found(method));
+    };
+    match f.await {
+        Ok(result) => ok_value(id, &WIRE::from(result)),
+        Err(McpError::InputRequired) if mrtr_enabled => {
+            let collected = handle.collected();
+            let state_out = handle.state_out();
+            if collected.is_empty() && state_out.is_none() {
+                // The spec requires at least one of inputRequests/requestState;
+                // a bare sentinel means a handler leaked it manually.
+                return error_response(
+                    id,
+                    &McpError::internal("MRTR abort recorded no input requests"),
+                );
+            }
+            let mut result = Map::new();
+            result.insert("resultType".to_owned(), serde_json::json!("input_required"));
+            if !collected.is_empty() {
+                result.insert(
+                    "inputRequests".to_owned(),
+                    Value::Object(collected.into_iter().collect()),
+                );
+            }
+            if let Some(data) = state_out {
+                match signer.sign(method, &data) {
+                    Ok(token) => {
+                        result.insert("requestState".to_owned(), serde_json::json!(token));
+                    }
+                    Err(e) => return error_response(id, &e),
+                }
+            }
+            JsonRpcResponse::success(id, Value::Object(result)).into()
+        }
+        Err(e) => error_response(id, &e),
     }
 }
 
@@ -1195,8 +1335,17 @@ fn to_draft_impl(i: Implementation) -> draft::Implementation {
     }
 }
 
-/// Build the per-request context from the wire frame (Phase 2: version +
-/// propagated `_meta`; identity/client-info extraction joins in Phase 4/7).
+#[derive(Deserialize)]
+struct RawClientInfo {
+    name: String,
+    version: String,
+    #[serde(default)]
+    title: Option<String>,
+}
+
+/// Build the per-request context from the wire frame: version, the draft's
+/// per-request client identity/capabilities (`_meta` keys), and propagated
+/// user `_meta`. (Transport identity extraction joins with Auth in Phase 7.)
 fn build_context(req: &JsonRpcRequest) -> RequestContext {
     let version =
         version::request_protocol_version(req.params.as_ref()).unwrap_or(ProtocolVersion::LATEST);
@@ -1207,7 +1356,18 @@ fn build_context(req: &JsonRpcRequest) -> RequestContext {
         .and_then(|p| p.get("_meta"))
         .and_then(Value::as_object)
     {
-        let (_consumed, propagated) = turbomcp4_core::meta::partition(meta.clone());
+        let (consumed, propagated) = turbomcp4_core::meta::partition(meta.clone());
+        if let Some(info) = consumed
+            .get(meta::keys::CLIENT_INFO)
+            .and_then(|v| serde_json::from_value::<RawClientInfo>(v.clone()).ok())
+        {
+            let mut implementation = Implementation::new(info.name, info.version);
+            implementation.title = info.title;
+            ctx = ctx.with_client_info(implementation);
+        }
+        if let Some(caps) = consumed.get(meta::keys::CLIENT_CAPABILITIES) {
+            ctx.client_capabilities = Some(caps.clone());
+        }
         ctx = ctx.with_propagated_meta(propagated);
     }
     ctx

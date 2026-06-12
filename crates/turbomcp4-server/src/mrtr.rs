@@ -1,0 +1,441 @@
+//! MRTR coordinator + [`ClientHandle`] (SEP-2322, PLAN §4.5.2).
+//!
+//! On the draft, server→client interaction (elicitation, sampling, roots) is
+//! *not* a separate request: the handler records what it needs, aborts with
+//! the [`McpError::InputRequired`] sentinel, and the dispatcher answers an
+//! `InputRequiredResult`. The client gathers responses and **re-issues the
+//! original request from the top** with `inputResponses` (+ the echoed
+//! `requestState`); on re-execution the handle finds the cached response and
+//! returns it inline. Handlers must therefore keep elicit keys stable and any
+//! pre-elicit side effects idempotent (PLAN §4.5.1).
+//!
+//! `requestState` is the handler's opaque resume blob. It round-trips through
+//! the client, so it is attacker-controlled input (mrtr spec MUST): outbound
+//! state is HMAC-SHA256-signed with a per-dispatcher secret and the protected
+//! payload carries the method name and an expiry; inbound state that fails
+//! any check is rejected with `-32602` before the handler runs.
+
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use hmac::{Hmac, KeyInit as _, Mac};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+use serde_json::{Map, Value, json};
+use sha2::Sha256;
+use turbomcp4_core::{McpError, McpResult};
+use turbomcp4_protocol::neutral;
+
+type HmacSha256 = Hmac<Sha256>;
+
+/// Cap on the serialized `requestState` payload (PLAN MR-5).
+pub(crate) const MAX_STATE_BYTES: usize = 32 * 1024;
+/// How long an issued `requestState` stays redeemable (replay bound — the mrtr
+/// spec's SHOULD; single-use semantics, if needed, are the handler's job).
+const STATE_TTL: Duration = Duration::from_secs(10 * 60);
+
+// ---- request-state signing -----------------------------------------------------
+
+/// Signs/verifies `requestState` blobs with a per-dispatcher random secret.
+pub(crate) struct StateSigner {
+    key: [u8; 32],
+}
+
+impl StateSigner {
+    pub(crate) fn new() -> Self {
+        use rand::Rng as _;
+        let mut key = [0u8; 32];
+        rand::rng().fill_bytes(&mut key);
+        Self { key }
+    }
+
+    fn mac(&self) -> HmacSha256 {
+        HmacSha256::new_from_slice(&self.key).expect("HMAC accepts any key length")
+    }
+
+    /// Wrap handler `data` into the opaque wire string:
+    /// `v1.<b64url(payload)>.<b64url(tag)>` where the payload binds the
+    /// originating `method` and an expiry alongside the data.
+    pub(crate) fn sign(&self, method: &str, data: &Value) -> McpResult<String> {
+        let expires = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            + STATE_TTL.as_secs();
+        let payload = serde_json::to_vec(&json!({ "m": method, "exp": expires, "d": data }))
+            .map_err(|e| McpError::internal(format!("serialize request state: {e}")))?;
+        if payload.len() > MAX_STATE_BYTES {
+            return Err(McpError::invalid_params(format!(
+                "request state exceeds the {MAX_STATE_BYTES}-byte limit"
+            )));
+        }
+        let mut mac = self.mac();
+        mac.update(&payload);
+        let tag = mac.finalize().into_bytes();
+        Ok(format!(
+            "v1.{}.{}",
+            URL_SAFE_NO_PAD.encode(&payload),
+            URL_SAFE_NO_PAD.encode(tag)
+        ))
+    }
+
+    /// Verify an inbound `requestState` and return the embedded handler data.
+    ///
+    /// The error is deliberately uniform — a forger learns nothing about
+    /// *which* check failed. The MAC comparison is constant-time
+    /// ([`Mac::verify_slice`]).
+    pub(crate) fn verify(&self, method: &str, token: &str) -> McpResult<Value> {
+        fn rejected() -> McpError {
+            McpError::invalid_params("requestState failed verification")
+        }
+        // Bound work before touching anything attacker-sized.
+        if token.len() > 2 * MAX_STATE_BYTES {
+            return Err(rejected());
+        }
+        let mut parts = token.splitn(3, '.');
+        let (Some("v1"), Some(payload), Some(tag)) = (parts.next(), parts.next(), parts.next())
+        else {
+            return Err(rejected());
+        };
+        let payload = URL_SAFE_NO_PAD.decode(payload).map_err(|_| rejected())?;
+        let tag = URL_SAFE_NO_PAD.decode(tag).map_err(|_| rejected())?;
+        let mut mac = self.mac();
+        mac.update(&payload);
+        mac.verify_slice(&tag).map_err(|_| rejected())?;
+
+        let parsed: Value = serde_json::from_slice(&payload).map_err(|_| rejected())?;
+        if parsed.get("m").and_then(Value::as_str) != Some(method) {
+            return Err(rejected());
+        }
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if parsed.get("exp").and_then(Value::as_u64).unwrap_or(0) < now {
+            return Err(rejected());
+        }
+        Ok(parsed.get("d").cloned().unwrap_or(Value::Null))
+    }
+}
+
+// ---- the coordinator -------------------------------------------------------------
+
+/// How this request's [`ClientHandle`] reaches the client.
+enum HandleMode {
+    /// Draft path: record requests, abort, answer `InputRequiredResult`.
+    Mrtr,
+    /// No client-interaction channel on this path (reason in the error).
+    Unavailable(&'static str),
+}
+
+struct Inner {
+    mode: HandleMode,
+    /// The client's declared capabilities (gates which input requests may be
+    /// sent — SEP-2322 MUST). `None` = nothing declared.
+    client_capabilities: Option<Value>,
+    /// `inputResponses` carried by this (retry) request.
+    responses: BTreeMap<String, Value>,
+    /// Input requests recorded by the handler this execution (key → wire
+    /// request object).
+    collected: Mutex<BTreeMap<String, Value>>,
+    /// Verified inbound `requestState` data.
+    state_in: Option<Value>,
+    /// Handler-stored outbound state (signed at result assembly).
+    state_out: Mutex<Option<Value>>,
+}
+
+/// A handler's channel to the client, present only on the MRTR-capable
+/// contexts (`tools/call`, `prompts/get`, `resources/read` — SEP-2322).
+///
+/// On the draft, `elicit` either returns the cached response from the retry
+/// request or aborts the handler (via `?`) so the dispatcher can answer
+/// `InputRequiredResult` — see the module docs for the re-execution contract.
+/// On `2025-11-25` the same calls go out as inline bidirectional requests
+/// (Phase 6f).
+#[derive(Clone)]
+pub struct ClientHandle {
+    inner: Arc<Inner>,
+}
+
+impl std::fmt::Debug for ClientHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClientHandle").finish_non_exhaustive()
+    }
+}
+
+impl ClientHandle {
+    /// A handle with no client channel; every interaction fails with `reason`.
+    pub(crate) fn unavailable(reason: &'static str) -> Self {
+        Self {
+            inner: Arc::new(Inner {
+                mode: HandleMode::Unavailable(reason),
+                client_capabilities: None,
+                responses: BTreeMap::new(),
+                collected: Mutex::new(BTreeMap::new()),
+                state_in: None,
+                state_out: Mutex::new(None),
+            }),
+        }
+    }
+
+    /// A draft-path MRTR handle for one request (re)execution.
+    pub(crate) fn mrtr(
+        client_capabilities: Option<Value>,
+        responses: BTreeMap<String, Value>,
+        state_in: Option<Value>,
+    ) -> Self {
+        Self {
+            inner: Arc::new(Inner {
+                mode: HandleMode::Mrtr,
+                client_capabilities,
+                responses,
+                collected: Mutex::new(BTreeMap::new()),
+                state_in,
+                state_out: Mutex::new(None),
+            }),
+        }
+    }
+
+    /// Ask the user for structured input (form-mode elicitation).
+    ///
+    /// `key` is this elicitation's stable identity across re-executions —
+    /// reuse the same key for the same question or the cached response won't
+    /// be found on retry.
+    pub async fn elicit(
+        &self,
+        key: &str,
+        params: neutral::ElicitParams,
+    ) -> McpResult<neutral::ElicitOutcome> {
+        self.require_capability("elicitation")?;
+        if let Some(raw) = self.inner.responses.get(key) {
+            return parse_elicit_outcome(raw);
+        }
+        self.record(key, elicit_request_value(&params));
+        Err(McpError::InputRequired)
+    }
+
+    /// Ask for several inputs in **one** round trip (PLAN MR-4): all missing
+    /// requests are packaged into a single `InputRequiredResult` instead of
+    /// one abort per `elicit` call. Outcomes are returned in request order.
+    pub async fn elicit_all(
+        &self,
+        requests: Vec<(&str, neutral::ElicitParams)>,
+    ) -> McpResult<Vec<neutral::ElicitOutcome>> {
+        self.require_capability("elicitation")?;
+        if requests
+            .iter()
+            .all(|(key, _)| self.inner.responses.contains_key(*key))
+        {
+            return requests
+                .iter()
+                .map(|(key, _)| parse_elicit_outcome(&self.inner.responses[*key]))
+                .collect();
+        }
+        for (key, params) in &requests {
+            if !self.inner.responses.contains_key(*key) {
+                self.record(key, elicit_request_value(params));
+            }
+        }
+        Err(McpError::InputRequired)
+    }
+
+    /// Ask the client to sample its LLM (`sampling/createMessage`).
+    ///
+    /// Params/result are raw wire values; typed bindings come with the client
+    /// work (Phase 9). Functional in both protocol versions despite the
+    /// upstream deprecation marking (AUDIT F10).
+    #[deprecated(note = "marked deprecated upstream; still functional in both versions")]
+    pub async fn create_message(&self, key: &str, params: Value) -> McpResult<Value> {
+        self.request_raw(key, "sampling/createMessage", "sampling", params)
+            .await
+    }
+
+    /// Ask the client for its filesystem roots (`roots/list`).
+    #[deprecated(note = "marked deprecated upstream; still functional in both versions")]
+    pub async fn list_roots(&self, key: &str) -> McpResult<Value> {
+        self.request_raw(key, "roots/list", "roots", json!({}))
+            .await
+    }
+
+    /// Stash typed resume state for the retry execution (PLAN MR-6). It is
+    /// signed into the result's `requestState`; the retry's verified copy is
+    /// readable via [`ClientHandle::load_state`].
+    pub fn store_state<T: Serialize>(&self, value: &T) -> McpResult<()> {
+        let value = serde_json::to_value(value)
+            .map_err(|e| McpError::internal(format!("serialize state: {e}")))?;
+        *self.inner.state_out.lock().expect("state lock poisoned") = Some(value);
+        Ok(())
+    }
+
+    /// The verified `requestState` data from the retry request, if any.
+    pub fn load_state<T: DeserializeOwned>(&self) -> McpResult<Option<T>> {
+        match &self.inner.state_in {
+            None | Some(Value::Null) => Ok(None),
+            Some(v) => serde_json::from_value(v.clone())
+                .map(Some)
+                .map_err(|e| McpError::invalid_params(format!("request state shape: {e}"))),
+        }
+    }
+
+    // ---- internals ---------------------------------------------------------
+
+    fn require_capability(&self, capability: &str) -> McpResult<()> {
+        if let HandleMode::Unavailable(reason) = self.inner.mode {
+            return Err(McpError::internal(reason));
+        }
+        let declared = self
+            .inner
+            .client_capabilities
+            .as_ref()
+            .is_some_and(|caps| caps.get(capability).is_some());
+        if declared {
+            Ok(())
+        } else {
+            // SEP-2322 MUST NOT send input requests the client didn't declare.
+            Err(McpError::invalid_params(format!(
+                "client did not declare the `{capability}` capability"
+            )))
+        }
+    }
+
+    async fn request_raw(
+        &self,
+        key: &str,
+        method: &str,
+        capability: &str,
+        params: Value,
+    ) -> McpResult<Value> {
+        self.require_capability(capability)?;
+        if let Some(raw) = self.inner.responses.get(key) {
+            return Ok(raw.clone());
+        }
+        self.record(key, json!({ "method": method, "params": params }));
+        Err(McpError::InputRequired)
+    }
+
+    /// Record an input request under `key`, warning on unstable keys
+    /// (PLAN §4.5.2 item 4: same key, different request shape across calls).
+    fn record(&self, key: &str, request: Value) {
+        let mut collected = self
+            .inner
+            .collected
+            .lock()
+            .expect("collected lock poisoned");
+        if let Some(previous) = collected.get(key)
+            && previous != &request
+        {
+            tracing::warn!(key, "elicit key re-used with a different request shape");
+        }
+        collected.insert(key.to_owned(), request);
+    }
+
+    /// The recorded input requests (dispatcher: `InputRequiredResult` assembly).
+    pub(crate) fn collected(&self) -> BTreeMap<String, Value> {
+        self.inner
+            .collected
+            .lock()
+            .expect("collected lock poisoned")
+            .clone()
+    }
+
+    /// The handler's outbound state, if it stored any.
+    pub(crate) fn state_out(&self) -> Option<Value> {
+        self.inner
+            .state_out
+            .lock()
+            .expect("state lock poisoned")
+            .clone()
+    }
+}
+
+/// The wire `InputRequest` object for a form-mode elicitation.
+fn elicit_request_value(params: &neutral::ElicitParams) -> Value {
+    json!({
+        "method": "elicitation/create",
+        "params": {
+            "mode": "form",
+            "message": params.message,
+            "requestedSchema": params.requested_schema,
+        },
+    })
+}
+
+#[derive(serde::Deserialize)]
+struct RawElicitResult {
+    action: String,
+    #[serde(default)]
+    content: Map<String, Value>,
+}
+
+fn parse_elicit_outcome(raw: &Value) -> McpResult<neutral::ElicitOutcome> {
+    let parsed: RawElicitResult = serde_json::from_value(raw.clone())
+        .map_err(|e| McpError::invalid_params(format!("invalid elicit response: {e}")))?;
+    let action = match parsed.action.as_str() {
+        "accept" => neutral::ElicitAction::Accept,
+        "decline" => neutral::ElicitAction::Decline,
+        "cancel" => neutral::ElicitAction::Cancel,
+        other => {
+            return Err(McpError::invalid_params(format!(
+                "invalid elicit action: {other}"
+            )));
+        }
+    };
+    let content = if action == neutral::ElicitAction::Accept {
+        parsed.content
+    } else {
+        Map::new()
+    };
+    Ok(neutral::ElicitOutcome::new(action, content))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sign_verify_roundtrip_binds_method_and_rejects_tampering() {
+        let signer = StateSigner::new();
+        let token = signer.sign("tools/call", &json!({"step": 2})).unwrap();
+        assert_eq!(
+            signer.verify("tools/call", &token).unwrap(),
+            json!({"step": 2})
+        );
+        // Bound to the originating method.
+        assert!(signer.verify("prompts/get", &token).is_err());
+        // A flipped byte fails the MAC.
+        let mut tampered = token.clone().into_bytes();
+        let mid = tampered.len() / 2;
+        tampered[mid] = if tampered[mid] == b'A' { b'B' } else { b'A' };
+        assert!(
+            signer
+                .verify("tools/call", &String::from_utf8(tampered).unwrap())
+                .is_err()
+        );
+        // A different server's signer rejects it too.
+        assert!(StateSigner::new().verify("tools/call", &token).is_err());
+    }
+
+    #[test]
+    fn oversized_state_is_rejected_at_sign_time() {
+        let signer = StateSigner::new();
+        let big = json!({ "blob": "x".repeat(MAX_STATE_BYTES) });
+        assert!(matches!(
+            signer.sign("tools/call", &big),
+            Err(McpError::InvalidParams(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn elicit_without_declared_capability_is_an_error_not_an_abort() {
+        let handle = ClientHandle::mrtr(Some(json!({})), BTreeMap::new(), None);
+        let err = handle
+            .elicit("k", neutral::ElicitParams::new("?", json!({})))
+            .await
+            .expect_err("must not send undeclared input requests");
+        assert!(matches!(err, McpError::InvalidParams(_)));
+        assert!(handle.collected().is_empty(), "nothing may be recorded");
+    }
+}
