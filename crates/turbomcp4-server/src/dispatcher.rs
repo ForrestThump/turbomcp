@@ -43,6 +43,7 @@ use crate::context::{
     ListResourceTemplatesContext, ListResourcesContext, ListToolsContext, ReadResourceContext,
 };
 use crate::inflight::InFlightRegistry;
+use crate::logging::LogSender;
 use crate::mrtr::{ClientHandle, PendingRequests, StateSigner};
 use crate::progress::ProgressReporter;
 use crate::router::MethodRouter;
@@ -322,6 +323,12 @@ async fn handle_request<S: McpServerCore>(
                 VersionRoute::Modern => {
                     let mut ctx = build_context(&req);
                     ctx.cancellation = cancel;
+                    // Draft logging opt-in: an unrecognized level rejects the
+                    // request (logging spec §Error Handling).
+                    match extract_log_level(req.params.as_ref()) {
+                        Ok(level) => ctx.log_level = level,
+                        Err(e) => return Ok(error_response(id, &e)),
+                    }
                     Ok(dispatch_capability::<S, DraftWire>(
                         server, router, &req, &ctx, signer, pending, id,
                     )
@@ -386,6 +393,33 @@ async fn handle_request<S: McpServerCore>(
                     } else {
                         subs.legacy_unsubscribe(sid, &uri);
                     }
+                    Ok(JsonRpcResponse::success(id, serde_json::json!({})).into())
+                }
+                VersionRoute::Modern => Ok(error_response(id, &McpError::method_not_found(method))),
+                VersionRoute::Unsupported(requested) => {
+                    Ok(unsupported_version(id, requested, supported))
+                }
+            }
+        }
+
+        // Legacy per-session log-level opt-in (2025-11-25; the draft replaced
+        // the RPC with the per-request `_meta` `logLevel` key).
+        methods::request::LOGGING_SET_LEVEL => {
+            match classify_version(req.params.as_ref(), supported) {
+                VersionRoute::Legacy => {
+                    if let Err(response) = legacy_context(sessions, &req)? {
+                        return Ok(response);
+                    }
+                    if !router.has_logging() {
+                        return Ok(error_response(id, &McpError::method_not_found(method)));
+                    }
+                    let level = match parse_set_level_params(req.params.as_ref()) {
+                        Ok(level) => level,
+                        Err(e) => return Ok(error_response(id, &e)),
+                    };
+                    // `legacy_context` proved the session id is present.
+                    let sid = session_id(req.params.as_ref()).unwrap_or_default();
+                    sessions.set_log_level(sid, level);
                     Ok(JsonRpcResponse::success(id, serde_json::json!({})).into())
                 }
                 VersionRoute::Modern => Ok(error_response(id, &McpError::method_not_found(method))),
@@ -524,9 +558,10 @@ async fn dispatch_capability<S: McpServerCore, W: WireFamily>(
             };
             let fut = router.dispatch_call_tool(
                 server,
-                CallToolContext::new(ctx)
+                CallToolContext::new(ctx.clone())
                     .with_client(handle.clone())
-                    .with_progress(progress_reporter::<W>(req)),
+                    .with_progress(progress_reporter::<W>(req))
+                    .with_log(log_sender::<W>(req, &ctx, router.has_logging())),
                 params,
             );
             finish_mrtr::<_, W::CallTool>(id, method, fut, &handle, signer, W::MRTR).await
@@ -555,9 +590,10 @@ async fn dispatch_capability<S: McpServerCore, W: WireFamily>(
             };
             let fut = router.dispatch_read_resource(
                 server,
-                ReadResourceContext::new(ctx)
+                ReadResourceContext::new(ctx.clone())
                     .with_client(handle.clone())
-                    .with_progress(progress_reporter::<W>(req)),
+                    .with_progress(progress_reporter::<W>(req))
+                    .with_log(log_sender::<W>(req, &ctx, router.has_logging())),
                 params,
             );
             finish_mrtr::<_, W::ReadResource>(id, method, fut, &handle, signer, W::MRTR).await
@@ -578,9 +614,10 @@ async fn dispatch_capability<S: McpServerCore, W: WireFamily>(
             };
             let fut = router.dispatch_get_prompt(
                 server,
-                GetPromptContext::new(ctx)
+                GetPromptContext::new(ctx.clone())
                     .with_client(handle.clone())
-                    .with_progress(progress_reporter::<W>(req)),
+                    .with_progress(progress_reporter::<W>(req))
+                    .with_log(log_sender::<W>(req, &ctx, router.has_logging())),
                 params,
             );
             finish_mrtr::<_, W::GetPrompt>(id, method, fut, &handle, signer, W::MRTR).await
@@ -851,6 +888,31 @@ fn connection_id(params: Option<&Value>) -> Option<&str> {
         .as_str()
 }
 
+/// Build the request's [`LogSender`]: live when the server enabled `logging`
+/// AND the client opted in (the context's `log_level` carries the opt-in from
+/// either the draft `_meta` key or the legacy session's `setLevel`). Routing
+/// mirrors [`progress_reporter`].
+fn log_sender<W: WireFamily>(
+    req: &JsonRpcRequest,
+    ctx: &RequestContext,
+    logging_enabled: bool,
+) -> LogSender {
+    let Some(min) = ctx.log_level.filter(|_| logging_enabled) else {
+        return LogSender::disabled();
+    };
+    let connection = connection_id(req.params.as_ref())
+        .unwrap_or_default()
+        .to_owned();
+    let session = if W::MRTR {
+        String::new()
+    } else {
+        session_id(req.params.as_ref())
+            .unwrap_or_default()
+            .to_owned()
+    };
+    LogSender::new(min, connection, session)
+}
+
 /// Build the request's [`ProgressReporter`]: live when the request carried a
 /// `_meta.progressToken` (string or integer per the progress spec — anything
 /// else is treated as absent, with a warning), inert otherwise. Notifications
@@ -910,6 +972,7 @@ fn legacy_context(
     };
     let mut ctx = RequestContext::new(state.version).with_client_info(state.client_info);
     ctx.client_capabilities = Some(state.client_capabilities);
+    ctx.log_level = state.log_level;
     if let Some(m) = req
         .params
         .as_ref()
@@ -958,6 +1021,7 @@ fn handle_initialize<S: McpServerCore>(
                 version: negotiated.clone(),
                 client_info: from_legacy_impl(params.client_info),
                 client_capabilities,
+                log_level: None,
             },
         );
     }
@@ -982,6 +1046,9 @@ fn handle_initialize<S: McpServerCore>(
     if let Some(caps) = value.get_mut("capabilities").and_then(Value::as_object_mut) {
         if router.has_completions() {
             caps.insert("completions".to_owned(), serde_json::json!({}));
+        }
+        if router.has_logging() {
+            caps.insert("logging".to_owned(), serde_json::json!({}));
         }
         if tasks_enabled {
             caps.insert(
@@ -1356,7 +1423,9 @@ fn build_discover_result<S: McpServerCore>(
             .then(|| draft::JsonObject(BTreeMap::new())),
         experimental: BTreeMap::new(),
         extensions: BTreeMap::new(),
-        logging: None,
+        logging: router
+            .has_logging()
+            .then(|| draft::JsonObject(BTreeMap::new())),
         prompts: router
             .has_prompts()
             .then_some(draft::ServerCapabilitiesPrompts {
@@ -1464,6 +1533,31 @@ fn parse_list_params(params: Option<&Value>) -> neutral::ListParams {
 #[derive(Deserialize)]
 struct RawReadResourceParams {
     uri: String,
+}
+
+/// Parse `logging/setLevel` params: `{ "level": <RFC 5424 level> }`. An
+/// unrecognized level answers `-32602` (logging spec §Error Handling).
+fn parse_set_level_params(params: Option<&Value>) -> Result<turbomcp4_core::LogLevel, McpError> {
+    let level = params
+        .and_then(|p| p.get("level"))
+        .ok_or_else(|| McpError::invalid_params("logging/setLevel requires a level"))?;
+    serde_json::from_value(level.clone())
+        .map_err(|_| McpError::invalid_params(format!("invalid log level: {level}")))
+}
+
+/// Parse the draft per-request log-level opt-in (`_meta`
+/// `io.modelcontextprotocol/logLevel`). `Err` means present but unrecognized
+/// — the logging spec says reject the request with `-32602`.
+fn extract_log_level(params: Option<&Value>) -> Result<Option<turbomcp4_core::LogLevel>, McpError> {
+    let Some(value) = params
+        .and_then(|p| p.get("_meta"))
+        .and_then(|m| m.get(meta::keys::LOG_LEVEL))
+    else {
+        return Ok(None);
+    };
+    serde_json::from_value(value.clone())
+        .map(Some)
+        .map_err(|_| McpError::invalid_params(format!("invalid logLevel: {value}")))
 }
 
 /// Extract the `uri` field shared by `resources/read|subscribe|unsubscribe`.

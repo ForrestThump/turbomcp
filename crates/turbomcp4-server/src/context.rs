@@ -12,6 +12,7 @@
 //! `InputRequiredResult` on; the `*list*` and `complete` contexts stay plain
 //! by design. Each is `#[non_exhaustive]`, so promotions are non-breaking.
 
+use crate::logging::LogSender;
 use crate::mrtr::ClientHandle;
 use crate::progress::ProgressReporter;
 use turbomcp4_core::RequestContext;
@@ -63,17 +64,22 @@ macro_rules! mrtr_context {
             /// Progress reporting for this request; inert unless the request
             /// carried a `_meta.progressToken`.
             pub progress: ProgressReporter,
+            /// Structured log messages to the client; inert unless the server
+            /// enabled `logging` and the client opted in.
+            pub log: LogSender,
         }
 
         impl $name {
-            /// Wrap a [`RequestContext`] (with no client channel or progress
-            /// token attached — the dispatcher attaches them internally).
+            /// Wrap a [`RequestContext`] (with no client channel, progress
+            /// token, or log opt-in attached — the dispatcher attaches them
+            /// internally).
             #[must_use]
             pub fn new(base: RequestContext) -> Self {
                 Self {
                     base,
                     client: ClientHandle::unavailable("no client channel attached"),
                     progress: ProgressReporter::disabled(),
+                    log: LogSender::disabled(),
                 }
             }
 
@@ -88,6 +94,13 @@ macro_rules! mrtr_context {
             #[must_use]
             pub(crate) fn with_progress(mut self, progress: ProgressReporter) -> Self {
                 self.progress = progress;
+                self
+            }
+
+            /// Attach the request's log sender.
+            #[must_use]
+            pub(crate) fn with_log(mut self, log: LogSender) -> Self {
+                self.log = log;
                 self
             }
         }

@@ -98,6 +98,7 @@ pub struct MethodRouter<S> {
     list_prompts: Option<ListPromptsHandler<S>>,
     get_prompt: Option<GetPromptHandler<S>>,
     complete: Option<CompleteHandler<S>>,
+    logging: bool,
 }
 
 impl<S> Default for MethodRouter<S> {
@@ -111,6 +112,7 @@ impl<S> Default for MethodRouter<S> {
             list_prompts: None,
             get_prompt: None,
             complete: None,
+            logging: false,
         }
     }
 }
@@ -199,6 +201,17 @@ impl<S: McpServerCore> MethodRouter<S> {
         self
     }
 
+    /// Enable the `logging` capability (framework-implemented, no handler
+    /// trait): handlers gain a live `ctx.log` when the client opts in —
+    /// `logging/setLevel` per session on `2025-11-25`, the per-request
+    /// `_meta` `io.modelcontextprotocol/logLevel` on the draft (where the
+    /// feature is deprecated by SEP-2577 but remains functional).
+    #[must_use]
+    pub fn with_logging(mut self) -> Self {
+        self.logging = true;
+        self
+    }
+
     /// Whether `tools/*` is served (drives capability advertisement).
     #[must_use]
     pub fn has_tools(&self) -> bool {
@@ -221,6 +234,12 @@ impl<S: McpServerCore> MethodRouter<S> {
     #[must_use]
     pub fn has_completions(&self) -> bool {
         self.complete.is_some()
+    }
+
+    /// Whether the `logging` capability is enabled.
+    #[must_use]
+    pub fn has_logging(&self) -> bool {
+        self.logging
     }
 
     dispatch_fn!(

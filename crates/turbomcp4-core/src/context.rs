@@ -49,7 +49,12 @@ impl Implementation {
 }
 
 /// MCP logging severity (`LoggingLevel`). Stable across versions.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+///
+/// Variants are declared in ascending RFC 5424 severity, so `Ord` compares
+/// severity: a client-requested minimum of `Info` admits `level >= Info`.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum LogLevel {
     /// Debug-level detail.

@@ -23,6 +23,7 @@ mod builder;
 mod context;
 mod dispatcher;
 mod inflight;
+mod logging;
 mod mrtr;
 mod progress;
 mod response;
@@ -39,6 +40,7 @@ pub use context::{
     ListResourceTemplatesContext, ListResourcesContext, ListToolsContext, ReadResourceContext,
 };
 pub use dispatcher::VersionDispatcher;
+pub use logging::LogSender;
 pub use mrtr::ClientHandle;
 pub use progress::ProgressReporter;
 pub use response::{IntoCallToolResult, IntoGetPromptResult, IntoReadResourceResult};

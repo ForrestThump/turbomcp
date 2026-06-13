@@ -30,6 +30,10 @@ pub struct SessionState {
     /// The client's declared capabilities (kept as raw JSON; the dispatcher
     /// injects it into [`turbomcp4_core::RequestContext::client_capabilities`]).
     pub client_capabilities: Value,
+    /// The minimum severity the client opted into via `logging/setLevel`.
+    /// `None` ⇒ no opt-in yet ⇒ this server sends no `notifications/message`
+    /// (the spec leaves un-opted behavior to the server; we choose opt-in).
+    pub log_level: Option<turbomcp4_core::LogLevel>,
 }
 
 struct Entry {
@@ -104,6 +108,20 @@ impl SessionStore {
             .contains_key(id)
     }
 
+    /// Record the session's `logging/setLevel` choice. Returns whether the
+    /// session exists.
+    pub fn set_log_level(&self, id: &str, level: turbomcp4_core::LogLevel) -> bool {
+        let mut map = self.inner.write().expect("session store lock poisoned");
+        match map.get_mut(id) {
+            Some(entry) => {
+                entry.state.log_level = Some(level);
+                entry.last_seen = Instant::now();
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Terminate a session. Returns whether it existed.
     pub fn remove(&self, id: &str) -> bool {
         self.inner
@@ -144,6 +162,7 @@ mod tests {
             version: ProtocolVersion::V2025_11_25,
             client_info: Implementation::new("test-client", "1.0"),
             client_capabilities: serde_json::json!({}),
+            log_level: None,
         }
     }
 

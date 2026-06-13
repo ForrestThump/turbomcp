@@ -28,6 +28,10 @@ pub mod keys {
     /// Per-request client capabilities (draft stateless model). Gates which
     /// MRTR input requests a server may send (SEP-2322 MUST).
     pub const CLIENT_CAPABILITIES: &str = "io.modelcontextprotocol/clientCapabilities";
+    /// Per-request log-level opt-in (draft; replaces `logging/setLevel`).
+    /// Absent ⇒ the server MUST NOT send `notifications/message` for the
+    /// request.
+    pub const LOG_LEVEL: &str = "io.modelcontextprotocol/logLevel";
 }
 
 /// Internal `_meta` keys: the in-process side-channel a transport (or session
@@ -69,6 +73,7 @@ pub fn is_framework_key(key: &str) -> bool {
             | keys::SUBSCRIPTION_ID
             | keys::CLIENT_INFO
             | keys::CLIENT_CAPABILITIES
+            | keys::LOG_LEVEL
     ) || internal::is_internal_key(key)
 }
 

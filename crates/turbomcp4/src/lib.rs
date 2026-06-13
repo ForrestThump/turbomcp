@@ -24,8 +24,8 @@
 // ---- foundation -------------------------------------------------------------
 
 pub use turbomcp4_core::{
-    Implementation, JsonRpcMessage, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, McpError,
-    McpResult, ProtocolVersion, RequestContext, RequestId,
+    Implementation, JsonRpcMessage, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, LogLevel,
+    McpError, McpResult, ProtocolVersion, RequestContext, RequestId,
 };
 
 /// Version-stable, handler-facing types (the surface user handlers speak).
@@ -44,7 +44,7 @@ pub use turbomcp4_server::{
     CallToolContext, ClientHandle, CompleteContext, GetPromptContext, IntoCallToolResult,
     IntoGetPromptResult, IntoReadResourceResult, IntoServerBuilder, LegacySessionAdapter,
     ListPromptsContext, ListResourceTemplatesContext, ListResourcesContext, ListToolsContext,
-    McpServerCore, MethodRouter, ProgressReporter, ReadResourceContext, ServerBuilder,
+    LogSender, McpServerCore, MethodRouter, ProgressReporter, ReadResourceContext, ServerBuilder,
     ServerNotifier, SessionState, SessionStore, VersionDispatcher, WithCompletions, WithPrompts,
     WithResources, WithTools,
 };
@@ -93,7 +93,7 @@ pub mod __macros {
 /// The common imports for building a server.
 pub mod prelude {
     pub use crate::neutral;
-    pub use turbomcp4_core::{Implementation, McpError, McpResult, RequestContext};
+    pub use turbomcp4_core::{Implementation, LogLevel, McpError, McpResult, RequestContext};
     pub use turbomcp4_server::{
         CallToolContext, CompleteContext, GetPromptContext, IntoServerBuilder, ListPromptsContext,
         ListResourceTemplatesContext, ListResourcesContext, ListToolsContext, McpServerCore,

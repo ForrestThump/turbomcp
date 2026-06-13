@@ -59,6 +59,18 @@ impl<S: McpServerCore> ServerBuilder<S> {
         self
     }
 
+    /// Enable the `logging` capability: handlers gain a live `ctx.log` when
+    /// the client opts in (`logging/setLevel` per session on `2025-11-25`;
+    /// per-request `_meta` `io.modelcontextprotocol/logLevel` on the draft,
+    /// where SEP-2577 deprecates the feature — prefer `stderr`/OpenTelemetry
+    /// for new draft-only servers). Without the opt-in, `ctx.log` drops
+    /// everything, per the logging spec's MUST NOT.
+    #[must_use]
+    pub fn with_logging(mut self) -> Self {
+        self.router = self.router.with_logging();
+        self
+    }
+
     /// Register the `tools/*` capability (requires `S: WithTools`).
     #[must_use]
     pub fn with_tools(mut self) -> Self

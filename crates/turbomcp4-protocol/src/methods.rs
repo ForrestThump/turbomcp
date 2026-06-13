@@ -48,6 +48,9 @@ pub mod request {
     /// `resources/unsubscribe` — drop a `resources/subscribe` subscription
     /// (`2025-11-25`).
     pub const RESOURCES_UNSUBSCRIBE: &str = "resources/unsubscribe";
+    /// `logging/setLevel` — per-session minimum log severity (`2025-11-25`;
+    /// the draft replaced it with the per-request `_meta` `logLevel` key).
+    pub const LOGGING_SET_LEVEL: &str = "logging/setLevel";
 }
 
 /// Notification method names (no response).
