@@ -253,8 +253,21 @@ impl MessageBatch {
         let offset = self.buffer.len();
         let length = payload.len();
 
-        // Extend the buffer
-        let mut buffer = BytesMut::from(self.buffer.as_ref());
+        // Reclaim the accumulator as a `BytesMut` and append in place. When
+        // the buffer is uniquely owned — the common case, since `get`/`iter`
+        // hand out short-lived slices that are dropped before the next `add` —
+        // `try_into_mut` is O(1) and reuses the existing allocation (including
+        // spare capacity), so a sequence of N adds copies each payload exactly
+        // once: O(n) total. Previously this rebuilt the accumulator with
+        // `BytesMut::from(self.buffer.as_ref())` on every call, recopying the
+        // entire prefix each time — O(n) per add, O(n²) over the batch.
+        //
+        // The `unwrap_or_else` fallback only triggers if a caller holds an
+        // outstanding slice across an `add` (so the buffer is shared and can't
+        // be reclaimed in place); it preserves correctness at the old cost.
+        let mut buffer = std::mem::take(&mut self.buffer)
+            .try_into_mut()
+            .unwrap_or_else(|shared| BytesMut::from(shared.as_ref()));
         buffer.extend_from_slice(&payload);
         self.buffer = buffer.freeze();
 
@@ -943,6 +956,57 @@ mod tests {
             assert!(!payload.is_empty());
         }
         assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn test_message_batch_byte_equality_many() {
+        // Every message must round-trip byte-for-byte regardless of batch
+        // size, and offsets must remain contiguous. Distinct, varying-length
+        // payloads catch any off-by-one in the accumulate-in-place path.
+        let n = 500;
+        let payloads: Vec<Vec<u8>> = (0..n)
+            .map(|i| format!("payload-{i}-{}", "z".repeat(i % 37)).into_bytes())
+            .collect();
+
+        let mut batch = MessageBatch::new(n);
+        for (i, p) in payloads.iter().enumerate() {
+            batch.add(MessageId::from(format!("id-{i}")), Bytes::from(p.clone()));
+        }
+
+        assert_eq!(batch.messages.len(), n);
+
+        // Random-access view.
+        for (i, p) in payloads.iter().enumerate() {
+            assert_eq!(batch.get(i).unwrap().as_ref(), p.as_slice(), "get({i})");
+        }
+
+        // Sequential view + offset contiguity.
+        let mut expected_offset = 0;
+        for (idx, (_id, payload)) in batch.iter().enumerate() {
+            assert_eq!(payload.as_ref(), payloads[idx].as_slice(), "iter[{idx}]");
+            let (offset, length) = batch.messages[idx];
+            assert_eq!(offset, expected_offset, "offset[{idx}]");
+            assert_eq!(length, payloads[idx].len(), "length[{idx}]");
+            expected_offset += length;
+        }
+        assert_eq!(expected_offset, batch.buffer.len());
+    }
+
+    #[test]
+    fn test_message_batch_shared_buffer_fallback() {
+        // Holding a slice across an `add` makes the accumulator shared, so the
+        // in-place reclaim cannot apply and `add` falls back to copying. The
+        // result must still be correct, and the previously-taken slice must
+        // remain valid (it owns its own view of the old allocation).
+        let mut batch = MessageBatch::new(4);
+        batch.add(MessageId::from("a"), Bytes::from("first"));
+
+        let held = batch.get(0).unwrap(); // outstanding reference to the buffer
+        batch.add(MessageId::from("b"), Bytes::from("second"));
+
+        assert_eq!(held.as_ref(), b"first");
+        assert_eq!(batch.get(0).unwrap().as_ref(), b"first");
+        assert_eq!(batch.get(1).unwrap().as_ref(), b"second");
     }
 
     #[test]
