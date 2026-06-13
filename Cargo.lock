@@ -6179,6 +6179,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tower",
+ "turbomcp4-auth",
  "turbomcp4-codec",
  "turbomcp4-core",
  "turbomcp4-macros",
@@ -6193,7 +6194,17 @@ dependencies = [
 name = "turbomcp4-auth"
 version = "4.0.0-alpha.1"
 dependencies = [
+ "base64",
+ "futures",
+ "jsonwebtoken",
+ "reqwest 0.13.3",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
  "turbomcp4-core",
+ "turbomcp4-service",
 ]
 
 [[package]]
@@ -6318,9 +6329,11 @@ name = "turbomcp4-transport-http"
 version = "4.0.0-alpha.1"
 dependencies = [
  "axum",
+ "base64",
  "bytes",
  "futures",
  "http-body-util",
+ "jsonwebtoken",
  "reqwest 0.13.3",
  "serde_json",
  "thiserror 2.0.18",
@@ -6328,6 +6341,7 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
+ "turbomcp4-auth",
  "turbomcp4-codec",
  "turbomcp4-core",
  "turbomcp4-protocol",

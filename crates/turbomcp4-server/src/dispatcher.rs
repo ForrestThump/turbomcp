@@ -564,7 +564,8 @@ async fn dispatch_capability<S: McpServerCore, W: WireFamily>(
                     .with_log(log_sender::<W>(req, &ctx, router.has_logging())),
                 params,
             );
-            finish_mrtr::<_, W::CallTool>(id, method, fut, &handle, signer, W::MRTR).await
+            let subject = ctx.identity.subject().map(str::to_owned);
+            finish_mrtr::<_, W::CallTool>(id, method, subject, fut, &handle, signer, W::MRTR).await
         }
         methods::request::RESOURCES_LIST => {
             let fut =
@@ -596,7 +597,9 @@ async fn dispatch_capability<S: McpServerCore, W: WireFamily>(
                     .with_log(log_sender::<W>(req, &ctx, router.has_logging())),
                 params,
             );
-            finish_mrtr::<_, W::ReadResource>(id, method, fut, &handle, signer, W::MRTR).await
+            let subject = ctx.identity.subject().map(str::to_owned);
+            finish_mrtr::<_, W::ReadResource>(id, method, subject, fut, &handle, signer, W::MRTR)
+                .await
         }
         methods::request::PROMPTS_LIST => {
             let fut =
@@ -620,7 +623,8 @@ async fn dispatch_capability<S: McpServerCore, W: WireFamily>(
                     .with_log(log_sender::<W>(req, &ctx, router.has_logging())),
                 params,
             );
-            finish_mrtr::<_, W::GetPrompt>(id, method, fut, &handle, signer, W::MRTR).await
+            let subject = ctx.identity.subject().map(str::to_owned);
+            finish_mrtr::<_, W::GetPrompt>(id, method, subject, fut, &handle, signer, W::MRTR).await
         }
         methods::request::COMPLETION_COMPLETE => {
             let params = match parse_complete_params(req.params.as_ref()) {
@@ -674,7 +678,7 @@ fn mrtr_handle<W: WireFamily>(
         .and_then(|p| serde_json::from_value(p.clone()).ok())
         .unwrap_or_default();
     let state_in = match &fields.request_state {
-        Some(token) => Some(signer.verify(&req.method, token)?),
+        Some(token) => Some(signer.verify(&req.method, ctx.identity.subject(), token)?),
         None => None,
     };
     Ok(ClientHandle::mrtr(
@@ -691,6 +695,7 @@ fn mrtr_handle<W: WireFamily>(
 async fn finish_mrtr<N, WIRE>(
     id: RequestId,
     method: &str,
+    subject: Option<String>,
     fut: Option<BoxFuture<'static, Result<N, McpError>>>,
     handle: &ClientHandle,
     signer: &StateSigner,
@@ -727,7 +732,7 @@ where
                 );
             }
             if let Some(data) = state_out {
-                match signer.sign(method, &data) {
+                match signer.sign(method, subject.as_deref(), &data) {
                     Ok(token) => {
                         result.insert("requestState".to_owned(), serde_json::json!(token));
                     }

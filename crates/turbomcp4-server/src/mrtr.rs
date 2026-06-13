@@ -12,8 +12,9 @@
 //! `requestState` is the handler's opaque resume blob. It round-trips through
 //! the client, so it is attacker-controlled input (mrtr spec MUST): outbound
 //! state is HMAC-SHA256-signed with a per-dispatcher secret and the protected
-//! payload carries the method name and an expiry; inbound state that fails
-//! any check is rejected with `-32602` before the handler runs.
+//! payload binds the method name, the authenticated principal (a state minted
+//! for one subject can't be replayed by another), and an expiry; inbound state
+//! that fails any check is rejected with `-32602` before the handler runs.
 //!
 //! On `2025-11-25` the same handle calls go out as **inline bidirectional
 //! requests**: a real `elicitation/create` (etc.) JSON-RPC request is written
@@ -67,15 +68,24 @@ impl StateSigner {
 
     /// Wrap handler `data` into the opaque wire string:
     /// `v1.<b64url(payload)>.<b64url(tag)>` where the payload binds the
-    /// originating `method` and an expiry alongside the data.
-    pub(crate) fn sign(&self, method: &str, data: &Value) -> McpResult<String> {
+    /// originating `method`, the authenticated `subject` (principal binding —
+    /// a state minted for one principal can't be replayed by another), and an
+    /// expiry alongside the data. `subject` is `None` for an unauthenticated
+    /// request.
+    pub(crate) fn sign(
+        &self,
+        method: &str,
+        subject: Option<&str>,
+        data: &Value,
+    ) -> McpResult<String> {
         let expires = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs()
             + STATE_TTL.as_secs();
-        let payload = serde_json::to_vec(&json!({ "m": method, "exp": expires, "d": data }))
-            .map_err(|e| McpError::internal(format!("serialize request state: {e}")))?;
+        let payload =
+            serde_json::to_vec(&json!({ "m": method, "sub": subject, "exp": expires, "d": data }))
+                .map_err(|e| McpError::internal(format!("serialize request state: {e}")))?;
         if payload.len() > MAX_STATE_BYTES {
             return Err(McpError::invalid_params(format!(
                 "request state exceeds the {MAX_STATE_BYTES}-byte limit"
@@ -96,7 +106,12 @@ impl StateSigner {
     /// The error is deliberately uniform — a forger learns nothing about
     /// *which* check failed. The MAC comparison is constant-time
     /// ([`Mac::verify_slice`]).
-    pub(crate) fn verify(&self, method: &str, token: &str) -> McpResult<Value> {
+    pub(crate) fn verify(
+        &self,
+        method: &str,
+        subject: Option<&str>,
+        token: &str,
+    ) -> McpResult<Value> {
         fn rejected() -> McpError {
             McpError::invalid_params("requestState failed verification")
         }
@@ -117,6 +132,11 @@ impl StateSigner {
 
         let parsed: Value = serde_json::from_slice(&payload).map_err(|_| rejected())?;
         if parsed.get("m").and_then(Value::as_str) != Some(method) {
+            return Err(rejected());
+        }
+        // Principal binding: the redeeming subject must match the minting one
+        // (both `None` for unauthenticated requests).
+        if parsed.get("sub").and_then(Value::as_str) != subject {
             return Err(rejected());
         }
         let now = SystemTime::now()
@@ -578,24 +598,48 @@ mod tests {
     #[test]
     fn sign_verify_roundtrip_binds_method_and_rejects_tampering() {
         let signer = StateSigner::new();
-        let token = signer.sign("tools/call", &json!({"step": 2})).unwrap();
+        let token = signer
+            .sign("tools/call", None, &json!({"step": 2}))
+            .unwrap();
         assert_eq!(
-            signer.verify("tools/call", &token).unwrap(),
+            signer.verify("tools/call", None, &token).unwrap(),
             json!({"step": 2})
         );
         // Bound to the originating method.
-        assert!(signer.verify("prompts/get", &token).is_err());
+        assert!(signer.verify("prompts/get", None, &token).is_err());
         // A flipped byte fails the MAC.
         let mut tampered = token.clone().into_bytes();
         let mid = tampered.len() / 2;
         tampered[mid] = if tampered[mid] == b'A' { b'B' } else { b'A' };
         assert!(
             signer
-                .verify("tools/call", &String::from_utf8(tampered).unwrap())
+                .verify("tools/call", None, &String::from_utf8(tampered).unwrap())
                 .is_err()
         );
         // A different server's signer rejects it too.
-        assert!(StateSigner::new().verify("tools/call", &token).is_err());
+        assert!(
+            StateSigner::new()
+                .verify("tools/call", None, &token)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn state_is_bound_to_the_minting_principal() {
+        let signer = StateSigner::new();
+        let token = signer
+            .sign("tools/call", Some("alice"), &json!({"step": 1}))
+            .unwrap();
+        // Same principal redeems it.
+        assert!(signer.verify("tools/call", Some("alice"), &token).is_ok());
+        // A different principal — even authenticated — cannot.
+        assert!(
+            signer
+                .verify("tools/call", Some("mallory"), &token)
+                .is_err()
+        );
+        // Nor can an unauthenticated retry of an authenticated state.
+        assert!(signer.verify("tools/call", None, &token).is_err());
     }
 
     #[test]
@@ -603,7 +647,7 @@ mod tests {
         let signer = StateSigner::new();
         let big = json!({ "blob": "x".repeat(MAX_STATE_BYTES) });
         assert!(matches!(
-            signer.sign("tools/call", &big),
+            signer.sign("tools/call", None, &big),
             Err(McpError::InvalidParams(_))
         ));
     }
