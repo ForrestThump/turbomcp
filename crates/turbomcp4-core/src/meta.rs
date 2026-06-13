@@ -52,6 +52,15 @@ pub mod internal {
     /// stream is the cancellation signal (transports spec §Cancellation).
     pub const CONNECTION_ID: &str = "io.turbomcp.internal/connectionId";
 
+    /// The authenticated principal for this request, as
+    /// `{ "sub": String, "claims": Object }`. Injected by the HTTP endpoint
+    /// after it validates the `Authorization` bearer token (auth is
+    /// HTTP-transport-level — the token never rides `_meta`); the dispatcher
+    /// lifts it into [`crate::RequestContext::identity`]. Sanitized from
+    /// inbound client messages like every internal key, so a client cannot
+    /// forge an identity.
+    pub const IDENTITY: &str = "io.turbomcp.internal/identity";
+
     /// Whether `key` is in the internal (in-process only) namespace.
     #[must_use]
     pub fn is_internal_key(key: &str) -> bool {

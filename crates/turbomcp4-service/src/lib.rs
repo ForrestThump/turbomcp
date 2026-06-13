@@ -17,12 +17,14 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod auth;
 mod error;
 mod middleware;
 pub mod outbound;
 mod serve;
 mod transport;
 
+pub use auth::{AuthDecision, AuthFuture, HttpAuthenticator};
 pub use error::{ProtocolError, mcp_to_jsonrpc_error};
 pub use middleware::{Tracing, TracingLayer};
 pub use serve::{ServeConfig, serve, serve_with};
