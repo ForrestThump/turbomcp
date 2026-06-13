@@ -93,8 +93,8 @@ impl<S: JwkSource> JwtValidator<S> {
     }
 
     async fn validate_inner(&self, token: &str) -> Result<AuthPrincipal, AuthError> {
-        let header =
-            decode_header(token).map_err(|e| AuthError::InvalidToken(format!("bad header: {e}")))?;
+        let header = decode_header(token)
+            .map_err(|e| AuthError::InvalidToken(format!("bad header: {e}")))?;
         if !self.algorithms.contains(&header.alg) {
             return Err(AuthError::InvalidToken(format!(
                 "algorithm {:?} not accepted",

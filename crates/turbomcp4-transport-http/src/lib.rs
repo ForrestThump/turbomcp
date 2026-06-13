@@ -68,6 +68,7 @@ use std::convert::Infallible;
 use std::future::{Future, poll_fn};
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Bytes;
@@ -81,7 +82,9 @@ use serde_json::json;
 use tower_http::cors::CorsLayer;
 use turbomcp4_codec::{Codec, DefaultCodec};
 use turbomcp4_core::{JsonRpcMessage, ProtocolVersion, RequestId, meta};
-use turbomcp4_service::{CancellationToken, McpService, ProtocolError, outbound};
+use turbomcp4_service::{
+    AuthDecision, CancellationToken, HttpAuthenticator, McpService, ProtocolError, outbound,
+};
 
 /// The session header of the `2025-11-25` Streamable HTTP transport.
 const HEADER_SESSION_ID: HeaderName = HeaderName::from_static("mcp-session-id");
@@ -105,9 +108,12 @@ enum OriginPolicy {
     Any,
 }
 
+/// The well-known path RFC 9728 Protected Resource Metadata is served at.
+const RESOURCE_METADATA_PATH: &str = "/.well-known/oauth-protected-resource";
+
 /// Configuration for the HTTP endpoint. Construct with [`HttpConfig::new`] and
 /// chain the builder methods.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct HttpConfig {
     path: String,
     max_body_bytes: usize,
@@ -115,6 +121,20 @@ pub struct HttpConfig {
     cors: bool,
     shutdown: CancellationToken,
     sse_keepalive: Duration,
+    authenticator: Option<Arc<dyn HttpAuthenticator>>,
+}
+
+impl core::fmt::Debug for HttpConfig {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("HttpConfig")
+            .field("path", &self.path)
+            .field("max_body_bytes", &self.max_body_bytes)
+            .field("origins", &self.origins)
+            .field("cors", &self.cors)
+            .field("sse_keepalive", &self.sse_keepalive)
+            .field("authenticator", &self.authenticator.is_some())
+            .finish()
+    }
 }
 
 impl Default for HttpConfig {
@@ -126,6 +146,7 @@ impl Default for HttpConfig {
             cors: false,
             shutdown: CancellationToken::new(),
             sse_keepalive: DEFAULT_SSE_KEEPALIVE,
+            authenticator: None,
         }
     }
 }
@@ -191,6 +212,19 @@ impl HttpConfig {
         self.sse_keepalive = interval;
         self
     }
+
+    /// Protect the endpoint as an OAuth 2.1 resource server: every `POST`/`GET`
+    /// must carry a valid `Authorization: Bearer` token (validated by
+    /// `authenticator`, e.g. `turbomcp4_auth::ResourceServer`), and the RFC
+    /// 9728 metadata document is served at
+    /// `/.well-known/oauth-protected-resource`. Unauthenticated requests get
+    /// the `401`/`403` + `WWW-Authenticate` challenges. stdio is unaffected
+    /// (the MCP spec has no stdio auth).
+    #[must_use]
+    pub fn with_authenticator(mut self, authenticator: Arc<dyn HttpAuthenticator>) -> Self {
+        self.authenticator = Some(authenticator);
+        self
+    }
 }
 
 /// Errors from running the HTTP transport.
@@ -202,14 +236,16 @@ pub enum HttpError {
     Io(#[from] std::io::Error),
 }
 
-/// Per-request shared state: the service to dispatch into, the codec, and the
-/// Origin policy. Cheap to clone (the service clones per request by contract).
+/// Per-request shared state: the service to dispatch into, the codec, the
+/// Origin policy, and the optional resource-server authenticator. Cheap to
+/// clone (the service clones per request by contract).
 #[derive(Clone)]
 struct HttpState<S> {
     service: S,
     codec: DefaultCodec,
     origins: OriginPolicy,
     sse_keepalive: Duration,
+    authenticator: Option<Arc<dyn HttpAuthenticator>>,
 }
 
 /// Build the configured axum [`Router`] for `service` without binding a socket —
@@ -225,13 +261,21 @@ where
         codec: DefaultCodec::default(),
         origins: config.origins.clone(),
         sse_keepalive: config.sse_keepalive,
+        authenticator: config.authenticator.clone(),
     };
-    let app = Router::new()
+    let mut app = Router::new()
         .route(
             &config.path,
             post(mcp_post::<S>).get(mcp_get::<S>).delete(mcp_delete),
         )
         .layer(DefaultBodyLimit::max(config.max_body_bytes));
+    // RFC 9728 Protected Resource Metadata is public (no auth) discovery.
+    if config.authenticator.is_some() {
+        app = app.route(
+            RESOURCE_METADATA_PATH,
+            axum::routing::get(resource_metadata::<S>),
+        );
+    }
     let app = if config.cors {
         app.layer(CorsLayer::permissive())
     } else {
@@ -283,6 +327,13 @@ where
     // Internal `_meta` is transport-owned: strip anything the client forged
     // before asserting our own (see `turbomcp4_core::meta::internal`).
     meta::sanitize_inbound(&mut msg);
+
+    // Resource-server auth (if configured): validate the bearer token and
+    // inject the principal into internal `_meta` — after sanitize, so a
+    // forged identity can't survive. A rejected request never dispatches.
+    if let Some(rejection) = enforce_auth(&state, &headers, Some(&mut msg)).await {
+        return rejection;
+    }
 
     // Transport spec: an explicit but invalid/unsupported version header is 400.
     let header_version = headers
@@ -657,6 +708,10 @@ where
     if let Some(rejection) = check_origin(&state.origins, &headers) {
         return rejection;
     }
+    // The GET stream is part of the protected resource; require auth too.
+    if let Some(rejection) = enforce_auth(&state, &headers, None).await {
+        return rejection;
+    }
     let Some(sid) = headers
         .get(&HEADER_SESSION_ID)
         .and_then(|v| v.to_str().ok())
@@ -685,6 +740,58 @@ async fn mcp_delete() -> Response {
         "client-initiated session termination is not supported; sessions expire by eviction",
     )
         .into_response()
+}
+
+/// Serve the RFC 9728 Protected Resource Metadata document (public, no auth).
+/// Only routed when an authenticator is configured.
+async fn resource_metadata<S>(State(state): State<HttpState<S>>) -> Response
+where
+    S: McpService + Clone + Sync,
+    S::Future: Send + 'static,
+{
+    match &state.authenticator {
+        Some(authenticator) => Json(authenticator.resource_metadata()).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+// ---- auth --------------------------------------------------------------------
+
+/// Enforce resource-server auth when configured. Returns `Some(challenge)` to
+/// reject (401/403 + `WWW-Authenticate`); returns `None` to allow — injecting
+/// the validated principal into `msg`'s internal `_meta` (when a message is
+/// given) so the dispatcher lifts it into the request's identity. A `None`
+/// authenticator is an open endpoint (allow).
+async fn enforce_auth<S>(
+    state: &HttpState<S>,
+    headers: &HeaderMap,
+    msg: Option<&mut JsonRpcMessage>,
+) -> Option<Response> {
+    let authenticator = state.authenticator.as_ref()?;
+    let authorization = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok());
+    match authenticator.authenticate(authorization).await {
+        AuthDecision::Allow(principal) => {
+            if let Some(msg) = msg {
+                meta::set_request_meta(msg, meta::internal::IDENTITY, principal);
+            }
+            None
+        }
+        AuthDecision::Challenge {
+            status,
+            www_authenticate,
+        } => Some(challenge_response(status, &www_authenticate)),
+    }
+}
+
+/// Build an auth-challenge response: the status (401/403) plus the
+/// `WWW-Authenticate` header.
+fn challenge_response(status: u16, www_authenticate: &str) -> Response {
+    let status = StatusCode::from_u16(status).unwrap_or(StatusCode::UNAUTHORIZED);
+    let header = HeaderValue::from_str(www_authenticate)
+        .unwrap_or_else(|_| HeaderValue::from_static("Bearer"));
+    (status, [(axum::http::header::WWW_AUTHENTICATE, header)]).into_response()
 }
 
 // ---- helpers -----------------------------------------------------------------

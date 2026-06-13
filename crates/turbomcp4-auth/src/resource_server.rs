@@ -33,11 +33,7 @@ impl<V: BearerValidator> ResourceServer<V> {
     /// absolute `…/.well-known/oauth-protected-resource` URL, echoed in the
     /// `WWW-Authenticate` challenge so clients can fetch it).
     #[must_use]
-    pub fn new(
-        validator: V,
-        metadata: ResourceMetadata,
-        metadata_url: impl Into<String>,
-    ) -> Self {
+    pub fn new(validator: V, metadata: ResourceMetadata, metadata_url: impl Into<String>) -> Self {
         Self {
             validator,
             metadata,
@@ -50,10 +46,7 @@ impl<V: BearerValidator> ResourceServer<V> {
     /// scope policy is a separate, later concern). A token missing any of them
     /// is answered 403 `insufficient_scope`.
     #[must_use]
-    pub fn required_scopes(
-        mut self,
-        scopes: impl IntoIterator<Item = impl Into<String>>,
-    ) -> Self {
+    pub fn required_scopes(mut self, scopes: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.required_scopes = scopes.into_iter().map(Into::into).collect();
         self
     }
@@ -172,7 +165,10 @@ mod tests {
     fn www_authenticate_shape() {
         let h = www_authenticate(&[
             ("error".to_owned(), "invalid_token".to_owned()),
-            ("resource_metadata".to_owned(), "https://x/.well-known".to_owned()),
+            (
+                "resource_metadata".to_owned(),
+                "https://x/.well-known".to_owned(),
+            ),
         ]);
         assert_eq!(
             h,

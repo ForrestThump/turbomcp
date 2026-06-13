@@ -72,6 +72,16 @@ pub mod http {
     pub use turbomcp4_transport_http::{HttpConfig, HttpError, router, serve_http};
 }
 
+/// OAuth 2.1 resource-server auth: bearer-token validation + RFC 9728 metadata.
+/// Enable with the `auth` feature, then protect an HTTP endpoint with
+/// [`HttpConfig::with_authenticator`](http::HttpConfig::with_authenticator).
+#[cfg(feature = "auth")]
+pub use turbomcp4_auth as auth;
+
+/// The HTTP authentication seam (implemented by [`auth::ResourceServer`]).
+#[cfg(feature = "http")]
+pub use turbomcp4_service::{AuthDecision, HttpAuthenticator};
+
 // ---- macros -----------------------------------------------------------------
 
 pub use turbomcp4_macros::{mcp_header, prompt, resource, server, tool};

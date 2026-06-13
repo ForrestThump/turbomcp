@@ -15,7 +15,10 @@ use crate::error::AuthError;
 pub trait JwkSource: Send + Sync {
     /// The decoding key for `kid` (or the sole key when the source has exactly
     /// one and `kid` is absent). Async so HTTP-backed sources can fetch.
-    fn decoding_key<'a>(&'a self, kid: Option<&'a str>) -> BoxFuture<'a, Result<DecodingKey, AuthError>>;
+    fn decoding_key<'a>(
+        &'a self,
+        kid: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<DecodingKey, AuthError>>;
 }
 
 /// A fixed set of JWKs. Construct from a JWKS JSON document (the kind an
@@ -51,9 +54,7 @@ impl StaticJwks {
                 _ => None,
             },
         }
-        .ok_or_else(|| {
-            AuthError::KeyUnavailable(format!("no JWK for kid {kid:?}"))
-        })?;
+        .ok_or_else(|| AuthError::KeyUnavailable(format!("no JWK for kid {kid:?}")))?;
         DecodingKey::from_jwk(jwk).map_err(|e| AuthError::KeyUnavailable(format!("bad JWK: {e}")))
     }
 }

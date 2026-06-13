@@ -28,8 +28,7 @@ fn jwks_json() -> String {
 /// A `ResourceServer` over the test JWKS, requiring `mcp:use`.
 fn resource_server() -> ResourceServer<JwtValidator<StaticJwks>> {
     let jwks = StaticJwks::from_json(&jwks_json()).expect("valid jwks");
-    let validator =
-        JwtValidator::new(jwks, RESOURCE, ISSUER).algorithms(vec![Algorithm::HS256]);
+    let validator = JwtValidator::new(jwks, RESOURCE, ISSUER).algorithms(vec![Algorithm::HS256]);
     let metadata = ResourceMetadata::new(RESOURCE, [ISSUER]).scopes_supported(["mcp:use"]);
     ResourceServer::new(validator, metadata, METADATA_URL).required_scopes(["mcp:use"])
 }
@@ -96,8 +95,10 @@ async fn wrong_audience_is_401_invalid_token() {
     let rs = resource_server();
     let mut claims = good_claims();
     claims["aud"] = json!("https://other.example.com");
-    let AuthDecision::Challenge { status, www_authenticate } =
-        rs.authenticate(Some(&bearer(&sign(claims)))).await
+    let AuthDecision::Challenge {
+        status,
+        www_authenticate,
+    } = rs.authenticate(Some(&bearer(&sign(claims)))).await
     else {
         panic!("expected challenge");
     };
@@ -146,8 +147,10 @@ async fn insufficient_scope_is_403() {
     let rs = resource_server();
     let mut claims = good_claims();
     claims["scope"] = json!("files:read"); // lacks mcp:use
-    let AuthDecision::Challenge { status, www_authenticate } =
-        rs.authenticate(Some(&bearer(&sign(claims)))).await
+    let AuthDecision::Challenge {
+        status,
+        www_authenticate,
+    } = rs.authenticate(Some(&bearer(&sign(claims)))).await
     else {
         panic!("expected challenge");
     };
@@ -159,8 +162,10 @@ async fn insufficient_scope_is_403() {
 #[tokio::test]
 async fn malformed_header_is_401_invalid_token() {
     let rs = resource_server();
-    let AuthDecision::Challenge { status, www_authenticate } =
-        rs.authenticate(Some("Basic abc123")).await
+    let AuthDecision::Challenge {
+        status,
+        www_authenticate,
+    } = rs.authenticate(Some("Basic abc123")).await
     else {
         panic!("expected challenge");
     };

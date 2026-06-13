@@ -44,10 +44,7 @@ impl ResourceMetadata {
 
     /// Declare the scopes the resource recognizes (RFC 9728 `scopes_supported`).
     #[must_use]
-    pub fn scopes_supported(
-        mut self,
-        scopes: impl IntoIterator<Item = impl Into<String>>,
-    ) -> Self {
+    pub fn scopes_supported(mut self, scopes: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.scopes_supported = Some(scopes.into_iter().map(Into::into).collect());
         self
     }
