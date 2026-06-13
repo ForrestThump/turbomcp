@@ -6307,6 +6307,7 @@ name = "turbomcp4-service"
 version = "4.0.0-alpha.1"
 dependencies = [
  "futures",
+ "governor",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",

@@ -66,13 +66,14 @@
 use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::future::{Future, poll_fn};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, FromRequestParts, State};
+use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -83,7 +84,8 @@ use tower_http::cors::CorsLayer;
 use turbomcp4_codec::{Codec, DefaultCodec};
 use turbomcp4_core::{JsonRpcMessage, ProtocolVersion, RequestId, meta};
 use turbomcp4_service::{
-    AuthDecision, CancellationToken, HttpAuthenticator, McpService, ProtocolError, outbound,
+    AuthDecision, CancellationToken, HttpAuthenticator, McpService, ProtocolError, RateKey,
+    RateLimiter, outbound,
 };
 
 /// The session header of the `2025-11-25` Streamable HTTP transport.
@@ -122,6 +124,7 @@ pub struct HttpConfig {
     shutdown: CancellationToken,
     sse_keepalive: Duration,
     authenticator: Option<Arc<dyn HttpAuthenticator>>,
+    rate_limiter: Option<Arc<dyn RateLimiter>>,
 }
 
 impl core::fmt::Debug for HttpConfig {
@@ -133,6 +136,7 @@ impl core::fmt::Debug for HttpConfig {
             .field("cors", &self.cors)
             .field("sse_keepalive", &self.sse_keepalive)
             .field("authenticator", &self.authenticator.is_some())
+            .field("rate_limiter", &self.rate_limiter.is_some())
             .finish()
     }
 }
@@ -147,6 +151,7 @@ impl Default for HttpConfig {
             shutdown: CancellationToken::new(),
             sse_keepalive: DEFAULT_SSE_KEEPALIVE,
             authenticator: None,
+            rate_limiter: None,
         }
     }
 }
@@ -225,6 +230,20 @@ impl HttpConfig {
         self.authenticator = Some(authenticator);
         self
     }
+
+    /// Rate-limit the endpoint. Each request is charged against an
+    /// identity-derived [`RateKey`] — per authenticated subject when the
+    /// request carries a valid bearer token, otherwise per source IP — and an
+    /// over-budget request gets `429 Too Many Requests` + `Retry-After` before
+    /// it ever reaches a handler. Pair with
+    /// [`GovernorRateLimiter`](turbomcp4_service::GovernorRateLimiter) for the
+    /// in-process default. stdio is never rate-limited (single trusted local
+    /// connection).
+    #[must_use]
+    pub fn with_rate_limiter(mut self, rate_limiter: Arc<dyn RateLimiter>) -> Self {
+        self.rate_limiter = Some(rate_limiter);
+        self
+    }
 }
 
 /// Errors from running the HTTP transport.
@@ -246,6 +265,7 @@ struct HttpState<S> {
     origins: OriginPolicy,
     sse_keepalive: Duration,
     authenticator: Option<Arc<dyn HttpAuthenticator>>,
+    rate_limiter: Option<Arc<dyn RateLimiter>>,
 }
 
 /// Build the configured axum [`Router`] for `service` without binding a socket —
@@ -262,6 +282,7 @@ where
         origins: config.origins.clone(),
         sse_keepalive: config.sse_keepalive,
         authenticator: config.authenticator.clone(),
+        rate_limiter: config.rate_limiter.clone(),
     };
     let mut app = Router::new()
         .route(
@@ -302,15 +323,25 @@ where
     let app = router(service, config);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(%addr, "turbomcp http transport listening");
-    axum::serve(listener, app.into_make_service())
-        .with_graceful_shutdown(async move { shutdown.cancelled().await })
-        .await?;
+    // `with_connect_info` so the rate limiter can key anonymous requests on the
+    // peer IP (a no-op when no limiter is configured).
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move { shutdown.cancelled().await })
+    .await?;
     Ok(())
 }
 
 // ---- handlers ----------------------------------------------------------------
 
-async fn mcp_post<S>(State(state): State<HttpState<S>>, headers: HeaderMap, body: Bytes) -> Response
+async fn mcp_post<S>(
+    State(state): State<HttpState<S>>,
+    PeerIp(peer_ip): PeerIp,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response
 where
     S: McpService + Clone + Sync,
     S::Future: Send + 'static,
@@ -331,7 +362,15 @@ where
     // Resource-server auth (if configured): validate the bearer token and
     // inject the principal into internal `_meta` — after sanitize, so a
     // forged identity can't survive. A rejected request never dispatches.
-    if let Some(rejection) = enforce_auth(&state, &headers, Some(&mut msg)).await {
+    let subject = match enforce_auth(&state, &headers, Some(&mut msg)).await {
+        Ok(subject) => subject,
+        Err(rejection) => return rejection,
+    };
+
+    // Rate limit (if configured) per identity: authenticated → per-subject,
+    // anonymous → per source IP. Over budget → 429 + Retry-After, before any
+    // dispatch.
+    if let Some(rejection) = enforce_rate_limit(&state, subject.as_deref(), peer_ip) {
         return rejection;
     }
 
@@ -700,7 +739,11 @@ fn sse_response(
 ///
 /// The draft never GETs — it subscribes via `subscriptions/listen` over POST —
 /// so a session-less GET answers `405`, which the spec permits.
-async fn mcp_get<S>(State(state): State<HttpState<S>>, headers: HeaderMap) -> Response
+async fn mcp_get<S>(
+    State(state): State<HttpState<S>>,
+    PeerIp(peer_ip): PeerIp,
+    headers: HeaderMap,
+) -> Response
 where
     S: McpService + Clone + Sync,
     S::Future: Send + 'static,
@@ -709,7 +752,11 @@ where
         return rejection;
     }
     // The GET stream is part of the protected resource; require auth too.
-    if let Some(rejection) = enforce_auth(&state, &headers, None).await {
+    let subject = match enforce_auth(&state, &headers, None).await {
+        Ok(subject) => subject,
+        Err(rejection) => return rejection,
+    };
+    if let Some(rejection) = enforce_rate_limit(&state, subject.as_deref(), peer_ip) {
         return rejection;
     }
     let Some(sid) = headers
@@ -757,31 +804,38 @@ where
 
 // ---- auth --------------------------------------------------------------------
 
-/// Enforce resource-server auth when configured. Returns `Some(challenge)` to
-/// reject (401/403 + `WWW-Authenticate`); returns `None` to allow — injecting
-/// the validated principal into `msg`'s internal `_meta` (when a message is
-/// given) so the dispatcher lifts it into the request's identity. A `None`
-/// authenticator is an open endpoint (allow).
+/// Enforce resource-server auth when configured. `Err(challenge)` rejects the
+/// request (401/403 + `WWW-Authenticate`). `Ok(subject)` allows it, yielding the
+/// authenticated subject (`None` = anonymous, i.e. no authenticator configured)
+/// and — when a message is given — injecting the validated principal into its
+/// internal `_meta` so the dispatcher lifts it into the request's identity. A
+/// `None` authenticator is an open endpoint (allow, anonymous).
 async fn enforce_auth<S>(
     state: &HttpState<S>,
     headers: &HeaderMap,
     msg: Option<&mut JsonRpcMessage>,
-) -> Option<Response> {
-    let authenticator = state.authenticator.as_ref()?;
+) -> Result<Option<String>, Response> {
+    let Some(authenticator) = state.authenticator.as_ref() else {
+        return Ok(None);
+    };
     let authorization = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok());
     match authenticator.authenticate(authorization).await {
         AuthDecision::Allow(principal) => {
+            let subject = principal
+                .get("sub")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned);
             if let Some(msg) = msg {
                 meta::set_request_meta(msg, meta::internal::IDENTITY, principal);
             }
-            None
+            Ok(subject)
         }
         AuthDecision::Challenge {
             status,
             www_authenticate,
-        } => Some(challenge_response(status, &www_authenticate)),
+        } => Err(challenge_response(status, &www_authenticate)),
     }
 }
 
@@ -792,6 +846,66 @@ fn challenge_response(status: u16, www_authenticate: &str) -> Response {
     let header = HeaderValue::from_str(www_authenticate)
         .unwrap_or_else(|_| HeaderValue::from_static("Bearer"));
     (status, [(axum::http::header::WWW_AUTHENTICATE, header)]).into_response()
+}
+
+// ---- rate limiting -----------------------------------------------------------
+
+/// The request's peer IP, if axum captured one. An infallible extractor: a
+/// real socket carries `ConnectInfo<SocketAddr>` in the request extensions
+/// (set by `into_make_service_with_connect_info`); oneshot/test harnesses and
+/// mounts without connect info simply have none. `Option<ConnectInfo<_>>` can't
+/// be used directly — axum 0.8's `Option` extractor needs
+/// `OptionalFromRequestParts`, which `ConnectInfo` doesn't implement.
+struct PeerIp(Option<IpAddr>);
+
+impl<St: Send + Sync> FromRequestParts<St> for PeerIp {
+    type Rejection = Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &St) -> Result<Self, Infallible> {
+        Ok(PeerIp(
+            parts
+                .extensions
+                .get::<ConnectInfo<SocketAddr>>()
+                .map(|ConnectInfo(addr)| addr.ip()),
+        ))
+    }
+}
+
+/// Enforce the rate limit when configured. Charges the request against an
+/// identity-derived [`RateKey`] — per authenticated `subject`, else per source
+/// IP, else a single global bucket — and returns `Some(429)` if over budget.
+fn enforce_rate_limit<S>(
+    state: &HttpState<S>,
+    subject: Option<&str>,
+    peer_ip: Option<IpAddr>,
+) -> Option<Response> {
+    let limiter = state.rate_limiter.as_ref()?;
+    let key = match subject {
+        Some(sub) => RateKey::Subject(sub.to_owned()),
+        None => peer_ip.map_or(RateKey::Global, RateKey::Ip),
+    };
+    match limiter.check(&key) {
+        Ok(()) => None,
+        Err(retry_after) => Some(too_many_requests(retry_after)),
+    }
+}
+
+/// `429 Too Many Requests` with a `Retry-After` header (seconds, rounded up).
+fn too_many_requests(retry_after: Duration) -> Response {
+    // Round up to whole seconds; a sub-second wait still asks for at least 1s.
+    let secs = retry_after.as_secs() + u64::from(retry_after.subsec_nanos() > 0);
+    let secs = secs.max(1);
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": null,
+        "error": { "code": -32000, "message": "rate limit exceeded" },
+    });
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [(header::RETRY_AFTER, secs.to_string())],
+        Json(body),
+    )
+        .into_response()
 }
 
 // ---- helpers -----------------------------------------------------------------

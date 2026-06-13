@@ -82,6 +82,11 @@ pub use turbomcp4_auth as auth;
 #[cfg(feature = "http")]
 pub use turbomcp4_service::{AuthDecision, HttpAuthenticator};
 
+/// The HTTP rate-limiting seam + the in-process `governor`-backed default.
+/// Apply with [`HttpConfig::with_rate_limiter`](http::HttpConfig::with_rate_limiter).
+#[cfg(feature = "http")]
+pub use turbomcp4_service::{GovernorRateLimiter, RateKey, RateLimiter};
+
 // ---- macros -----------------------------------------------------------------
 
 pub use turbomcp4_macros::{mcp_header, prompt, resource, server, tool};

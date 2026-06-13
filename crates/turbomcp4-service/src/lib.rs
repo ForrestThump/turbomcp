@@ -21,12 +21,14 @@ mod auth;
 mod error;
 mod middleware;
 pub mod outbound;
+mod ratelimit;
 mod serve;
 mod transport;
 
 pub use auth::{AuthDecision, AuthFuture, HttpAuthenticator};
 pub use error::{ProtocolError, mcp_to_jsonrpc_error};
 pub use middleware::{Tracing, TracingLayer};
+pub use ratelimit::{GovernorRateLimiter, RateKey, RateLimiter};
 pub use serve::{ServeConfig, serve, serve_with};
 pub use transport::Transport;
 
