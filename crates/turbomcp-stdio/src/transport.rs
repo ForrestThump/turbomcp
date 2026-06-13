@@ -42,6 +42,16 @@ type BoxedAsyncWrite = Pin<Box<dyn AsyncWrite + Send + Sync + 'static>>;
 type StdinReader = FramedRead<BoxedAsyncBufRead, LinesCodec>;
 type StdoutWriter = FramedWrite<BoxedAsyncWrite, LinesCodec>;
 
+/// Capacity of the inbound message channel between the reader task and the
+/// consumer.
+///
+/// Kept small deliberately: STDIO is a single-peer transport and the reader
+/// task sends with `send().await`, so a full channel parks the reader and
+/// applies real backpressure to the peer. A large buffer (the previous 1000)
+/// just lets up to 1000 potentially-large messages pile up in memory before
+/// backpressure engages, with no throughput benefit for one peer.
+const RECEIVE_CHANNEL_CAPACITY: usize = 32;
+
 /// Source of stdio streams for the transport
 enum StreamSource {
     /// Use the current process's stdin/stdout
@@ -424,7 +434,7 @@ impl StdioTransport {
         };
 
         // Setup message receive channel (bounded for backpressure)
-        let (tx, rx) = mpsc::channel(1000);
+        let (tx, rx) = mpsc::channel(RECEIVE_CHANNEL_CAPACITY);
         *self.receive_channel.lock().await = Some(rx);
 
         // Start background reader task
@@ -1157,6 +1167,49 @@ line2"}}"#;
 
         assert_eq!(server_transport.state().await, TransportState::Disconnected);
         assert_eq!(client_transport.state().await, TransportState::Disconnected);
+    }
+
+    // 2j: with a bounded receive channel and `send().await`, a producer that
+    // outpaces the consumer must apply backpressure rather than buffer without
+    // bound — and crucially must not drop or reorder messages or deadlock.
+    #[tokio::test]
+    async fn bounded_receive_channel_delivers_in_order_under_backpressure() {
+        use tokio::io::AsyncWriteExt;
+
+        // A small pipe buffer means the producer cannot stuff all messages in
+        // at once; together with the bounded channel (RECEIVE_CHANNEL_CAPACITY)
+        // this forces real end-to-end backpressure. The producer writes from a
+        // spawned task so it can park on a full pipeline while we drain.
+        let (mut producer, reader) = tokio::io::duplex(256);
+        let transport = StdioTransport::from_raw(reader, tokio::io::sink()).unwrap();
+        transport.connect().await.unwrap();
+
+        // Well above RECEIVE_CHANNEL_CAPACITY (32) and the 256-byte pipe.
+        const N: usize = 200;
+        let writer = tokio::spawn(async move {
+            for i in 0..N {
+                let line = format!("{{\"jsonrpc\":\"2.0\",\"id\":{i},\"method\":\"ping\"}}\n");
+                producer.write_all(line.as_bytes()).await.unwrap();
+            }
+            producer.flush().await.unwrap();
+            // `producer` drops here, signalling EOF after the final message.
+        });
+
+        for i in 0..N {
+            let msg = tokio::time::timeout(Duration::from_secs(5), transport.receive())
+                .await
+                .expect("receive must not deadlock under backpressure")
+                .expect("transport receive should succeed")
+                .expect("a message should be available");
+            let expected = format!("{{\"jsonrpc\":\"2.0\",\"id\":{i},\"method\":\"ping\"}}");
+            assert_eq!(
+                msg.payload.as_ref(),
+                expected.as_bytes(),
+                "message {i} lost, reordered, or corrupted under backpressure"
+            );
+        }
+
+        writer.await.unwrap();
     }
 
     #[test]

@@ -61,6 +61,16 @@ const SSE_KEEP_ALIVE_SECS: u64 = 30;
 /// Maximum in-flight server-to-client requests per HTTP session.
 const MAX_PENDING_SERVER_REQUESTS: usize = 64;
 
+/// Maximum concurrent live SSE subscribers per session.
+///
+/// The MCP spec permits multiple streams per session (for resumability
+/// overlap), but a sane client uses one or two. This cap bounds the
+/// `subscribers` vector so a reconnect storm — many GET /sse connections that
+/// open then drop — cannot grow it without bound. Dead senders are pruned at
+/// subscribe time, so this counts *live* subscribers; the limit is generous
+/// enough that legitimate reconnection overlap never reaches it.
+const MAX_SUBSCRIBERS_PER_SESSION: usize = 16;
+
 /// Timeout for server-to-client request responses over Streamable HTTP.
 const SERVER_REQUEST_TIMEOUT_SECS: u64 = 60;
 
@@ -91,6 +101,15 @@ struct SessionData {
     pending_server_requests: PendingServerRequests,
     /// Monotonic server request counter. IDs are rendered as `s-{n}`.
     next_server_request_id: u64,
+}
+
+/// Why a [`SessionManager::subscribe_session`] call did not return a receiver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubscribeError {
+    /// No session exists for the given id (unknown or already terminated).
+    SessionNotFound,
+    /// The session already has [`MAX_SUBSCRIBERS_PER_SESSION`] live subscribers.
+    AtCapacity,
 }
 
 /// Session manager for SSE connections.
@@ -154,15 +173,32 @@ impl SessionManager {
     ///
     /// Each subscribe returns a dedicated [`mpsc::UnboundedReceiver`] that
     /// only receives messages routed to this subscriber — never broadcasts.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SubscribeError::SessionNotFound`] if the session does not
+    /// exist, or [`SubscribeError::AtCapacity`] if it already has
+    /// [`MAX_SUBSCRIBERS_PER_SESSION`] live subscribers.
     pub async fn subscribe_session(
         &self,
         session_id: &str,
-    ) -> Option<mpsc::UnboundedReceiver<Arc<str>>> {
+    ) -> Result<mpsc::UnboundedReceiver<Arc<str>>, SubscribeError> {
         let mut sessions = self.sessions.write().await;
-        let data = sessions.get_mut(session_id)?;
+        let data = sessions
+            .get_mut(session_id)
+            .ok_or(SubscribeError::SessionNotFound)?;
+        // Drop senders whose receivers have already been dropped (disconnected
+        // SSE clients). Send-time pruning only runs when a message is actually
+        // routed, so without pruning here a burst of connect-then-disconnect
+        // would grow `subscribers` without bound. Pruning first means the cap
+        // counts live subscribers, not historical ones.
+        data.subscribers.retain(|tx| !tx.is_closed());
+        if data.subscribers.len() >= MAX_SUBSCRIBERS_PER_SESSION {
+            return Err(SubscribeError::AtCapacity);
+        }
         let (tx, rx) = mpsc::unbounded_channel();
         data.subscribers.push(tx);
-        Some(rx)
+        Ok(rx)
     }
 
     /// Check whether a session exists.
@@ -1182,8 +1218,18 @@ async fn handle_sse<H: McpHandler>(
     if validate_protocol_header(&headers, state.config.as_ref(), expected.as_ref()).is_err() {
         return empty_response(StatusCode::BAD_REQUEST);
     }
-    let Some(mut rx) = state.session_manager.subscribe_session(&session_id).await else {
-        return empty_response(StatusCode::NOT_FOUND);
+    let mut rx = match state.session_manager.subscribe_session(&session_id).await {
+        Ok(rx) => rx,
+        Err(SubscribeError::SessionNotFound) => return empty_response(StatusCode::NOT_FOUND),
+        // Too many concurrent SSE streams for this session — shed the new
+        // connection rather than grow the subscriber list unboundedly.
+        Err(SubscribeError::AtCapacity) => {
+            tracing::warn!(
+                session_id = %session_id,
+                "Rejecting SSE subscription: session at subscriber capacity"
+            );
+            return empty_response(StatusCode::TOO_MANY_REQUESTS);
+        }
     };
 
     // Create the SSE stream. Each GET subscription gets its own `stream_id` so
@@ -1399,6 +1445,65 @@ mod tests {
         assert!(
             first_got ^ second_got,
             "message must reach exactly one subscriber, got first={first:?}, second={second:?}"
+        );
+    }
+
+    // 2d: an unbounded `subscribers` vec leaks memory under SSE reconnect
+    // storms. The cap bounds live subscribers per session.
+    #[tokio::test]
+    async fn subscribe_session_enforces_capacity() {
+        let manager = SessionManager::new();
+        let session_id = manager.create_session(None).await;
+
+        // Hold every receiver so the senders stay live (not pruned).
+        let mut receivers = Vec::new();
+        for i in 0..MAX_SUBSCRIBERS_PER_SESSION {
+            let rx = manager
+                .subscribe_session(&session_id)
+                .await
+                .unwrap_or_else(|e| panic!("subscribe {i} within cap should succeed: {e:?}"));
+            receivers.push(rx);
+        }
+
+        // The next subscribe exceeds the cap and must be rejected.
+        assert_eq!(
+            manager.subscribe_session(&session_id).await.err(),
+            Some(SubscribeError::AtCapacity)
+        );
+    }
+
+    // The cap counts *live* subscribers: once dead senders are pruned, capacity
+    // is reclaimed. This is what makes a reconnect storm safe — disconnected
+    // clients free their slots.
+    #[tokio::test]
+    async fn subscribe_session_reclaims_capacity_after_disconnect() {
+        let manager = SessionManager::new();
+        let session_id = manager.create_session(None).await;
+
+        // Fill to capacity, then drop all receivers (simulating disconnects).
+        let mut receivers = Vec::new();
+        for _ in 0..MAX_SUBSCRIBERS_PER_SESSION {
+            receivers.push(manager.subscribe_session(&session_id).await.unwrap());
+        }
+        assert_eq!(
+            manager.subscribe_session(&session_id).await.err(),
+            Some(SubscribeError::AtCapacity)
+        );
+        drop(receivers);
+
+        // Pruning at subscribe time reclaims the freed slots.
+        assert!(
+            manager.subscribe_session(&session_id).await.is_ok(),
+            "capacity should be reclaimed once dead subscribers are pruned"
+        );
+    }
+
+    #[tokio::test]
+    async fn subscribe_session_unknown_session_is_not_found() {
+        let manager = SessionManager::new();
+        assert_eq!(
+            manager.subscribe_session("no-such-session").await.err(),
+            Some(SubscribeError::SessionNotFound)
         );
     }
 

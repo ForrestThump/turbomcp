@@ -29,6 +29,16 @@ use turbomcp_transport_traits::{
     TransportState, TransportType, validate_request_size, validate_response_size,
 };
 
+/// Capacity of the inbound SSE message channel between the background SSE
+/// task and the consumer.
+///
+/// Kept small deliberately: the SSE task pushes with `send().await`, so a full
+/// channel parks the task and lets the server's flow control engage rather
+/// than buffering up to 1000 potentially-large messages in client memory. For
+/// a single SSE stream this bound is a memory-safety guard, not a throughput
+/// limit.
+const SSE_CHANNEL_CAPACITY: usize = 32;
+
 /// Retry policy for auto-reconnect
 #[derive(Clone, Debug)]
 pub enum RetryPolicy {
@@ -231,7 +241,7 @@ impl StreamableHttpClientTransport {
     /// platform verifier). Pre-3.1 this was an `expect` and would panic the calling
     /// process; v3.1 propagates it instead.
     pub fn new(config: StreamableHttpClientConfig) -> TransportResult<Self> {
-        let (sse_tx, sse_rx) = mpsc::channel(1000);
+        let (sse_tx, sse_rx) = mpsc::channel(SSE_CHANNEL_CAPACITY);
         let (response_tx, response_rx) = mpsc::channel(100);
         let (event_emitter, _) = TransportEventEmitter::new();
 
