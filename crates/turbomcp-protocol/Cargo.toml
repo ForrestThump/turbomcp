@@ -89,6 +89,10 @@ tokio-test = { workspace = true }
 pretty_assertions = { workspace = true }
 proptest = "1.11"
 
+[[bench]]
+name = "message_batch"
+harness = false
+
 [features]
 default = ["std", "simd"]
 std = []
