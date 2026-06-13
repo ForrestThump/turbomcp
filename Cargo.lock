@@ -3022,6 +3022,7 @@ dependencies = [
  "js-sys",
  "pin-project-lite",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
@@ -3051,6 +3052,9 @@ dependencies = [
  "prost",
  "reqwest 0.12.28",
  "thiserror 2.0.18",
+ "tokio",
+ "tonic",
+ "tracing",
 ]
 
 [[package]]
@@ -6186,6 +6190,7 @@ dependencies = [
  "turbomcp4-protocol",
  "turbomcp4-server",
  "turbomcp4-service",
+ "turbomcp4-telemetry",
  "turbomcp4-transport-http",
  "turbomcp4-transport-stdio",
 ]
@@ -6322,7 +6327,19 @@ dependencies = [
 name = "turbomcp4-telemetry"
 version = "4.0.0-alpha.1"
 dependencies = [
+ "futures",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
  "turbomcp4-core",
+ "turbomcp4-service",
 ]
 
 [[package]]

@@ -978,13 +978,14 @@ fn legacy_context(
     let mut ctx = RequestContext::new(state.version).with_client_info(state.client_info);
     ctx.client_capabilities = Some(state.client_capabilities);
     ctx.log_level = state.log_level;
-    ctx.identity = identity_from_meta(req.params.as_ref());
     if let Some(m) = req
         .params
         .as_ref()
         .and_then(|p| p.get("_meta"))
         .and_then(Value::as_object)
     {
+        ctx.identity = meta::extract_identity(m);
+        ctx.trace_context = meta::extract_trace_context(m);
         let (_consumed, propagated) = meta::partition(m.clone());
         ctx = ctx.with_propagated_meta(propagated);
     }
@@ -1496,6 +1497,8 @@ fn build_context(req: &JsonRpcRequest) -> RequestContext {
         .and_then(|p| p.get("_meta"))
         .and_then(Value::as_object)
     {
+        ctx.identity = turbomcp4_core::meta::extract_identity(meta);
+        ctx.trace_context = turbomcp4_core::meta::extract_trace_context(meta);
         let (consumed, propagated) = turbomcp4_core::meta::partition(meta.clone());
         if let Some(info) = consumed
             .get(meta::keys::CLIENT_INFO)
@@ -1510,34 +1513,7 @@ fn build_context(req: &JsonRpcRequest) -> RequestContext {
         }
         ctx = ctx.with_propagated_meta(propagated);
     }
-    ctx.identity = identity_from_meta(req.params.as_ref());
     ctx
-}
-
-/// Lift the HTTP boundary's validated principal (internal `_meta`
-/// `io.turbomcp.internal/identity` = `{ "sub", "claims" }`) into an
-/// [`Identity`]. Absent (stdio, or an unauthenticated HTTP endpoint) →
-/// anonymous. The key is internal, so the boundary sanitizes client-forged
-/// copies before injecting the real one — a client can't assert an identity.
-fn identity_from_meta(params: Option<&Value>) -> turbomcp4_core::Identity {
-    let Some(principal) = params
-        .and_then(|p| p.get("_meta"))
-        .and_then(|m| m.get(meta::internal::IDENTITY))
-    else {
-        return turbomcp4_core::Identity::Anonymous;
-    };
-    let Some(sub) = principal.get("sub").and_then(Value::as_str) else {
-        return turbomcp4_core::Identity::Anonymous;
-    };
-    let claims = principal
-        .get("claims")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
-    turbomcp4_core::Identity::Bearer {
-        sub: sub.to_owned(),
-        claims,
-    }
 }
 
 #[derive(Deserialize)]

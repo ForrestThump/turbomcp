@@ -4,7 +4,7 @@
 //! [`crate::RequestContext::propagated_meta`] and echoed back on responses.
 //! Extensions add keys under their reverse-DNS namespace.
 
-use crate::{JsonRpcMessage, ProtocolVersion};
+use crate::{Identity, JsonRpcMessage, ProtocolVersion, TraceContext};
 use alloc::string::{String, ToString};
 use serde_json::{Map, Value};
 
@@ -139,6 +139,56 @@ pub fn set_request_meta(msg: &mut JsonRpcMessage, key: &str, value: Value) {
     }
 }
 
+/// Lift the HTTP boundary's validated principal — internal key
+/// [`internal::IDENTITY`] = `{ "sub": String, "claims": Object }` — out of a
+/// `_meta` map into an [`Identity`].
+///
+/// Returns [`Identity::Anonymous`] when the key is absent (stdio, or an
+/// unauthenticated HTTP endpoint) or malformed. The key is internal, so the
+/// transport boundary sanitizes any client-forged copy before injecting the
+/// real one — a client can never assert an identity this way. Shared by the
+/// dispatcher (→ `RequestContext.identity`) and the telemetry layer (→ redacted
+/// span attributes) so the two never drift.
+#[must_use]
+pub fn extract_identity(meta: &Map<String, Value>) -> Identity {
+    let Some(principal) = meta.get(internal::IDENTITY) else {
+        return Identity::Anonymous;
+    };
+    let Some(sub) = principal.get("sub").and_then(Value::as_str) else {
+        return Identity::Anonymous;
+    };
+    let claims = principal
+        .get("claims")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    Identity::Bearer {
+        sub: sub.to_string(),
+        claims,
+    }
+}
+
+/// Extract the W3C Trace Context (`traceparent`/`tracestate`/`baggage`) from a
+/// `_meta` map, if a `traceparent` is present (SEP-414 propagation over `_meta`).
+///
+/// `traceparent` is required for a trace context to exist; `tracestate` and
+/// `baggage` are optional vendor/state additions.
+#[must_use]
+pub fn extract_trace_context(meta: &Map<String, Value>) -> Option<TraceContext> {
+    let traceparent = meta.get(keys::TRACEPARENT).and_then(Value::as_str)?;
+    Some(TraceContext {
+        traceparent: traceparent.to_string(),
+        tracestate: meta
+            .get(keys::TRACESTATE)
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        baggage: meta
+            .get(keys::BAGGAGE)
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+    })
+}
+
 /// Strip all [`internal`] keys from an inbound message's `params._meta`.
 ///
 /// Transports **must** call this on every message received from a client
@@ -199,6 +249,35 @@ mod tests {
         let meta = &r.params.as_ref().unwrap()["_meta"];
         assert_eq!(meta[internal::SESSION_ID], "s-1");
         assert_eq!(meta[keys::PROTOCOL_VERSION], "2025-11-25");
+    }
+
+    #[test]
+    fn extract_identity_lifts_principal_else_anonymous() {
+        let mut meta = Map::new();
+        assert!(matches!(extract_identity(&meta), Identity::Anonymous));
+        meta.insert(
+            internal::IDENTITY.into(),
+            json!({ "sub": "alice", "claims": { "scope": "read" } }),
+        );
+        match extract_identity(&meta) {
+            Identity::Bearer { sub, claims } => {
+                assert_eq!(sub, "alice");
+                assert_eq!(claims["scope"], "read");
+            }
+            other => panic!("expected Bearer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn extract_trace_context_requires_traceparent() {
+        let mut meta = Map::new();
+        meta.insert(keys::TRACESTATE.into(), json!("vendor=x"));
+        assert!(extract_trace_context(&meta).is_none());
+        meta.insert(keys::TRACEPARENT.into(), json!("00-abc-def-01"));
+        let tc = extract_trace_context(&meta).unwrap();
+        assert_eq!(tc.traceparent, "00-abc-def-01");
+        assert_eq!(tc.tracestate.as_deref(), Some("vendor=x"));
+        assert!(tc.baggage.is_none());
     }
 
     #[test]

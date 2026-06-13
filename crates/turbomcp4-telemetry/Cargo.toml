@@ -11,3 +11,31 @@ homepage = "https://turbomcp.org"
 
 [dependencies]
 turbomcp4-core = { workspace = true }
+turbomcp4-service = { workspace = true }
+tower = { workspace = true }
+tracing = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+# The OTLP export pipeline (gRPC via tonic) + a turnkey subscriber installer.
+# Off by default: the TraceContextLayer + W3C propagation + redaction work with
+# any `tracing` subscriber and pull no network/runtime deps.
+opentelemetry-otlp = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+
+[features]
+default = []
+otlp = [
+    "dep:opentelemetry-otlp",
+    "opentelemetry-otlp/grpc-tonic",
+    "dep:tracing-subscriber",
+    "dep:tokio",
+]
+
+[dev-dependencies]
+futures = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }

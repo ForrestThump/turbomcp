@@ -87,6 +87,12 @@ pub use turbomcp4_service::{AuthDecision, HttpAuthenticator};
 #[cfg(feature = "http")]
 pub use turbomcp4_service::{GovernorRateLimiter, RateKey, RateLimiter};
 
+/// OpenTelemetry observability: the [`TraceContextLayer`](telemetry::TraceContextLayer)
+/// (W3C trace continuation over `_meta` + PII-safe identity spans) and an
+/// optional OTLP export pipeline. Enable with the `telemetry` feature.
+#[cfg(feature = "telemetry")]
+pub use turbomcp4_telemetry as telemetry;
+
 // ---- macros -----------------------------------------------------------------
 
 pub use turbomcp4_macros::{mcp_header, prompt, resource, server, tool};

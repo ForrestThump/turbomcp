@@ -72,9 +72,20 @@ impl Identity {
         !matches!(self, Self::Anonymous)
     }
 
-    /// The claim keys present (values intentionally not exposed here for
-    /// logging callers; use the typed variant fields for value access).
-    fn claim_keys(claims: &Claims) -> Vec<&str> {
+    /// The claim *keys* present (never the values) — the redaction-safe view of
+    /// the claim set, for logging/telemetry. `Custom` identities expose none
+    /// (the trait yields values by key, not an enumerable key set).
+    #[must_use]
+    pub fn claim_keys(&self) -> Vec<&str> {
+        match self {
+            Self::Anonymous | Self::Custom(_) => Vec::new(),
+            Self::Bearer { claims, .. } | Self::Dpop { claims, .. } => Self::claim_keys_of(claims),
+        }
+    }
+
+    /// The claim keys of a specific claim set (values intentionally not exposed;
+    /// use the typed variant fields for value access).
+    fn claim_keys_of(claims: &Claims) -> Vec<&str> {
         claims.keys().map(String::as_str).collect()
     }
 }
@@ -87,13 +98,13 @@ impl fmt::Debug for Identity {
             Self::Bearer { sub, claims } => f
                 .debug_struct("Identity::Bearer")
                 .field("sub", sub)
-                .field("claim_keys", &Self::claim_keys(claims))
+                .field("claim_keys", &Self::claim_keys_of(claims))
                 .finish(),
             Self::Dpop { sub, jkt, claims } => f
                 .debug_struct("Identity::Dpop")
                 .field("sub", sub)
                 .field("jkt", jkt)
-                .field("claim_keys", &Self::claim_keys(claims))
+                .field("claim_keys", &Self::claim_keys_of(claims))
                 .finish(),
             Self::Custom(c) => f
                 .debug_struct("Identity::Custom")
