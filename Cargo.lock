@@ -6217,7 +6217,17 @@ dependencies = [
 name = "turbomcp4-client"
 version = "4.0.0-alpha.1"
 dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "turbomcp4-codec",
  "turbomcp4-core",
+ "turbomcp4-protocol",
+ "turbomcp4-server",
+ "turbomcp4-service",
+ "turbomcp4-transport-stdio",
 ]
 
 [[package]]

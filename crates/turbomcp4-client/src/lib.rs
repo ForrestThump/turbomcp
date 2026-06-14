@@ -1,7 +1,15 @@
-//! TurboMCP v4 client: ClientBuilder, ConnectMode probe, MRTR loop, cache layer.
+//! TurboMCP v4 client.
 //!
-//! TurboMCP v4 — Phase 0 skeleton. Implementation lands in later phases.
+//! The other half of the protocol: a [`Client`] drives an MCP server over any
+//! [`Transport`](turbomcp4_service::Transport). Phase 8a establishes the
+//! connection actor and raw request/response plumbing; the typed MCP API
+//! (`initialize`, `list_tools`, the `ConnectMode` probe, the MRTR client loop)
+//! builds on top of it in later sub-phases.
 #![forbid(unsafe_code)]
+#![warn(missing_docs)]
 
-// Phase 0: establish + verify the dependency edge on the foundation crate.
-use turbomcp4_core as _;
+mod connection;
+mod error;
+
+pub use connection::{Client, DEFAULT_REQUEST_TIMEOUT};
+pub use error::{ClientError, ClientResult};
