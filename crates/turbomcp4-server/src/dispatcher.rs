@@ -232,11 +232,18 @@ async fn handle<S: McpServerCore>(
             // via the connection's writer, so it can't share `handle_request`'s
             // always-respond contract.
             if req.method == methods::request::SUBSCRIPTIONS_LISTEN {
-                return handle_subscriptions_listen(&router, &supported, &shared.subs, &req, &cancel)
-                    .await;
+                return handle_subscriptions_listen(
+                    &router,
+                    &supported,
+                    &shared.subs,
+                    &req,
+                    &cancel,
+                )
+                .await;
             }
 
-            let dispatch = handle_request(server, &router, &supported, &shared, req, cancel.clone());
+            let dispatch =
+                handle_request(server, &router, &supported, &shared, req, cancel.clone());
             tokio::select! {
                 // Cancelled mid-flight: drop the handler future and send
                 // nothing (cancellation spec: "stop processing … not send a
@@ -321,7 +328,10 @@ async fn handle_request<S: McpServerCore>(
     // The fields this path needs; `signer`/`pending` flow on into
     // `dispatch_capability` via `shared`.
     let Shared {
-        sessions, tasks, subs, ..
+        sessions,
+        tasks,
+        subs,
+        ..
     } = shared;
     let id = req.id.clone();
     let method = req.method.clone();
@@ -372,10 +382,10 @@ async fn handle_request<S: McpServerCore>(
                         Ok(level) => ctx.log_level = level,
                         Err(e) => return Ok(error_response(id, &e)),
                     }
-                    Ok(dispatch_capability::<S, DraftWire>(
-                        server, router, &req, &ctx, shared, id,
+                    Ok(
+                        dispatch_capability::<S, DraftWire>(server, router, &req, &ctx, shared, id)
+                            .await,
                     )
-                    .await)
                 }
                 VersionRoute::Legacy => {
                     let mut ctx = match legacy_context(sessions, &req)? {
@@ -403,10 +413,12 @@ async fn handle_request<S: McpServerCore>(
                             .await);
                         }
                     }
-                    Ok(dispatch_capability::<S, LegacyWire>(
-                        server, router, &req, &ctx, shared, id,
+                    Ok(
+                        dispatch_capability::<S, LegacyWire>(
+                            server, router, &req, &ctx, shared, id,
+                        )
+                        .await,
                     )
-                    .await)
                 }
                 VersionRoute::Unsupported(requested) => {
                     Ok(unsupported_version(id, requested, supported))

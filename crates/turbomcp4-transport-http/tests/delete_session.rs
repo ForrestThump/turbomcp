@@ -84,7 +84,11 @@ fn initialize_body() -> Value {
 }
 
 async fn init_session(app: &axum::Router) -> String {
-    let resp = app.clone().oneshot(post(initialize_body(), &[])).await.unwrap();
+    let resp = app
+        .clone()
+        .oneshot(post(initialize_body(), &[]))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     resp.headers()
         .get("mcp-session-id")

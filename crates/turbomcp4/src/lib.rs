@@ -55,21 +55,63 @@ pub use turbomcp4_transport_stdio::{serve_stdio, serve_stdio_with, stdio};
 
 /// Streamable HTTP transport (axum 0.8). Enable with the `http` feature.
 ///
-/// Serve a macro server over HTTP by building its dispatcher and handing it to
-/// [`serve_http`](http::serve_http):
+/// The one-liner is [`ServeHttp::run_http`](http::ServeHttp::run_http) on a
+/// builder — it builds the dispatcher, wires session termination (`DELETE`)
+/// automatically, and serves:
 ///
 /// ```ignore
-/// use turbomcp4::http::{serve_http, HttpConfig};
-/// use turbomcp4::IntoServerBuilder;
+/// use turbomcp4::prelude::*;
+/// use turbomcp4::http::{HttpConfig, ServeHttp};
 ///
-/// // `.into_server()` resolves to the macro-generated inherent method, so the
-/// // server's capabilities are pre-registered.
-/// let service = MyServer.into_server().build();
-/// serve_http("127.0.0.1:8080".parse()?, service, HttpConfig::new()).await?;
+/// MyServer.into_server().run_http("127.0.0.1:8080".parse()?, HttpConfig::new()).await?;
+/// ```
+///
+/// For full control (e.g. wrapping the dispatcher in RPC middleware like the
+/// telemetry [`TraceContextLayer`](crate::telemetry::TraceContextLayer)), build
+/// the service yourself and call [`serve_http`](http::serve_http):
+///
+/// ```ignore
+/// use tower::Layer;
+/// let service = TraceContextLayer::new().layer(MyServer.into_server().build());
+/// serve_http(addr, service, HttpConfig::new()).await?;
 /// ```
 #[cfg(feature = "http")]
 pub mod http {
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    pub use turbomcp4_service::SessionTerminator;
     pub use turbomcp4_transport_http::{HttpConfig, HttpError, router, serve_http};
+
+    use turbomcp4_server::{McpServerCore, ServerBuilder};
+
+    /// One-call HTTP serving for a [`ServerBuilder`] (the value
+    /// `MyServer.into_server()` produces).
+    pub trait ServeHttp {
+        /// Build this server's dispatcher and serve it over Streamable HTTP on
+        /// `addr` until `config`'s shutdown token fires.
+        ///
+        /// Session termination (`DELETE`) is wired automatically from the built
+        /// dispatcher, so the endpoint honors client-initiated termination by
+        /// default. To compose RPC middleware first, build the dispatcher
+        /// yourself and call [`serve_http`] instead.
+        fn run_http(
+            self,
+            addr: SocketAddr,
+            config: HttpConfig,
+        ) -> impl std::future::Future<Output = Result<(), HttpError>> + Send;
+    }
+
+    impl<S> ServeHttp for ServerBuilder<S>
+    where
+        S: McpServerCore + Clone + Send + Sync + 'static,
+    {
+        async fn run_http(self, addr: SocketAddr, config: HttpConfig) -> Result<(), HttpError> {
+            let dispatcher = self.build();
+            let config = config.with_session_terminator(Arc::new(dispatcher.session_terminator()));
+            serve_http(addr, dispatcher, config).await
+        }
+    }
 }
 
 /// OAuth 2.1 resource-server auth: bearer-token validation + RFC 9728 metadata.
@@ -121,6 +163,10 @@ pub mod prelude {
         ServerBuilder, WithCompletions, WithPrompts, WithResources, WithTools,
     };
     pub use turbomcp4_transport_stdio::serve_stdio;
+
+    /// The HTTP one-liner `builder.run_http(addr, config)` (feature `http`).
+    #[cfg(feature = "http")]
+    pub use crate::http::ServeHttp;
 
     pub use turbomcp4_macros::{mcp_header, prompt, resource, server, tool};
 }

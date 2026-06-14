@@ -242,7 +242,8 @@ mod tests {
 
     #[test]
     fn idle_timeout_expires_on_get() {
-        let store = SessionStore::with_capacity(8).with_idle_timeout(Some(Duration::from_millis(10)));
+        let store =
+            SessionStore::with_capacity(8).with_idle_timeout(Some(Duration::from_millis(10)));
         store.insert("a", state());
         assert!(store.get("a").is_some()); // refreshes recency
         std::thread::sleep(Duration::from_millis(25));
@@ -252,7 +253,8 @@ mod tests {
 
     #[test]
     fn sweep_expired_reclaims_idle_sessions() {
-        let store = SessionStore::with_capacity(8).with_idle_timeout(Some(Duration::from_millis(10)));
+        let store =
+            SessionStore::with_capacity(8).with_idle_timeout(Some(Duration::from_millis(10)));
         store.insert("a", state());
         store.insert("b", state());
         std::thread::sleep(Duration::from_millis(25));
@@ -261,7 +263,10 @@ mod tests {
         swept.sort();
         assert_eq!(swept, vec!["a".to_owned(), "b".to_owned()]);
         assert!(store.contains("c"));
-        assert!(store.sweep_expired().is_empty(), "second sweep finds nothing");
+        assert!(
+            store.sweep_expired().is_empty(),
+            "second sweep finds nothing"
+        );
     }
 
     #[test]

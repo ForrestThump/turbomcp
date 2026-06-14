@@ -49,6 +49,7 @@ insta = { workspace = true }
 tower = { workspace = true, features = ["util"] }
 axum = { workspace = true }
 http-body-util = "0.1"
+reqwest = { workspace = true }
 
 [lib]
 doctest = false

@@ -29,8 +29,11 @@
 //!   (`2025-11-25`) server→client SSE stream for that session (list_changed,
 //!   resources/updated). Without one: `405` — the draft replaced the GET
 //!   stream with `subscriptions/listen`.
-//! - **`DELETE {path}`** — `405`. The `2025-11-25` spec lets a server refuse
-//!   client-initiated session termination; sessions expire by store eviction.
+//! - **`DELETE {path}`** — with a [`SessionTerminator`] configured
+//!   ([`HttpConfig::with_session_terminator`]): ends the `Mcp-Session-Id`
+//!   session (`204`, or `404` if unknown). Without one: `405` — the
+//!   `2025-11-25` spec lets a server refuse termination (sessions then expire
+//!   by store eviction / idle timeout).
 //!
 //! ## Dual-stack request routing (PLAN §11)
 //!
@@ -304,7 +307,9 @@ where
     let mut app = Router::new()
         .route(
             &config.path,
-            post(mcp_post::<S>).get(mcp_get::<S>).delete(mcp_delete::<S>),
+            post(mcp_post::<S>)
+                .get(mcp_get::<S>)
+                .delete(mcp_delete::<S>),
         )
         .layer(DefaultBodyLimit::max(config.max_body_bytes));
     // RFC 9728 Protected Resource Metadata is public (no auth) discovery.
@@ -822,7 +827,11 @@ where
         .get(&HEADER_SESSION_ID)
         .and_then(|v| v.to_str().ok())
     else {
-        return (StatusCode::BAD_REQUEST, "DELETE requires an Mcp-Session-Id header").into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            "DELETE requires an Mcp-Session-Id header",
+        )
+            .into_response();
     };
     if terminator.terminate(sid) {
         StatusCode::NO_CONTENT.into_response()
