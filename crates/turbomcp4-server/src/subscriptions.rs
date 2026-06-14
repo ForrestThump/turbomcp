@@ -149,6 +149,15 @@ impl SubscriptionRegistry {
         }
     }
 
+    /// Drop a legacy session's entire delivery route (every subscribed URI and
+    /// its connection binding). Called when the session ends — explicit
+    /// termination (`DELETE`) or idle eviction — so a gone session stops
+    /// receiving `*_list_changed`/`resources/updated`. Returns whether a route
+    /// existed.
+    pub(crate) fn legacy_remove(&self, session: &str) -> bool {
+        self.lock_legacy().remove(session).is_some()
+    }
+
     // ---- publishing ------------------------------------------------------------
 
     /// Coalesced `*_list_changed`: the first call in a window schedules one

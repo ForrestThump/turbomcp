@@ -25,6 +25,7 @@ pub struct ServerBuilder<S> {
     server: S,
     router: MethodRouter<S>,
     tasks: bool,
+    session_idle_timeout: Option<std::time::Duration>,
 }
 
 impl<S: McpServerCore> ServerBuilder<S> {
@@ -35,6 +36,7 @@ impl<S: McpServerCore> ServerBuilder<S> {
             server,
             router: MethodRouter::new(),
             tasks: false,
+            session_idle_timeout: None,
         }
     }
 
@@ -46,7 +48,18 @@ impl<S: McpServerCore> ServerBuilder<S> {
             server,
             router,
             tasks: false,
+            session_idle_timeout: None,
         }
+    }
+
+    /// Evict a legacy (`2025-11-25`) session not seen within `timeout`, tearing
+    /// down its subscription routes (see
+    /// [`VersionDispatcher::with_session_idle_timeout`]). Without it, sessions
+    /// are bounded only by the store's LRU capacity.
+    #[must_use]
+    pub fn session_idle_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.session_idle_timeout = Some(timeout);
+        self
     }
 
     /// Enable core Tasks (`2025-11-25`): task-augmented `tools/call` plus
@@ -114,12 +127,14 @@ impl<S: McpServerCore> ServerBuilder<S> {
     /// Finish: produce the `tower::Service<JsonRpcMessage>` for this server.
     #[must_use]
     pub fn build(self) -> VersionDispatcher<S> {
-        let dispatcher = VersionDispatcher::new(self.server, self.router);
+        let mut dispatcher = VersionDispatcher::new(self.server, self.router);
         if self.tasks {
-            dispatcher.with_task_support()
-        } else {
-            dispatcher
+            dispatcher = dispatcher.with_task_support();
         }
+        if let Some(timeout) = self.session_idle_timeout {
+            dispatcher = dispatcher.with_session_idle_timeout(timeout);
+        }
+        dispatcher
     }
 }
 

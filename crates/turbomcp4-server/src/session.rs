@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 use std::sync::RwLock;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use turbomcp4_core::{Implementation, ProtocolVersion};
@@ -41,34 +41,58 @@ struct Entry {
     last_seen: Instant,
 }
 
-/// A bounded in-memory session table with least-recently-used eviction.
+/// A bounded in-memory session table with least-recently-used eviction and an
+/// optional idle timeout.
 ///
 /// All methods take `&self`; the store is shared as an `Arc` between the
 /// dispatcher (which writes at `initialize` and reads on every legacy request)
-/// and whoever else needs existence checks.
+/// and whoever else needs existence checks. When an `idle_timeout` is set, a
+/// session not seen within that window is treated as gone: [`get`](Self::get)
+/// drops it and answers `None` (so the client re-`initialize`s), and
+/// [`sweep_expired`](Self::sweep_expired) reclaims it in bulk (the dispatcher
+/// pairs that with tearing down the session's subscription routes).
 pub struct SessionStore {
     inner: RwLock<HashMap<String, Entry>>,
     capacity: usize,
+    idle_timeout: Option<Duration>,
 }
 
 impl SessionStore {
     /// Default maximum number of live sessions.
     pub const DEFAULT_CAPACITY: usize = 4096;
 
-    /// A store bounded to `capacity` sessions (least-recently-used wins).
+    /// A store bounded to `capacity` sessions (least-recently-used wins), with
+    /// no idle timeout (LRU + cap only).
     #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             inner: RwLock::new(HashMap::new()),
             capacity: capacity.max(1),
+            idle_timeout: None,
         }
     }
 
+    /// Set an idle timeout: a session not accessed within `timeout` is evicted.
+    /// `None` disables it (the default). Chainable from the constructors.
+    #[must_use]
+    pub fn with_idle_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.idle_timeout = timeout;
+        self
+    }
+
+    /// Whether `entry` has been idle past the configured timeout as of `now`.
+    fn is_expired(&self, entry: &Entry, now: Instant) -> bool {
+        self.idle_timeout
+            .is_some_and(|t| now.duration_since(entry.last_seen) >= t)
+    }
+
     /// Store (or replace) `state` under `id`. If the table is full, the
-    /// least-recently-seen session is evicted to make room.
+    /// least-recently-seen session is evicted to make room (idle sessions, being
+    /// the oldest, go first; bulk idle reclamation is [`sweep_expired`](Self::sweep_expired)).
     pub fn insert(&self, id: impl Into<String>, state: SessionState) {
         let id = id.into();
         let mut map = self.inner.write().expect("session store lock poisoned");
+        let now = Instant::now();
         if !map.contains_key(&id) && map.len() >= self.capacity {
             // O(n) scan; the capacity bounds n and inserts happen once per
             // session (at `initialize`), so this is not on the hot path.
@@ -84,19 +108,46 @@ impl SessionStore {
             id,
             Entry {
                 state,
-                last_seen: Instant::now(),
+                last_seen: now,
             },
         );
     }
 
-    /// Look up a session, refreshing its recency. `None` means expired,
-    /// evicted, or never created — the caller answers "unknown session".
+    /// Look up a session, refreshing its recency. `None` means expired
+    /// (dropped on the spot), evicted, or never created — the caller answers
+    /// "unknown session".
     #[must_use]
     pub fn get(&self, id: &str) -> Option<SessionState> {
         let mut map = self.inner.write().expect("session store lock poisoned");
+        let now = Instant::now();
         let entry = map.get_mut(id)?;
-        entry.last_seen = Instant::now();
+        if self.is_expired(entry, now) {
+            map.remove(id);
+            return None;
+        }
+        entry.last_seen = now;
         Some(entry.state.clone())
+    }
+
+    /// Remove and return every session past its idle timeout. The dispatcher
+    /// calls this opportunistically (and tears down each id's subscription
+    /// routes). A store with no idle timeout always returns empty.
+    #[must_use]
+    pub fn sweep_expired(&self) -> Vec<String> {
+        if self.idle_timeout.is_none() {
+            return Vec::new();
+        }
+        let now = Instant::now();
+        let mut map = self.inner.write().expect("session store lock poisoned");
+        let expired: Vec<String> = map
+            .iter()
+            .filter(|(_, e)| self.is_expired(e, now))
+            .map(|(k, _)| k.clone())
+            .collect();
+        for id in &expired {
+            map.remove(id);
+        }
+        expired
     }
 
     /// Whether `id` is a live session (does not refresh recency).
@@ -187,5 +238,38 @@ mod tests {
         assert!(store.contains("a"));
         assert!(!store.contains("b"));
         assert!(store.contains("c"));
+    }
+
+    #[test]
+    fn idle_timeout_expires_on_get() {
+        let store = SessionStore::with_capacity(8).with_idle_timeout(Some(Duration::from_millis(10)));
+        store.insert("a", state());
+        assert!(store.get("a").is_some()); // refreshes recency
+        std::thread::sleep(Duration::from_millis(25));
+        assert!(store.get("a").is_none(), "idle past the timeout → gone");
+        assert!(!store.contains("a"), "the expired entry was dropped");
+    }
+
+    #[test]
+    fn sweep_expired_reclaims_idle_sessions() {
+        let store = SessionStore::with_capacity(8).with_idle_timeout(Some(Duration::from_millis(10)));
+        store.insert("a", state());
+        store.insert("b", state());
+        std::thread::sleep(Duration::from_millis(25));
+        store.insert("c", state()); // fresh
+        let mut swept = store.sweep_expired();
+        swept.sort();
+        assert_eq!(swept, vec!["a".to_owned(), "b".to_owned()]);
+        assert!(store.contains("c"));
+        assert!(store.sweep_expired().is_empty(), "second sweep finds nothing");
+    }
+
+    #[test]
+    fn no_idle_timeout_never_sweeps() {
+        let store = SessionStore::with_capacity(8); // default: no idle timeout
+        store.insert("a", state());
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(store.sweep_expired().is_empty());
+        assert!(store.contains("a"));
     }
 }

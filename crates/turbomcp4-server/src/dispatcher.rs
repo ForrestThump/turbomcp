@@ -77,6 +77,20 @@ struct Shared {
     pending: Arc<PendingRequests>,
 }
 
+impl Shared {
+    /// Reclaim every idle-expired session and tear down its legacy
+    /// subscription routes in one place (the session store and the
+    /// subscription registry don't know about each other). Called
+    /// opportunistically at `initialize`, where new sessions are minted — a
+    /// natural, cheap point to bound stale-session growth without a background
+    /// task. A store with no idle timeout sweeps nothing.
+    fn sweep_idle_sessions(&self) {
+        for id in self.sessions.sweep_expired() {
+            self.subs.legacy_remove(&id);
+        }
+    }
+}
+
 impl<S: Clone> Clone for VersionDispatcher<S> {
     fn clone(&self) -> Self {
         Self {
@@ -126,6 +140,18 @@ impl<S: McpServerCore> VersionDispatcher<S> {
     #[must_use]
     pub fn with_task_support(mut self) -> Self {
         self.shared.tasks = Some(Arc::new(TaskStore::default()));
+        self
+    }
+
+    /// Evict a legacy session not seen within `timeout` (and tear down its
+    /// subscription routes). Without this, sessions are bounded only by the
+    /// store's LRU capacity. Call at build time, before serving.
+    #[must_use]
+    pub fn with_session_idle_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.shared.sessions = Arc::new(
+            SessionStore::with_capacity(SessionStore::DEFAULT_CAPACITY)
+                .with_idle_timeout(Some(timeout)),
+        );
         self
     }
 }
@@ -276,6 +302,9 @@ async fn handle_request<S: McpServerCore>(
 
         // Stateful handshake (2025-11-25 and earlier).
         methods::request::INITIALIZE => {
+            // Bound stale-session growth: reclaim idle sessions (and their
+            // routes) whenever a new one is minted.
+            shared.sweep_idle_sessions();
             let tasks_enabled = tasks.is_some() && router.has_tools();
             let reply =
                 handle_initialize(&server, router, supported, sessions, tasks_enabled, &req);
