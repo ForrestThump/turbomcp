@@ -135,6 +135,12 @@ pub use turbomcp4_service::{GovernorRateLimiter, RateKey, RateLimiter};
 #[cfg(feature = "telemetry")]
 pub use turbomcp4_telemetry as telemetry;
 
+/// The MCP client: [`client::ClientBuilder`] runs the handshake + version
+/// negotiation, then [`client::Client`] speaks the typed [`neutral`] API.
+/// Enable with the `client` feature.
+#[cfg(feature = "client")]
+pub use turbomcp4_client as client;
+
 // ---- macros -----------------------------------------------------------------
 
 pub use turbomcp4_macros::{mcp_header, prompt, resource, server, tool};

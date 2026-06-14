@@ -1,4 +1,4 @@
-//! Phase 8a exit criterion: the [`Client`] connection actor drives a real
+//! Phase 8a exit criterion: the [`Connection`] actor drives a real
 //! `serve()` server over an in-memory duplex pipe — proving request/response
 //! correlation, result-payload round-trip, and error routing through the whole
 //! stack (`LineTransport` framing + `serve` driver + `VersionDispatcher`).
@@ -8,7 +8,7 @@
 
 use serde_json::{Value, json};
 use tokio::io::{BufReader, split};
-use turbomcp4_client::{Client, ClientError};
+use turbomcp4_client::{ClientError, Connection};
 use turbomcp4_codec::DefaultCodec;
 use turbomcp4_core::{Implementation, McpResult};
 use turbomcp4_protocol::neutral;
@@ -68,9 +68,9 @@ fn draft_params(extra: Value) -> Value {
     Value::Object(obj)
 }
 
-/// Spawn the calculator server on one end of a duplex pipe; return a [`Client`]
+/// Spawn the calculator server on one end of a duplex pipe; return a [`Connection`]
 /// connected to the other end.
-fn connected_client() -> Client {
+fn connected_client() -> Connection {
     let (client_io, server_io) = tokio::io::duplex(64 * 1024);
     let (c_rd, c_wr) = split(client_io);
     let (s_rd, s_wr) = split(server_io);
@@ -82,7 +82,7 @@ fn connected_client() -> Client {
     });
 
     let client_transport = LineTransport::new(BufReader::new(c_rd), c_wr, DefaultCodec::default());
-    Client::new(client_transport)
+    Connection::new(client_transport)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

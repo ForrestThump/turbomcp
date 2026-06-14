@@ -1,4 +1,4 @@
-//! The client connection actor and the [`Client`] handle.
+//! The client connection actor and the [`Connection`] handle.
 //!
 //! ## Concurrency model — the inverted serve driver
 //!
@@ -8,7 +8,7 @@
 //! `&mut self` channel. The borrows never overlap because only *one* transport
 //! future is ever a selected branch:
 //!
-//! - **Outbound:** the [`Client`] handle pushes frames (requests, notifications)
+//! - **Outbound:** the [`Connection`] handle pushes frames (requests, notifications)
 //!   onto an `mpsc`; the loop's `outbound.recv()` arm hands each to
 //!   `transport.send()` — `send` runs in the arm *body*, after a non-transport
 //!   future fired, so it doesn't hold a borrow across the select.
@@ -18,7 +18,7 @@
 //!   `-32601` reply (the client-serving handler lands in Phase 8d), written
 //!   straight to `transport.send()` in the arm body.
 //!
-//! When every [`Client`] handle drops, the outbound channel closes, the
+//! When every [`Connection`] handle drops, the outbound channel closes, the
 //! `outbound.recv()` arm yields `None`, and the loop exits — closing the
 //! transport. Any still-waiting requests are failed with [`ClientError::Closed`].
 
@@ -42,7 +42,7 @@ pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 /// The waiting side of an in-flight request: id → the oneshot its caller awaits.
 type Pending = Mutex<HashMap<RequestId, oneshot::Sender<Result<Value, JsonRpcError>>>>;
 
-/// Shared connection state, held by every [`Client`] clone and the actor.
+/// Shared connection state, held by every [`Connection`] clone and the actor.
 struct Inner {
     /// Frames the client wants to send (the actor owns the receiver).
     outbound: mpsc::Sender<JsonRpcMessage>,
@@ -50,22 +50,24 @@ struct Inner {
     pending: Pending,
     /// Monotonic request-id source (process-local; integer ids).
     next_id: AtomicI64,
-    /// How long [`Client::request`] waits before giving up.
+    /// How long [`Connection::request`] waits before giving up.
     request_timeout: Duration,
 }
 
-/// A handle to a live MCP connection.
+/// A raw connection to a live MCP peer — the transport + request/response
+/// correlation, with no protocol knowledge.
 ///
 /// Cheaply [`Clone`]able (all clones share one connection); dropping the last
-/// clone closes the connection. The low-level [`request`](Self::request) /
-/// [`notify`](Self::notify) methods speak raw JSON-RPC; the typed MCP API
-/// (`initialize`, `list_tools`, …) lands in Phase 8b on top of them.
+/// clone closes the connection. The [`request`](Self::request) /
+/// [`notify`](Self::notify) methods speak raw JSON-RPC. The typed, negotiated
+/// MCP API (`initialize`, `list_tools`, …) is [`Client`](crate::Client), which
+/// wraps a `Connection` and stamps the right version metadata.
 #[derive(Clone)]
-pub struct Client {
+pub struct Connection {
     inner: Arc<Inner>,
 }
 
-impl Client {
+impl Connection {
     /// Spawn the connection actor over `transport` and return a handle, using
     /// the default request timeout.
     pub fn new<T>(transport: T) -> Self
@@ -175,7 +177,7 @@ where
                             break;
                         }
                     }
-                    // All Client handles dropped — nothing more to send.
+                    // All Connection handles dropped — nothing more to send.
                     None => break,
                 }
             }

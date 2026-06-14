@@ -1,15 +1,23 @@
 //! TurboMCP v4 client.
 //!
 //! The other half of the protocol: a [`Client`] drives an MCP server over any
-//! [`Transport`](turbomcp4_service::Transport). Phase 8a establishes the
-//! connection actor and raw request/response plumbing; the typed MCP API
-//! (`initialize`, `list_tools`, the `ConnectMode` probe, the MRTR client loop)
-//! builds on top of it in later sub-phases.
+//! [`Transport`](turbomcp4_service::Transport), speaking version-stable
+//! [`neutral`](turbomcp4_protocol::neutral) types while handling version
+//! negotiation and wire decoding internally.
+//!
+//! - [`Connection`] is the raw transport + request/response correlation.
+//! - [`Client`] / [`ClientBuilder`] add the handshake, the negotiated
+//!   [`ConnectMode`], modern `_meta` stamping, and the typed MCP API.
+//! - [`connect_child`] spawns a server subprocess and connects over its stdio.
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod client;
 mod connection;
 mod error;
+mod stdio;
 
-pub use connection::{Client, DEFAULT_REQUEST_TIMEOUT};
+pub use client::{Client, ClientBuilder, ConnectMode};
+pub use connection::{Connection, DEFAULT_REQUEST_TIMEOUT};
 pub use error::{ClientError, ClientResult};
+pub use stdio::connect_child;

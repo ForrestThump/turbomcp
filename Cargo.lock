@@ -6185,6 +6185,7 @@ dependencies = [
  "tokio",
  "tower",
  "turbomcp4-auth",
+ "turbomcp4-client",
  "turbomcp4-codec",
  "turbomcp4-core",
  "turbomcp4-macros",
