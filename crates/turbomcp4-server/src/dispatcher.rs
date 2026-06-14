@@ -60,6 +60,15 @@ pub struct VersionDispatcher<S> {
     server: S,
     router: Arc<MethodRouter<S>>,
     supported: Vec<ProtocolVersion>,
+    shared: Shared,
+}
+
+/// The dispatcher's shared per-server state — one `Arc` per store, grouped so
+/// the deep handler call chain threads a single value instead of six (and so
+/// cross-store coordination, like session-termination tearing down a session's
+/// subscription routes, has one place to live). Cheap to clone (six `Arc`s).
+#[derive(Clone)]
+struct Shared {
     sessions: Arc<SessionStore>,
     tasks: Option<Arc<TaskStore>>,
     inflight: Arc<InFlightRegistry>,
@@ -74,12 +83,7 @@ impl<S: Clone> Clone for VersionDispatcher<S> {
             server: self.server.clone(),
             router: Arc::clone(&self.router),
             supported: self.supported.clone(),
-            sessions: Arc::clone(&self.sessions),
-            tasks: self.tasks.clone(),
-            inflight: Arc::clone(&self.inflight),
-            subs: Arc::clone(&self.subs),
-            signer: Arc::clone(&self.signer),
-            pending: Arc::clone(&self.pending),
+            shared: self.shared.clone(),
         }
     }
 }
@@ -94,12 +98,14 @@ impl<S: McpServerCore> VersionDispatcher<S> {
             server,
             router: Arc::new(router),
             supported,
-            sessions: Arc::new(SessionStore::default()),
-            tasks: None,
-            inflight: Arc::new(InFlightRegistry::default()),
-            subs: Arc::new(SubscriptionRegistry::default()),
-            signer: Arc::new(StateSigner::new()),
-            pending: Arc::new(PendingRequests::default()),
+            shared: Shared {
+                sessions: Arc::new(SessionStore::default()),
+                tasks: None,
+                inflight: Arc::new(InFlightRegistry::default()),
+                subs: Arc::new(SubscriptionRegistry::default()),
+                signer: Arc::new(StateSigner::new()),
+                pending: Arc::new(PendingRequests::default()),
+            },
         }
     }
 
@@ -107,7 +113,7 @@ impl<S: McpServerCore> VersionDispatcher<S> {
     /// (`*_list_changed`, `resources/updated`) to every live subscription.
     #[must_use]
     pub fn notifier(&self) -> ServerNotifier {
-        ServerNotifier::new(Arc::clone(&self.subs))
+        ServerNotifier::new(Arc::clone(&self.shared.subs))
     }
 
     /// Enable core Tasks (`2025-11-25`): task-augmented `tools/call` plus
@@ -119,7 +125,7 @@ impl<S: McpServerCore> VersionDispatcher<S> {
     /// driven inside a tokio runtime (all bundled transports do this).
     #[must_use]
     pub fn with_task_support(mut self) -> Self {
-        self.tasks = Some(Arc::new(TaskStore::default()));
+        self.shared.tasks = Some(Arc::new(TaskStore::default()));
         self
     }
 }
@@ -139,32 +145,16 @@ impl<S: McpServerCore> Service<JsonRpcMessage> for VersionDispatcher<S> {
         let server = self.server.clone();
         let router = Arc::clone(&self.router);
         let supported = self.supported.clone();
-        let sessions = Arc::clone(&self.sessions);
-        let tasks = self.tasks.clone();
-        let inflight = Arc::clone(&self.inflight);
-        let subs = Arc::clone(&self.subs);
-        let signer = Arc::clone(&self.signer);
-        let pending = Arc::clone(&self.pending);
-        Box::pin(async move {
-            handle(
-                server, router, supported, sessions, tasks, inflight, subs, signer, pending, msg,
-            )
-            .await
-        })
+        let shared = self.shared.clone();
+        Box::pin(async move { handle(server, router, supported, shared, msg).await })
     }
 }
 
-#[allow(clippy::too_many_arguments)] // one per dispatcher store; mirrors the struct
 async fn handle<S: McpServerCore>(
     server: S,
     router: Arc<MethodRouter<S>>,
     supported: Vec<ProtocolVersion>,
-    sessions: Arc<SessionStore>,
-    tasks: Option<Arc<TaskStore>>,
-    inflight: Arc<InFlightRegistry>,
-    subs: Arc<SubscriptionRegistry>,
-    signer: Arc<StateSigner>,
-    pending: Arc<PendingRequests>,
+    shared: Shared,
     msg: JsonRpcMessage,
 ) -> Result<Option<JsonRpcMessage>, ProtocolError> {
     match msg {
@@ -174,29 +164,18 @@ async fn handle<S: McpServerCore>(
             // driver injects the id; HTTP cancels by closing the stream).
             let cancel = CancellationToken::new();
             let _guard = connection_id(req.params.as_ref())
-                .map(|conn| inflight.register(conn, &req.id, cancel.clone()));
+                .map(|conn| shared.inflight.register(conn, &req.id, cancel.clone()));
 
             // `subscriptions/listen` is the one MCP request with no JSON-RPC
             // response: its stream begins with an acknowledged *notification*
             // via the connection's writer, so it can't share `handle_request`'s
             // always-respond contract.
             if req.method == methods::request::SUBSCRIPTIONS_LISTEN {
-                return handle_subscriptions_listen(&router, &supported, &subs, &req, &cancel)
+                return handle_subscriptions_listen(&router, &supported, &shared.subs, &req, &cancel)
                     .await;
             }
 
-            let dispatch = handle_request(
-                server,
-                &router,
-                &supported,
-                &sessions,
-                tasks.as_ref(),
-                &subs,
-                &signer,
-                &pending,
-                req,
-                cancel.clone(),
-            );
+            let dispatch = handle_request(server, &router, &supported, &shared, req, cancel.clone());
             tokio::select! {
                 // Cancelled mid-flight: drop the handler future and send
                 // nothing (cancellation spec: "stop processing … not send a
@@ -206,14 +185,14 @@ async fn handle<S: McpServerCore>(
             }
         }
         JsonRpcMessage::Notification(n) => {
-            handle_notification(&inflight, &subs, &n);
+            handle_notification(&shared.inflight, &shared.subs, &n);
             Ok(None)
         }
         JsonRpcMessage::Response(resp) => {
             // A client→server response answers a server-initiated inline bidi
             // request (legacy elicitation/sampling/roots): route it to the
             // awaiting handler. Unsolicited responses are ignored.
-            if !pending.complete(resp) {
+            if !shared.pending.complete(resp) {
                 tracing::debug!("ignoring unsolicited client->server response");
             }
             Ok(None)
@@ -270,19 +249,19 @@ fn handle_notification(
     }
 }
 
-#[allow(clippy::too_many_arguments)] // one per dispatcher store; mirrors the struct
 async fn handle_request<S: McpServerCore>(
     server: S,
     router: &MethodRouter<S>,
     supported: &[ProtocolVersion],
-    sessions: &SessionStore,
-    tasks: Option<&Arc<TaskStore>>,
-    subs: &Arc<SubscriptionRegistry>,
-    signer: &Arc<StateSigner>,
-    pending: &Arc<PendingRequests>,
+    shared: &Shared,
     req: JsonRpcRequest,
     cancel: CancellationToken,
 ) -> Result<JsonRpcMessage, ProtocolError> {
+    // The fields this path needs; `signer`/`pending` flow on into
+    // `dispatch_capability` via `shared`.
+    let Shared {
+        sessions, tasks, subs, ..
+    } = shared;
     let id = req.id.clone();
     let method = req.method.clone();
 
@@ -330,7 +309,7 @@ async fn handle_request<S: McpServerCore>(
                         Err(e) => return Ok(error_response(id, &e)),
                     }
                     Ok(dispatch_capability::<S, DraftWire>(
-                        server, router, &req, &ctx, signer, pending, id,
+                        server, router, &req, &ctx, shared, id,
                     )
                     .await)
                 }
@@ -361,7 +340,7 @@ async fn handle_request<S: McpServerCore>(
                         }
                     }
                     Ok(dispatch_capability::<S, LegacyWire>(
-                        server, router, &req, &ctx, signer, pending, id,
+                        server, router, &req, &ctx, shared, id,
                     )
                     .await)
                 }
@@ -529,16 +508,16 @@ impl WireFamily for LegacyWire {
     type Complete = legacy::CompleteResult;
 }
 
-#[allow(clippy::too_many_arguments)] // one per dispatcher store; mirrors the struct
 async fn dispatch_capability<S: McpServerCore, W: WireFamily>(
     server: S,
     router: &MethodRouter<S>,
     req: &JsonRpcRequest,
     ctx: &RequestContext,
-    signer: &StateSigner,
-    pending: &Arc<PendingRequests>,
+    shared: &Shared,
     id: RequestId,
 ) -> JsonRpcMessage {
+    let signer = &shared.signer;
+    let pending = &shared.pending;
     let method = req.method.as_str();
     let ctx = ctx.clone();
     let list_params = parse_list_params(req.params.as_ref());
