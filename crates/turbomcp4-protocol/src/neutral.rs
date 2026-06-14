@@ -1307,6 +1307,401 @@ impl From<CompleteResult> for legacy::CompleteResult {
     }
 }
 
+// ---- wire → neutral conversions (the client's inbound path) -------------------
+//
+// The inverse of every conversion above: a client deserializes a server's
+// result into the negotiated version's wire type (codegenned, spec-exact) and
+// narrows it to the neutral common subset. Version-specific envelope fields
+// (`resultType` / `cacheScope` / `ttlMs` / `_meta` / annotations / icons) are
+// dropped — they aren't part of the cross-version surface a client consumes.
+//
+// **Content narrowing is lossy.** Neutral `Content` models only text (Phase 9
+// adds the image/audio/resource typing pass — PLAN §6). A non-text wire block
+// is preserved as its JSON serialization wrapped in `Content::Text` rather than
+// silently dropped, so no information is lost even though the kind is flattened.
+
+/// Wrap a non-text wire content block as text by serializing it — lossy on the
+/// content *kind*, lossless on the payload. Shared by both versions.
+fn content_block_json_fallback<T: serde::Serialize>(block: &T) -> Content {
+    let json = serde_json::to_value(block).ok().map_or_else(
+        || "<unrepresentable content>".to_string(),
+        |v| v.to_string(),
+    );
+    Content::Text(json)
+}
+
+impl From<draft::ContentBlock> for Content {
+    fn from(c: draft::ContentBlock) -> Self {
+        match c {
+            draft::ContentBlock::TextContent(t) => Content::Text(t.text),
+            other => content_block_json_fallback(&other),
+        }
+    }
+}
+
+impl From<draft::Tool> for Tool {
+    fn from(t: draft::Tool) -> Self {
+        Tool {
+            name: t.name,
+            title: t.title,
+            description: t.description,
+            input_schema: serde_json::to_value(&t.input_schema)
+                .unwrap_or_else(|_| Value::Object(Map::new())),
+        }
+    }
+}
+
+impl From<draft::ListToolsResult> for ListToolsResult {
+    fn from(r: draft::ListToolsResult) -> Self {
+        ListToolsResult {
+            tools: r.tools.into_iter().map(Into::into).collect(),
+            next_cursor: r.next_cursor,
+        }
+    }
+}
+
+impl From<draft::CallToolResult> for CallToolResult {
+    fn from(r: draft::CallToolResult) -> Self {
+        CallToolResult {
+            content: r.content.into_iter().map(Into::into).collect(),
+            is_error: r.is_error.unwrap_or(false),
+            structured_content: r.structured_content,
+        }
+    }
+}
+
+impl From<draft::Resource> for Resource {
+    fn from(r: draft::Resource) -> Self {
+        Resource {
+            uri: r.uri,
+            name: r.name,
+            title: r.title,
+            description: r.description,
+            mime_type: r.mime_type,
+            size: r.size.map(|s| u64::try_from(s).unwrap_or(0)),
+        }
+    }
+}
+
+impl From<draft::ReadResourceResultContentsItem> for ResourceContents {
+    fn from(c: draft::ReadResourceResultContentsItem) -> Self {
+        match c {
+            draft::ReadResourceResultContentsItem::TextResourceContents(t) => {
+                ResourceContents::Text {
+                    uri: t.uri,
+                    mime_type: t.mime_type,
+                    text: t.text,
+                }
+            }
+            draft::ReadResourceResultContentsItem::BlobResourceContents(b) => {
+                ResourceContents::Blob {
+                    uri: b.uri,
+                    mime_type: b.mime_type,
+                    blob: b.blob,
+                }
+            }
+        }
+    }
+}
+
+impl From<draft::ListResourcesResult> for ListResourcesResult {
+    fn from(r: draft::ListResourcesResult) -> Self {
+        ListResourcesResult {
+            resources: r.resources.into_iter().map(Into::into).collect(),
+            next_cursor: r.next_cursor,
+        }
+    }
+}
+
+impl From<draft::ReadResourceResult> for ReadResourceResult {
+    fn from(r: draft::ReadResourceResult) -> Self {
+        ReadResourceResult {
+            contents: r.contents.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<draft::ResourceTemplate> for ResourceTemplate {
+    fn from(t: draft::ResourceTemplate) -> Self {
+        ResourceTemplate {
+            uri_template: t.uri_template,
+            name: t.name,
+            title: t.title,
+            description: t.description,
+            mime_type: t.mime_type,
+        }
+    }
+}
+
+impl From<draft::ListResourceTemplatesResult> for ListResourceTemplatesResult {
+    fn from(r: draft::ListResourceTemplatesResult) -> Self {
+        ListResourceTemplatesResult {
+            resource_templates: r.resource_templates.into_iter().map(Into::into).collect(),
+            next_cursor: r.next_cursor,
+        }
+    }
+}
+
+impl From<draft::Role> for Role {
+    fn from(r: draft::Role) -> Self {
+        match r {
+            draft::Role::User => Role::User,
+            draft::Role::Assistant => Role::Assistant,
+        }
+    }
+}
+
+impl From<draft::PromptArgument> for PromptArgument {
+    fn from(a: draft::PromptArgument) -> Self {
+        PromptArgument {
+            name: a.name,
+            title: a.title,
+            description: a.description,
+            required: a.required.unwrap_or(false),
+        }
+    }
+}
+
+impl From<draft::Prompt> for Prompt {
+    fn from(p: draft::Prompt) -> Self {
+        Prompt {
+            name: p.name,
+            title: p.title,
+            description: p.description,
+            arguments: p.arguments.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<draft::PromptMessage> for PromptMessage {
+    fn from(m: draft::PromptMessage) -> Self {
+        PromptMessage {
+            role: m.role.into(),
+            content: m.content.into(),
+        }
+    }
+}
+
+impl From<draft::ListPromptsResult> for ListPromptsResult {
+    fn from(r: draft::ListPromptsResult) -> Self {
+        ListPromptsResult {
+            prompts: r.prompts.into_iter().map(Into::into).collect(),
+            next_cursor: r.next_cursor,
+        }
+    }
+}
+
+impl From<draft::GetPromptResult> for GetPromptResult {
+    fn from(r: draft::GetPromptResult) -> Self {
+        GetPromptResult {
+            description: r.description,
+            messages: r.messages.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<draft::CompleteResult> for CompleteResult {
+    fn from(r: draft::CompleteResult) -> Self {
+        CompleteResult {
+            values: r.completion.values,
+            total: r
+                .completion
+                .total
+                .map(|t| u32::try_from(t).unwrap_or(u32::MAX)),
+            has_more: r.completion.has_more,
+        }
+    }
+}
+
+// ---- 2025-11-25 wire → neutral ------------------------------------------------
+
+impl From<legacy::ContentBlock> for Content {
+    fn from(c: legacy::ContentBlock) -> Self {
+        match c {
+            legacy::ContentBlock::TextContent(t) => Content::Text(t.text),
+            other => content_block_json_fallback(&other),
+        }
+    }
+}
+
+impl From<legacy::Tool> for Tool {
+    fn from(t: legacy::Tool) -> Self {
+        Tool {
+            name: t.name,
+            title: t.title,
+            description: t.description,
+            input_schema: serde_json::to_value(&t.input_schema)
+                .unwrap_or_else(|_| Value::Object(Map::new())),
+        }
+    }
+}
+
+impl From<legacy::ListToolsResult> for ListToolsResult {
+    fn from(r: legacy::ListToolsResult) -> Self {
+        ListToolsResult {
+            tools: r.tools.into_iter().map(Into::into).collect(),
+            next_cursor: r.next_cursor,
+        }
+    }
+}
+
+impl From<legacy::CallToolResult> for CallToolResult {
+    fn from(r: legacy::CallToolResult) -> Self {
+        CallToolResult {
+            content: r.content.into_iter().map(Into::into).collect(),
+            is_error: r.is_error.unwrap_or(false),
+            structured_content: if r.structured_content.is_empty() {
+                None
+            } else {
+                Some(Value::Object(r.structured_content))
+            },
+        }
+    }
+}
+
+impl From<legacy::Resource> for Resource {
+    fn from(r: legacy::Resource) -> Self {
+        Resource {
+            uri: r.uri,
+            name: r.name,
+            title: r.title,
+            description: r.description,
+            mime_type: r.mime_type,
+            size: r.size.map(|s| u64::try_from(s).unwrap_or(0)),
+        }
+    }
+}
+
+impl From<legacy::ReadResourceResultContentsItem> for ResourceContents {
+    fn from(c: legacy::ReadResourceResultContentsItem) -> Self {
+        match c {
+            legacy::ReadResourceResultContentsItem::TextResourceContents(t) => {
+                ResourceContents::Text {
+                    uri: t.uri,
+                    mime_type: t.mime_type,
+                    text: t.text,
+                }
+            }
+            legacy::ReadResourceResultContentsItem::BlobResourceContents(b) => {
+                ResourceContents::Blob {
+                    uri: b.uri,
+                    mime_type: b.mime_type,
+                    blob: b.blob,
+                }
+            }
+        }
+    }
+}
+
+impl From<legacy::ListResourcesResult> for ListResourcesResult {
+    fn from(r: legacy::ListResourcesResult) -> Self {
+        ListResourcesResult {
+            resources: r.resources.into_iter().map(Into::into).collect(),
+            next_cursor: r.next_cursor,
+        }
+    }
+}
+
+impl From<legacy::ReadResourceResult> for ReadResourceResult {
+    fn from(r: legacy::ReadResourceResult) -> Self {
+        ReadResourceResult {
+            contents: r.contents.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<legacy::ResourceTemplate> for ResourceTemplate {
+    fn from(t: legacy::ResourceTemplate) -> Self {
+        ResourceTemplate {
+            uri_template: t.uri_template,
+            name: t.name,
+            title: t.title,
+            description: t.description,
+            mime_type: t.mime_type,
+        }
+    }
+}
+
+impl From<legacy::ListResourceTemplatesResult> for ListResourceTemplatesResult {
+    fn from(r: legacy::ListResourceTemplatesResult) -> Self {
+        ListResourceTemplatesResult {
+            resource_templates: r.resource_templates.into_iter().map(Into::into).collect(),
+            next_cursor: r.next_cursor,
+        }
+    }
+}
+
+impl From<legacy::Role> for Role {
+    fn from(r: legacy::Role) -> Self {
+        match r {
+            legacy::Role::User => Role::User,
+            legacy::Role::Assistant => Role::Assistant,
+        }
+    }
+}
+
+impl From<legacy::PromptArgument> for PromptArgument {
+    fn from(a: legacy::PromptArgument) -> Self {
+        PromptArgument {
+            name: a.name,
+            title: a.title,
+            description: a.description,
+            required: a.required.unwrap_or(false),
+        }
+    }
+}
+
+impl From<legacy::Prompt> for Prompt {
+    fn from(p: legacy::Prompt) -> Self {
+        Prompt {
+            name: p.name,
+            title: p.title,
+            description: p.description,
+            arguments: p.arguments.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<legacy::PromptMessage> for PromptMessage {
+    fn from(m: legacy::PromptMessage) -> Self {
+        PromptMessage {
+            role: m.role.into(),
+            content: m.content.into(),
+        }
+    }
+}
+
+impl From<legacy::ListPromptsResult> for ListPromptsResult {
+    fn from(r: legacy::ListPromptsResult) -> Self {
+        ListPromptsResult {
+            prompts: r.prompts.into_iter().map(Into::into).collect(),
+            next_cursor: r.next_cursor,
+        }
+    }
+}
+
+impl From<legacy::GetPromptResult> for GetPromptResult {
+    fn from(r: legacy::GetPromptResult) -> Self {
+        GetPromptResult {
+            description: r.description,
+            messages: r.messages.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<legacy::CompleteResult> for CompleteResult {
+    fn from(r: legacy::CompleteResult) -> Self {
+        CompleteResult {
+            values: r.completion.values,
+            total: r
+                .completion
+                .total
+                .map(|t| u32::try_from(t).unwrap_or(u32::MAX)),
+            has_more: r.completion.has_more,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1504,5 +1899,122 @@ mod tests {
         let v = serde_json::to_value(&wire).unwrap();
         assert_eq!(v["completion"]["total"], 5);
         assert_eq!(v["completion"]["values"][0], "x");
+    }
+
+    // ---- wire → neutral (the client's inbound path) -----------------------
+    //
+    // Round-trip the common subset: neutral → version wire → neutral must
+    // preserve every field neutral models. The version envelope (resultType,
+    // cacheScope, …) is dropped on the way back, which is the point.
+
+    #[test]
+    fn draft_tools_round_trip_through_neutral() {
+        let original = ListToolsResult::new(alloc::vec![
+            Tool::new("echo", json!({"type": "object"}))
+                .with_title("Echo")
+                .with_description("Echoes input"),
+        ]);
+        let wire: draft::ListToolsResult = original.into();
+        let back: ListToolsResult = wire.into();
+        assert_eq!(back.tools.len(), 1);
+        assert_eq!(back.tools[0].name, "echo");
+        assert_eq!(back.tools[0].title.as_deref(), Some("Echo"));
+        assert_eq!(back.tools[0].description.as_deref(), Some("Echoes input"));
+        assert_eq!(back.tools[0].input_schema["type"], "object");
+    }
+
+    #[test]
+    fn legacy_tools_round_trip_through_neutral() {
+        let original =
+            ListToolsResult::new(alloc::vec![Tool::new("add", json!({"type": "object"}))]);
+        let wire: legacy::ListToolsResult = original.into();
+        let back: ListToolsResult = wire.into();
+        assert_eq!(back.tools[0].name, "add");
+    }
+
+    #[test]
+    fn draft_call_result_round_trips_content_and_is_error() {
+        let original = CallToolResult::error("boom");
+        let wire: draft::CallToolResult = original.into();
+        let back: CallToolResult = wire.into();
+        assert!(back.is_error);
+        assert_eq!(back.content.len(), 1);
+        assert!(matches!(&back.content[0], Content::Text(t) if t == "boom"));
+    }
+
+    #[test]
+    fn legacy_call_result_object_structured_content_round_trips() {
+        let mut original = CallToolResult::text("ok");
+        original.structured_content = Some(json!({"answer": 42}));
+        let wire: legacy::CallToolResult = original.into();
+        let back: CallToolResult = wire.into();
+        assert!(!back.is_error);
+        assert_eq!(back.structured_content, Some(json!({"answer": 42})));
+    }
+
+    #[test]
+    fn read_resource_round_trips_text_and_blob() {
+        let original = ReadResourceResult::new(alloc::vec![
+            ResourceContents::text("file://a", "hi").with_mime_type("text/plain"),
+            ResourceContents::blob("file://b", "Zm9v"),
+        ]);
+        let wire: draft::ReadResourceResult = original.into();
+        let back: ReadResourceResult = wire.into();
+        assert_eq!(back.contents.len(), 2);
+        assert!(
+            matches!(&back.contents[0], ResourceContents::Text { uri, text, mime_type }
+                if uri == "file://a" && text == "hi" && mime_type.as_deref() == Some("text/plain"))
+        );
+        assert!(
+            matches!(&back.contents[1], ResourceContents::Blob { uri, blob, .. }
+                if uri == "file://b" && blob == "Zm9v")
+        );
+    }
+
+    #[test]
+    fn prompts_and_completion_round_trip() {
+        let prompts = ListPromptsResult::new(alloc::vec![
+            Prompt::new("summarize")
+                .with_description("Summarize text")
+                .with_argument(PromptArgument::new("text").required(true)),
+        ]);
+        let wire: draft::ListPromptsResult = prompts.into();
+        let back: ListPromptsResult = wire.into();
+        assert_eq!(back.prompts[0].name, "summarize");
+        assert!(back.prompts[0].arguments[0].required);
+
+        let get = GetPromptResult::new(alloc::vec![PromptMessage::user_text("hello")])
+            .with_description("greeting");
+        let wire: legacy::GetPromptResult = get.into();
+        let back: GetPromptResult = wire.into();
+        assert_eq!(back.description.as_deref(), Some("greeting"));
+        assert!(matches!(&back.messages[0].content, Content::Text(t) if t == "hello"));
+        assert!(matches!(back.messages[0].role, Role::User));
+
+        let complete = CompleteResult::new(alloc::vec!["foo".to_string()])
+            .with_total(1)
+            .with_has_more(false);
+        let wire: draft::CompleteResult = complete.into();
+        let back: CompleteResult = wire.into();
+        assert_eq!(back.values, alloc::vec!["foo".to_string()]);
+        assert_eq!(back.total, Some(1));
+        assert_eq!(back.has_more, Some(false));
+    }
+
+    #[test]
+    fn non_text_content_block_falls_back_to_json_text() {
+        // An image block the neutral `Content` enum can't model is preserved as
+        // its JSON serialization rather than dropped (lossy on kind, not data).
+        let image = draft::ContentBlock::ImageContent(draft::ImageContent {
+            annotations: None,
+            data: "Zm9v".to_string(),
+            meta: None,
+            mime_type: "image/png".to_string(),
+            type_: "image".to_string(),
+        });
+        let neutral: Content = image.into();
+        let Content::Text(json) = neutral;
+        assert!(json.contains("image/png"));
+        assert!(json.contains("Zm9v"));
     }
 }
