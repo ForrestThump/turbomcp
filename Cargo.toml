@@ -130,6 +130,7 @@ jsonschema = { version = "0.46", default-features = false }
 
 # HTTP/WebSocket/Network
 reqwest = { version = "0.13.3", default-features = false, features = ["json", "stream", "rustls", "http2", "brotli", "gzip", "form", "query"] }
+eventsource-stream = "0.2.3"
 axum = { version = "0.8.9", features = ["ws", "tracing", "macros"] }
 tower = { version = "0.5.3", features = ["util", "retry", "timeout"] }
 tower-http = { version = "0.6.9", features = ["compression-br", "compression-gzip", "cors", "timeout", "trace", "limit"] }

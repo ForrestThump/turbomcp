@@ -9,6 +9,11 @@ license = "MIT"
 repository = "https://github.com/Epistates/turbomcp"
 homepage = "https://turbomcp.org"
 
+[features]
+# The Streamable HTTP client transport (reqwest + SSE). Off by default; stdio
+# needs no extra deps.
+http = ["dep:reqwest", "dep:eventsource-stream", "dep:futures"]
+
 [dependencies]
 turbomcp4-core = { workspace = true, features = ["std"] }
 turbomcp4-protocol = { workspace = true }
@@ -20,6 +25,9 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "time", "process", "io-util", "macros"] }
+reqwest = { workspace = true, optional = true }
+eventsource-stream = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
 
 [dev-dependencies]
 turbomcp4-server = { workspace = true }

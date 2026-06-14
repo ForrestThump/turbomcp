@@ -12,7 +12,8 @@ homepage = "https://turbomcp.org"
 [features]
 # stdio is the default transport and is always linked; http is opt-in.
 default = []
-http = ["dep:turbomcp4-transport-http"]
+# Also lights up the client's Streamable HTTP transport when `client` is on.
+http = ["dep:turbomcp4-transport-http", "turbomcp4-client?/http"]
 # OAuth 2.1 resource-server auth (bearer validation, RFC 9728). Most useful
 # with `http`; the metadata endpoint + challenges are HTTP-level.
 auth = ["dep:turbomcp4-auth"]

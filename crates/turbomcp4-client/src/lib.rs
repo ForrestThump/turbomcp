@@ -21,3 +21,8 @@ pub use client::{Client, ClientBuilder, ConnectMode};
 pub use connection::{Connection, DEFAULT_REQUEST_TIMEOUT};
 pub use error::{ClientError, ClientResult};
 pub use stdio::connect_child;
+
+#[cfg(feature = "http")]
+mod http;
+#[cfg(feature = "http")]
+pub use http::{HttpClientError, HttpClientTransport, connect_http};
