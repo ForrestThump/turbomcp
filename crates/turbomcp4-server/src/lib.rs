@@ -39,7 +39,7 @@ pub use context::{
     CallToolContext, CompleteContext, GetPromptContext, ListPromptsContext,
     ListResourceTemplatesContext, ListResourcesContext, ListToolsContext, ReadResourceContext,
 };
-pub use dispatcher::VersionDispatcher;
+pub use dispatcher::{DispatcherSessionTerminator, VersionDispatcher};
 pub use logging::LogSender;
 pub use mrtr::ClientHandle;
 pub use progress::ProgressReporter;

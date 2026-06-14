@@ -89,6 +89,29 @@ impl Shared {
             self.subs.legacy_remove(&id);
         }
     }
+
+    /// Terminate one session: drop its state and its legacy subscription
+    /// routes. Returns whether the session existed. Backs explicit `DELETE`
+    /// session termination.
+    fn terminate_session(&self, id: &str) -> bool {
+        let existed = self.sessions.remove(id);
+        self.subs.legacy_remove(id);
+        existed
+    }
+}
+
+/// The [`SessionTerminator`] handle returned by
+/// [`VersionDispatcher::session_terminator`]: shares the dispatcher's stores so
+/// `DELETE` drops the session state and its subscription routes together.
+#[derive(Clone)]
+pub struct DispatcherSessionTerminator {
+    shared: Shared,
+}
+
+impl turbomcp4_service::SessionTerminator for DispatcherSessionTerminator {
+    fn terminate(&self, session_id: &str) -> bool {
+        self.shared.terminate_session(session_id)
+    }
 }
 
 impl<S: Clone> Clone for VersionDispatcher<S> {
@@ -128,6 +151,18 @@ impl<S: McpServerCore> VersionDispatcher<S> {
     #[must_use]
     pub fn notifier(&self) -> ServerNotifier {
         ServerNotifier::new(Arc::clone(&self.shared.subs))
+    }
+
+    /// A [`SessionTerminator`](turbomcp4_service::SessionTerminator) handle for
+    /// the HTTP transport: hand it to `HttpConfig::with_session_terminator` so a
+    /// client `DELETE` ends its `2025-11-25` session (dropping the session state
+    /// and its subscription routes). Without it, `DELETE` answers `405` (the
+    /// spec permits refusing).
+    #[must_use]
+    pub fn session_terminator(&self) -> DispatcherSessionTerminator {
+        DispatcherSessionTerminator {
+            shared: self.shared.clone(),
+        }
     }
 
     /// Enable core Tasks (`2025-11-25`): task-augmented `tools/call` plus

@@ -85,7 +85,7 @@ use turbomcp4_codec::{Codec, DefaultCodec};
 use turbomcp4_core::{JsonRpcMessage, ProtocolVersion, RequestId, meta};
 use turbomcp4_service::{
     AuthDecision, CancellationToken, HttpAuthenticator, McpService, ProtocolError, RateKey,
-    RateLimiter, outbound,
+    RateLimiter, SessionTerminator, outbound,
 };
 
 /// The session header of the `2025-11-25` Streamable HTTP transport.
@@ -125,6 +125,7 @@ pub struct HttpConfig {
     sse_keepalive: Duration,
     authenticator: Option<Arc<dyn HttpAuthenticator>>,
     rate_limiter: Option<Arc<dyn RateLimiter>>,
+    session_terminator: Option<Arc<dyn SessionTerminator>>,
 }
 
 impl core::fmt::Debug for HttpConfig {
@@ -137,6 +138,7 @@ impl core::fmt::Debug for HttpConfig {
             .field("sse_keepalive", &self.sse_keepalive)
             .field("authenticator", &self.authenticator.is_some())
             .field("rate_limiter", &self.rate_limiter.is_some())
+            .field("session_terminator", &self.session_terminator.is_some())
             .finish()
     }
 }
@@ -152,6 +154,7 @@ impl Default for HttpConfig {
             sse_keepalive: DEFAULT_SSE_KEEPALIVE,
             authenticator: None,
             rate_limiter: None,
+            session_terminator: None,
         }
     }
 }
@@ -244,6 +247,18 @@ impl HttpConfig {
         self.rate_limiter = Some(rate_limiter);
         self
     }
+
+    /// Honor client-initiated session termination: a `DELETE` carrying an
+    /// `Mcp-Session-Id` ends that `2025-11-25` session (dropping its state and
+    /// subscription routes) and answers `204`; an unknown session answers
+    /// `404`. Obtain the terminator from
+    /// `VersionDispatcher::session_terminator`. Without it, `DELETE` answers
+    /// `405` (the spec permits a server refusing termination).
+    #[must_use]
+    pub fn with_session_terminator(mut self, terminator: Arc<dyn SessionTerminator>) -> Self {
+        self.session_terminator = Some(terminator);
+        self
+    }
 }
 
 /// Errors from running the HTTP transport.
@@ -266,6 +281,7 @@ struct HttpState<S> {
     sse_keepalive: Duration,
     authenticator: Option<Arc<dyn HttpAuthenticator>>,
     rate_limiter: Option<Arc<dyn RateLimiter>>,
+    session_terminator: Option<Arc<dyn SessionTerminator>>,
 }
 
 /// Build the configured axum [`Router`] for `service` without binding a socket —
@@ -283,11 +299,12 @@ where
         sse_keepalive: config.sse_keepalive,
         authenticator: config.authenticator.clone(),
         rate_limiter: config.rate_limiter.clone(),
+        session_terminator: config.session_terminator.clone(),
     };
     let mut app = Router::new()
         .route(
             &config.path,
-            post(mcp_post::<S>).get(mcp_get::<S>).delete(mcp_delete),
+            post(mcp_post::<S>).get(mcp_get::<S>).delete(mcp_delete::<S>),
         )
         .layer(DefaultBodyLimit::max(config.max_body_bytes));
     // RFC 9728 Protected Resource Metadata is public (no auth) discovery.
@@ -776,17 +793,44 @@ where
     sse_response(state.codec, rx, registration, state.sse_keepalive)
 }
 
-/// The `2025-11-25` spec permits answering session-termination `DELETE` with
-/// `405` ("the server does not allow clients to terminate sessions"); sessions
-/// are reclaimed by store eviction instead. Explicit termination may land with
-/// the Phase 7 hardening pass.
-async fn mcp_delete() -> Response {
-    (
-        StatusCode::METHOD_NOT_ALLOWED,
-        [(header::ALLOW, "POST")],
-        "client-initiated session termination is not supported; sessions expire by eviction",
-    )
-        .into_response()
+/// Client-initiated session termination (`2025-11-25` spec §Session
+/// Management). With a [`SessionTerminator`] configured
+/// ([`HttpConfig::with_session_terminator`]): a `DELETE` carrying an
+/// `Mcp-Session-Id` ends that session — `204` if it existed, `404` if not.
+/// Without one, the spec permits refusing: `405`. The endpoint is part of the
+/// protected resource, so the origin + auth guards apply.
+async fn mcp_delete<S>(State(state): State<HttpState<S>>, headers: HeaderMap) -> Response
+where
+    S: McpService + Clone + Sync,
+    S::Future: Send + 'static,
+{
+    if let Some(rejection) = check_origin(&state.origins, &headers) {
+        return rejection;
+    }
+    if let Err(rejection) = enforce_auth(&state, &headers, None).await {
+        return rejection;
+    }
+    let Some(terminator) = &state.session_terminator else {
+        return (
+            StatusCode::METHOD_NOT_ALLOWED,
+            [(header::ALLOW, "POST")],
+            "client-initiated session termination is not supported; sessions expire by eviction",
+        )
+            .into_response();
+    };
+    let Some(sid) = headers
+        .get(&HEADER_SESSION_ID)
+        .and_then(|v| v.to_str().ok())
+    else {
+        return (StatusCode::BAD_REQUEST, "DELETE requires an Mcp-Session-Id header").into_response();
+    };
+    if terminator.terminate(sid) {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        // Unknown/already-terminated session: the spec maps this to 404 so the
+        // client knows it's gone.
+        StatusCode::NOT_FOUND.into_response()
+    }
 }
 
 /// Serve the RFC 9728 Protected Resource Metadata document (public, no auth).
