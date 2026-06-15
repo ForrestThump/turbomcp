@@ -145,7 +145,12 @@ async fn post_and_pump(shared: Arc<Shared>, msg: JsonRpcMessage) {
 
 /// The fallible body of a POST + response pump. Errors are returned as a string
 /// for [`post_and_pump`] to route.
-async fn pump(shared: &Shared, msg: JsonRpcMessage) -> Result<(), String> {
+async fn pump(shared: &Shared, mut msg: JsonRpcMessage) -> Result<(), String> {
+    // `#[mcp_header]` mirroring: lift the marked params out of the `_meta` signal
+    // into `Mcp-Param-*` headers (their values stay in `arguments`). Done before
+    // serialization so the signal never reaches the wire body.
+    let header_params = extract_header_params(&mut msg);
+
     let body = serde_json::to_string(&msg).map_err(|e| format!("encode failed: {e}"))?;
 
     let mut req = shared
@@ -156,6 +161,9 @@ async fn pump(shared: &Shared, msg: JsonRpcMessage) -> Result<(), String> {
         .body(body);
     if let Some(sid) = shared.session.lock().expect("session mutex").clone() {
         req = req.header(SESSION_HEADER, sid);
+    }
+    for (name, value) in header_params {
+        req = req.header(format!("Mcp-Param-{name}"), value);
     }
 
     let resp = req
@@ -211,6 +219,55 @@ async fn pump(shared: &Shared, msg: JsonRpcMessage) -> Result<(), String> {
     Ok(())
 }
 
+/// Pull the `#[mcp_header]` mirror signal out of a request's `_meta` and resolve
+/// each named param to its `(name, string-value)` from `arguments`.
+///
+/// Mutates `msg`: removes the [`HEADER_PARAMS_META_KEY`](crate::client::HEADER_PARAMS_META_KEY)
+/// entry so it never reaches the wire. The param values stay in `arguments`
+/// (mirroring — the header is an HTTP-visible copy, not a move).
+fn extract_header_params(msg: &mut JsonRpcMessage) -> Vec<(String, String)> {
+    let JsonRpcMessage::Request(req) = msg else {
+        return Vec::new();
+    };
+    let Some(params) = req
+        .params
+        .as_mut()
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return Vec::new();
+    };
+
+    // Take the list of header-param names out of `_meta`.
+    let names: Vec<String> = params
+        .get_mut("_meta")
+        .and_then(serde_json::Value::as_object_mut)
+        .and_then(|meta| meta.remove(crate::client::HEADER_PARAMS_META_KEY))
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    if names.is_empty() {
+        return Vec::new();
+    }
+
+    let Some(args) = params
+        .get("arguments")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return Vec::new();
+    };
+    names
+        .into_iter()
+        .filter_map(|name| {
+            args.get(&name).map(|v| {
+                let value = match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                (name, value)
+            })
+        })
+        .collect()
+}
+
 /// Connect a [`Client`] to an MCP server over Streamable HTTP at `url`, running
 /// the handshake.
 ///
@@ -219,4 +276,64 @@ async fn pump(shared: &Shared, msg: JsonRpcMessage) -> Result<(), String> {
 pub async fn connect_http(builder: ClientBuilder, url: impl Into<String>) -> ClientResult<Client> {
     let transport = HttpClientTransport::new(url)?;
     builder.connect(transport).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use turbomcp4_core::JsonRpcRequest;
+
+    #[test]
+    fn extracts_marked_header_params_and_strips_the_signal() {
+        let mut msg = JsonRpcMessage::Request(JsonRpcRequest::new(
+            1,
+            "tools/call",
+            Some(json!({
+                "name": "locate",
+                "arguments": { "city": "SF", "region": "us-west", "n": 3 },
+                "_meta": {
+                    crate::client::HEADER_PARAMS_META_KEY: ["region", "n"],
+                    "io.modelcontextprotocol/protocolVersion": "DRAFT-2026-v1",
+                },
+            })),
+        ));
+
+        let headers = extract_header_params(&mut msg);
+        // String value passed through verbatim; non-string serialized as JSON.
+        assert_eq!(
+            headers,
+            vec![
+                ("region".to_owned(), "us-west".to_owned()),
+                ("n".to_owned(), "3".to_owned())
+            ]
+        );
+
+        // The signal is stripped; the values remain in `arguments`; other `_meta`
+        // keys are untouched.
+        let JsonRpcMessage::Request(req) = &msg else {
+            unreachable!()
+        };
+        let params = req.params.as_ref().unwrap();
+        assert!(
+            params["_meta"]
+                .get(crate::client::HEADER_PARAMS_META_KEY)
+                .is_none()
+        );
+        assert_eq!(
+            params["_meta"]["io.modelcontextprotocol/protocolVersion"],
+            "DRAFT-2026-v1"
+        );
+        assert_eq!(params["arguments"]["region"], "us-west");
+    }
+
+    #[test]
+    fn no_signal_yields_no_headers() {
+        let mut msg = JsonRpcMessage::Request(JsonRpcRequest::new(
+            1,
+            "tools/call",
+            Some(json!({ "name": "x", "arguments": { "a": 1 } })),
+        ));
+        assert!(extract_header_params(&mut msg).is_empty());
+    }
 }

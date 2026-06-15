@@ -16,7 +16,8 @@
 //! # Ok(()) }
 //! ```
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::de::DeserializeOwned;
@@ -36,6 +37,12 @@ use crate::handler::{ClientHandler, dispatch_server_request};
 /// Cap on MRTR re-issue rounds — a guard against a server that keeps answering
 /// `input_required` forever.
 const MAX_MRTR_ROUNDS: usize = 16;
+
+/// Internal `_meta` key carrying the list of `#[mcp_header]` parameter names to
+/// mirror as `Mcp-Param-*` headers. Consumed and stripped by the HTTP transport
+/// (and sanitized server-side as an `io.turbomcp.internal/*` key on other
+/// transports), so it never reaches a handler.
+pub(crate) const HEADER_PARAMS_META_KEY: &str = "io.turbomcp.internal/headerParams";
 
 /// How a [`Client`] decides which protocol version to speak.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -156,6 +163,7 @@ impl ClientBuilder {
             instructions: outcome.instructions,
             request_meta,
             handler: self.handler.clone(),
+            header_params: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -236,6 +244,9 @@ pub struct Client {
     instructions: Option<String>,
     request_meta: Map<String, Value>,
     handler: Option<Arc<dyn ClientHandler>>,
+    /// Tool name → its `#[mcp_header]` parameter names, learned from `list_tools`.
+    /// Drives transparent `Mcp-Param-*` mirroring on `call_tool`.
+    header_params: Arc<Mutex<HashMap<String, Vec<String>>>>,
 }
 
 impl Client {
@@ -286,7 +297,21 @@ impl Client {
         let v = self
             .versioned_request(request::TOOLS_LIST, list_params(cursor))
             .await?;
-        self.decode::<draft::ListToolsResult, legacy::ListToolsResult, _>(v)
+        let result: neutral::ListToolsResult =
+            self.decode::<draft::ListToolsResult, legacy::ListToolsResult, _>(v)?;
+        // Learn which params each tool marks `#[mcp_header]` so `call_tool` can
+        // mirror them transparently. (Last-seen page wins; tools paginate cleanly.)
+        let mut cache = self.header_params.lock().expect("header_params poisoned");
+        for tool in &result.tools {
+            let headers = header_param_names(&tool.input_schema);
+            if headers.is_empty() {
+                cache.remove(&tool.name);
+            } else {
+                cache.insert(tool.name.clone(), headers);
+            }
+        }
+        drop(cache);
+        Ok(result)
     }
 
     /// Call a tool by name with an arguments object.
@@ -299,9 +324,32 @@ impl Client {
         name: impl Into<String>,
         arguments: Map<String, Value>,
     ) -> ClientResult<neutral::CallToolResult> {
+        let name = name.into();
+        // Mirror any `#[mcp_header]` params (learned from `list_tools`) to
+        // `Mcp-Param-*` headers — values stay in `arguments`; the HTTP transport
+        // lifts the signal into headers. No-op if the schema wasn't listed.
+        let header_names: Vec<String> = self
+            .header_params
+            .lock()
+            .expect("header_params poisoned")
+            .get(&name)
+            .map(|names| {
+                names
+                    .iter()
+                    .filter(|n| arguments.contains_key(*n))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let mut params = Map::new();
-        params.insert("name".into(), json!(name.into()));
+        params.insert("name".into(), json!(name));
         params.insert("arguments".into(), Value::Object(arguments));
+        if !header_names.is_empty() {
+            let mut meta = Map::new();
+            meta.insert(HEADER_PARAMS_META_KEY.into(), json!(header_names));
+            params.insert("_meta".into(), Value::Object(meta));
+        }
         let v = self.mrtr_request(request::TOOLS_CALL, params).await?;
         self.decode::<draft::CallToolResult, legacy::CallToolResult, _>(v)
     }
@@ -463,7 +511,16 @@ impl Client {
         mut params: Map<String, Value>,
     ) -> ClientResult<Value> {
         if self.version == ProtocolVersion::Draft2026V1 {
-            params.insert("_meta".into(), Value::Object(self.request_meta.clone()));
+            // Merge the version envelope into any existing `_meta` (e.g. the
+            // `#[mcp_header]` mirror signal) rather than clobbering it.
+            let meta = params
+                .entry("_meta")
+                .or_insert_with(|| Value::Object(Map::new()));
+            if let Some(meta) = meta.as_object_mut() {
+                for (key, value) in &self.request_meta {
+                    meta.entry(key.clone()).or_insert_with(|| value.clone());
+                }
+            }
         }
         self.conn.request(method, Some(Value::Object(params))).await
     }
@@ -494,4 +551,18 @@ fn list_params(cursor: Option<&str>) -> Map<String, Value> {
         params.insert("cursor".into(), json!(cursor));
     }
     params
+}
+
+/// The names of a tool's `#[mcp_header]`-marked parameters — its input-schema
+/// properties flagged `"x-mcp-header": true` (set by the `#[mcp_header]` macro
+/// marker via `mark_mcp_header`).
+fn header_param_names(input_schema: &Value) -> Vec<String> {
+    let Some(properties) = input_schema.get("properties").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    properties
+        .iter()
+        .filter(|(_, schema)| schema.get("x-mcp-header").and_then(Value::as_bool) == Some(true))
+        .map(|(name, _)| name.clone())
+        .collect()
 }

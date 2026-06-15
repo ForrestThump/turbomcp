@@ -95,6 +95,56 @@ use turbomcp4_service::{
 const HEADER_SESSION_ID: HeaderName = HeaderName::from_static("mcp-session-id");
 /// The per-request version header of the `2025-11-25` Streamable HTTP transport.
 const HEADER_PROTOCOL_VERSION: HeaderName = HeaderName::from_static("mcp-protocol-version");
+/// Header-name prefix carrying a `#[mcp_header]` tool parameter (`Mcp-Param-<name>`).
+/// Compared case-insensitively (HTTP lowercases header names), so parameter names
+/// must be lowercase/`snake_case` to round-trip — the Rust argument convention.
+const MCP_PARAM_PREFIX: &str = "mcp-param-";
+
+/// Fold `Mcp-Param-*` request headers into a `tools/call` request's `arguments`
+/// (`#[mcp_header]` transport mirroring, P4-4). Only fills parameters **absent**
+/// from the body, so an explicit body argument always wins over a (possibly
+/// spoofed) header. A header value is parsed as JSON when it parses, else taken
+/// as a string. No-op for any other method.
+fn merge_param_headers(msg: &mut JsonRpcMessage, headers: &HeaderMap) {
+    let JsonRpcMessage::Request(req) = msg else {
+        return;
+    };
+    if req.method != "tools/call" {
+        return;
+    }
+    // Collect candidate headers first so we touch the body only if there are any.
+    let mut params: Vec<(String, &HeaderValue)> = Vec::new();
+    for (name, value) in headers {
+        if let Some(param) = name.as_str().strip_prefix(MCP_PARAM_PREFIX)
+            && !param.is_empty()
+        {
+            params.push((param.to_owned(), value));
+        }
+    }
+    if params.is_empty() {
+        return;
+    }
+
+    let body = req.params.get_or_insert_with(|| json!({}));
+    let Some(obj) = body.as_object_mut() else {
+        return;
+    };
+    let args = obj.entry("arguments").or_insert_with(|| json!({}));
+    let Some(args) = args.as_object_mut() else {
+        return;
+    };
+    for (param, value) in params {
+        if args.contains_key(&param) {
+            continue; // body wins
+        }
+        let Ok(raw) = value.to_str() else {
+            continue; // non-ASCII header value — skip
+        };
+        let parsed = serde_json::from_str::<serde_json::Value>(raw)
+            .unwrap_or_else(|_| serde_json::Value::String(raw.to_owned()));
+        args.insert(param, parsed);
+    }
+}
 
 /// Buffered events per SSE stream; a consumer this far behind backpressures
 /// publishers (the registry awaits `send`).
@@ -432,6 +482,12 @@ where
         // stateful path requires a session (spec §Session Management).
         return session_required_rejection();
     }
+
+    // `#[mcp_header]` transport mirroring (P4-4): fold any `Mcp-Param-*` headers
+    // into the `tools/call` arguments so a header-supplied param reaches the
+    // handler. Body args win (fill-absent), so a spoofed header can't override
+    // an explicit body value.
+    merge_param_headers(&mut msg, &headers);
 
     // A modern `subscriptions/listen` request answers with a long-lived SSE
     // stream rather than a JSON body. (A legacy-stamped or malformed listen
@@ -1062,4 +1118,65 @@ fn protocol_error_response(err: &ProtocolError) -> Response {
         "error": { "code": err.jsonrpc_code(), "message": err.to_string() },
     });
     (status, Json(body)).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+    use turbomcp4_core::JsonRpcRequest;
+
+    fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(
+                HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                HeaderValue::from_str(v).unwrap(),
+            );
+        }
+        h
+    }
+
+    #[test]
+    fn merge_fills_absent_args_parsing_json_then_string() {
+        let mut msg = JsonRpcMessage::Request(JsonRpcRequest::new(
+            1,
+            "tools/call",
+            Some(json!({ "name": "locate", "arguments": { "city": "SF" } })),
+        ));
+        merge_param_headers(
+            &mut msg,
+            &headers(&[("Mcp-Param-region", "us-west"), ("Mcp-Param-n", "3")]),
+        );
+        let JsonRpcMessage::Request(req) = &msg else {
+            unreachable!()
+        };
+        let args = &req.params.as_ref().unwrap()["arguments"];
+        assert_eq!(args["region"], "us-west"); // not valid JSON → string
+        assert_eq!(args["n"], Value::from(3)); // parses as JSON number
+    }
+
+    #[test]
+    fn merge_does_not_override_body_args() {
+        let mut msg = JsonRpcMessage::Request(JsonRpcRequest::new(
+            1,
+            "tools/call",
+            Some(json!({ "name": "locate", "arguments": { "region": "body" } })),
+        ));
+        merge_param_headers(&mut msg, &headers(&[("Mcp-Param-region", "header")]));
+        let JsonRpcMessage::Request(req) = &msg else {
+            unreachable!()
+        };
+        assert_eq!(req.params.as_ref().unwrap()["arguments"]["region"], "body");
+    }
+
+    #[test]
+    fn merge_ignores_non_tool_call_methods() {
+        let mut msg = JsonRpcMessage::Request(JsonRpcRequest::new(1, "tools/list", None));
+        merge_param_headers(&mut msg, &headers(&[("Mcp-Param-region", "us-west")]));
+        let JsonRpcMessage::Request(req) = &msg else {
+            unreachable!()
+        };
+        assert!(req.params.is_none());
+    }
 }
