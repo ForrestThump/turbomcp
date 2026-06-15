@@ -8,19 +8,22 @@
 //! `&mut self` channel. The borrows never overlap because only *one* transport
 //! future is ever a selected branch:
 //!
-//! - **Outbound:** the [`Connection`] handle pushes frames (requests, notifications)
-//!   onto an `mpsc`; the loop's `outbound.recv()` arm hands each to
-//!   `transport.send()` — `send` runs in the arm *body*, after a non-transport
-//!   future fired, so it doesn't hold a borrow across the select.
+//! - **Outbound:** the [`Connection`] handle pushes frames (requests,
+//!   notifications, replies to server→client requests) onto an `mpsc`; the
+//!   loop's `outbound.recv()` arm hands each to `transport.send()` — `send` runs
+//!   in the arm *body*, after a non-transport future fired, so it doesn't hold a
+//!   borrow across the select.
 //! - **Inbound:** `transport.recv()` *is* a selected future. A `Response` is
 //!   matched to its waiting request via the [`Pending`] table; a `Notification`
-//!   is (for now) logged and dropped; a server→client `Request` gets a
-//!   `-32601` reply (the client-serving handler lands in Phase 8d), written
-//!   straight to `transport.send()` in the arm body.
+//!   is (for now) logged and dropped; a server→client `Request` is dispatched to
+//!   the [`ClientHandler`] (elicit/sample/roots) on a spawned task whose reply
+//!   is sent back through a [`WeakSender`](mpsc::WeakSender) — or, with no
+//!   handler, answered `-32601` inline.
 //!
-//! When every [`Connection`] handle drops, the outbound channel closes, the
+//! The actor holds **no strong** outbound `Sender` (only a [`WeakSender`] for
+//! replies), so when every [`Connection`] handle drops, the channel closes, the
 //! `outbound.recv()` arm yields `None`, and the loop exits — closing the
-//! transport. Any still-waiting requests are failed with [`ClientError::Closed`].
+//! transport and failing any still-waiting requests with [`ClientError::Closed`].
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -34,20 +37,22 @@ use turbomcp4_core::{JsonRpcError, JsonRpcMessage, JsonRpcRequest, JsonRpcRespon
 use turbomcp4_service::Transport;
 
 use crate::error::{ClientError, ClientResult};
+use crate::handler::{ClientHandler, dispatch_server_request};
 
 /// Default per-request timeout — a request with no answer in this window fails
 /// with [`ClientError::Timeout`] rather than hanging forever.
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// The waiting side of an in-flight request: id → the oneshot its caller awaits.
+/// The waiting side of in-flight requests: id → the oneshot its caller awaits.
 type Pending = Mutex<HashMap<RequestId, oneshot::Sender<Result<Value, JsonRpcError>>>>;
 
-/// Shared connection state, held by every [`Connection`] clone and the actor.
+/// Shared connection state, held by every [`Connection`] clone.
 struct Inner {
-    /// Frames the client wants to send (the actor owns the receiver).
+    /// Frames the client wants to send (the actor owns the receiver). The actor
+    /// holds only a `WeakSender`, so dropping all handles closes the channel.
     outbound: mpsc::Sender<JsonRpcMessage>,
-    /// In-flight requests awaiting a response.
-    pending: Pending,
+    /// In-flight requests awaiting a response (shared with the actor).
+    pending: Arc<Pending>,
     /// Monotonic request-id source (process-local; integer ids).
     next_id: AtomicI64,
     /// How long [`Connection::request`] waits before giving up.
@@ -68,30 +73,53 @@ pub struct Connection {
 }
 
 impl Connection {
-    /// Spawn the connection actor over `transport` and return a handle, using
-    /// the default request timeout.
+    /// Spawn the connection actor over `transport` with the default timeout and
+    /// no client-serving handler.
     pub fn new<T>(transport: T) -> Self
     where
         T: Transport,
     {
-        Self::with_timeout(transport, DEFAULT_REQUEST_TIMEOUT)
+        Self::connect(transport, DEFAULT_REQUEST_TIMEOUT, None)
     }
 
-    /// Spawn the connection actor with an explicit per-request timeout.
+    /// Spawn the connection actor with an explicit per-request timeout and no
+    /// client-serving handler.
     pub fn with_timeout<T>(transport: T, request_timeout: Duration) -> Self
+    where
+        T: Transport,
+    {
+        Self::connect(transport, request_timeout, None)
+    }
+
+    /// Spawn the connection actor with a timeout and an optional
+    /// [`ClientHandler`] for server→client requests (elicit/sample/roots).
+    pub fn connect<T>(
+        transport: T,
+        request_timeout: Duration,
+        handler: Option<Arc<dyn ClientHandler>>,
+    ) -> Self
     where
         T: Transport,
     {
         // Capacity mirrors the server driver's default outbound buffer.
         let (tx, rx) = mpsc::channel::<JsonRpcMessage>(1024);
-        let inner = Arc::new(Inner {
-            outbound: tx,
-            pending: Mutex::new(HashMap::new()),
-            next_id: AtomicI64::new(1),
-            request_timeout,
-        });
-        tokio::spawn(actor(transport, rx, Arc::clone(&inner)));
-        Self { inner }
+        let pending: Arc<Pending> = Arc::new(Mutex::new(HashMap::new()));
+        let weak_out = tx.downgrade();
+        tokio::spawn(actor(
+            transport,
+            rx,
+            Arc::clone(&pending),
+            weak_out,
+            handler,
+        ));
+        Self {
+            inner: Arc::new(Inner {
+                outbound: tx,
+                pending,
+                next_id: AtomicI64::new(1),
+                request_timeout,
+            }),
+        }
     }
 
     /// Issue a request and await its result.
@@ -149,6 +177,19 @@ impl Connection {
             .map_err(|_| ClientError::Closed)
     }
 
+    /// Push a raw frame onto the outbound wire (e.g. a reply to a server→client
+    /// request). Ordered with all other outbound frames by the single writer.
+    ///
+    /// # Errors
+    /// [`ClientError::Closed`] if the connection is gone.
+    pub async fn send_message(&self, msg: JsonRpcMessage) -> ClientResult<()> {
+        self.inner
+            .outbound
+            .send(msg)
+            .await
+            .map_err(|_| ClientError::Closed)
+    }
+
     /// Drop a pending request that will never complete (timed out, or never
     /// reached the wire).
     fn forget(&self, id: &RequestId) {
@@ -161,14 +202,19 @@ impl Connection {
 }
 
 /// The connection actor: owns the transport, multiplexes both directions.
-async fn actor<T>(mut transport: T, mut outbound: mpsc::Receiver<JsonRpcMessage>, inner: Arc<Inner>)
-where
+async fn actor<T>(
+    mut transport: T,
+    mut outbound: mpsc::Receiver<JsonRpcMessage>,
+    pending: Arc<Pending>,
+    weak_out: mpsc::WeakSender<JsonRpcMessage>,
+    handler: Option<Arc<dyn ClientHandler>>,
+) where
     T: Transport,
 {
     loop {
         tokio::select! {
             biased;
-            // Outbound: a client-initiated frame to put on the wire.
+            // Outbound: a frame to put on the wire.
             out = outbound.recv() => {
                 match out {
                     Some(msg) => {
@@ -185,7 +231,7 @@ where
             frame = transport.recv() => {
                 match frame {
                     Ok(Some(msg)) => {
-                        if let Some(reply) = route_inbound(msg, &inner) {
+                        if let Some(reply) = route_inbound(msg, &pending, &handler, &weak_out) {
                             if let Err(e) = transport.send(reply).await {
                                 tracing::debug!(error = %e, "client reply send failed; closing");
                                 break;
@@ -204,45 +250,67 @@ where
 
     // Connection is down: drop every waiting oneshot sender. A caller blocked in
     // `request` sees its receiver close and returns `ClientError::Closed`.
-    inner
-        .pending
-        .lock()
-        .expect("pending mutex poisoned")
-        .clear();
+    pending.lock().expect("pending mutex poisoned").clear();
 }
 
-/// Route one inbound frame. Returns `Some(reply)` if the actor must write a
-/// frame back (only for server→client requests, for now an error reply).
-fn route_inbound(msg: JsonRpcMessage, inner: &Inner) -> Option<JsonRpcMessage> {
+/// Route one inbound frame. Returns `Some(reply)` for an *inline* reply the
+/// actor must write (only the no-handler `-32601` case); handled server→client
+/// requests are dispatched on a spawned task that replies via `weak_out`.
+fn route_inbound(
+    msg: JsonRpcMessage,
+    pending: &Arc<Pending>,
+    handler: &Option<Arc<dyn ClientHandler>>,
+    weak_out: &mpsc::WeakSender<JsonRpcMessage>,
+) -> Option<JsonRpcMessage> {
     match msg {
         JsonRpcMessage::Response(resp) => {
-            complete_pending(resp, inner);
+            complete_pending(resp, pending);
             None
         }
         JsonRpcMessage::Notification(n) => {
             tracing::trace!(method = %n.method, "client received notification (dropped)");
             None
         }
-        JsonRpcMessage::Request(req) => {
-            // Phase 8d wires the client-serving handler (elicit/sample/roots).
-            // Until then, refuse politely rather than hang the server.
-            tracing::debug!(method = %req.method, "server→client request not yet handled");
-            Some(JsonRpcMessage::Response(JsonRpcResponse::error(
-                req.id,
-                JsonRpcError {
-                    code: -32601,
-                    message: format!("method not found: {}", req.method),
-                    data: None,
-                },
-            )))
-        }
+        JsonRpcMessage::Request(req) => match handler {
+            // Dispatch on a task so a slow handler (user interaction) doesn't
+            // head-of-line-block inbound reads; reply via the WeakSender.
+            Some(handler) => {
+                let handler = Arc::clone(handler);
+                let weak_out = weak_out.clone();
+                tokio::spawn(async move {
+                    let id = req.id.clone();
+                    let reply =
+                        match dispatch_server_request(handler.as_ref(), &req.method, req.params)
+                            .await
+                        {
+                            Ok(value) => JsonRpcResponse::success(id, value),
+                            Err(err) => JsonRpcResponse::error(id, err),
+                        };
+                    if let Some(tx) = weak_out.upgrade() {
+                        let _ = tx.send(JsonRpcMessage::Response(reply)).await;
+                    }
+                });
+                None
+            }
+            // No handler configured: refuse politely rather than hang the server.
+            None => {
+                tracing::debug!(method = %req.method, "server→client request with no handler");
+                Some(JsonRpcMessage::Response(JsonRpcResponse::error(
+                    req.id,
+                    JsonRpcError {
+                        code: -32601,
+                        message: format!("method not found: {}", req.method),
+                        data: None,
+                    },
+                )))
+            }
+        },
     }
 }
 
 /// Deliver a response to the request waiting on its id, if any.
-fn complete_pending(resp: JsonRpcResponse, inner: &Inner) {
-    let waiter = inner
-        .pending
+fn complete_pending(resp: JsonRpcResponse, pending: &Arc<Pending>) {
+    let waiter = pending
         .lock()
         .expect("pending mutex poisoned")
         .remove(&resp.id);

@@ -16,6 +16,7 @@
 //! # Ok(()) }
 //! ```
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::de::DeserializeOwned;
@@ -30,6 +31,11 @@ use turbomcp4_service::Transport;
 
 use crate::connection::Connection;
 use crate::error::{ClientError, ClientResult};
+use crate::handler::{ClientHandler, dispatch_server_request};
+
+/// Cap on MRTR re-issue rounds — a guard against a server that keeps answering
+/// `input_required` forever.
+const MAX_MRTR_ROUNDS: usize = 16;
 
 /// How a [`Client`] decides which protocol version to speak.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -46,12 +52,13 @@ pub enum ConnectMode {
 
 /// Builds a [`Client`]: identity, advertised capabilities, connect mode, and
 /// timeout, then [`connect`](ClientBuilder::connect)s over a transport.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ClientBuilder {
     client_info: Implementation,
     capabilities: Value,
     connect_mode: ConnectMode,
     request_timeout: Duration,
+    handler: Option<Arc<dyn ClientHandler>>,
 }
 
 impl ClientBuilder {
@@ -62,7 +69,17 @@ impl ClientBuilder {
             capabilities: Value::Object(Map::new()),
             connect_mode: ConnectMode::Auto,
             request_timeout: crate::connection::DEFAULT_REQUEST_TIMEOUT,
+            handler: None,
         }
+    }
+
+    /// Set the [`ClientHandler`] that answers server→client requests
+    /// (elicitation, sampling, roots). Required to answer elicitation on either
+    /// version — and, on the modern path, also drives the MRTR loop.
+    #[must_use]
+    pub fn with_handler<H: ClientHandler>(mut self, handler: H) -> Self {
+        self.handler = Some(Arc::new(handler));
+        self
     }
 
     /// Set the capabilities this client advertises (e.g. `elicitation`,
@@ -98,7 +115,7 @@ impl ClientBuilder {
     where
         T: Transport,
     {
-        let conn = Connection::with_timeout(transport, self.request_timeout);
+        let conn = Connection::connect(transport, self.request_timeout, self.handler.clone());
         self.handshake(conn).await
     }
 
@@ -138,6 +155,7 @@ impl ClientBuilder {
             server_capabilities: outcome.server_capabilities,
             instructions: outcome.instructions,
             request_meta,
+            handler: self.handler.clone(),
         })
     }
 
@@ -217,6 +235,7 @@ pub struct Client {
     server_capabilities: Value,
     instructions: Option<String>,
     request_meta: Map<String, Value>,
+    handler: Option<Arc<dyn ClientHandler>>,
 }
 
 impl Client {
@@ -283,7 +302,7 @@ impl Client {
         let mut params = Map::new();
         params.insert("name".into(), json!(name.into()));
         params.insert("arguments".into(), Value::Object(arguments));
-        let v = self.versioned_request(request::TOOLS_CALL, params).await?;
+        let v = self.mrtr_request(request::TOOLS_CALL, params).await?;
         self.decode::<draft::CallToolResult, legacy::CallToolResult, _>(v)
     }
 
@@ -311,9 +330,7 @@ impl Client {
     ) -> ClientResult<neutral::ReadResourceResult> {
         let mut params = Map::new();
         params.insert("uri".into(), json!(uri.into()));
-        let v = self
-            .versioned_request(request::RESOURCES_READ, params)
-            .await?;
+        let v = self.mrtr_request(request::RESOURCES_READ, params).await?;
         self.decode::<draft::ReadResourceResult, legacy::ReadResourceResult, _>(v)
     }
 
@@ -357,7 +374,7 @@ impl Client {
         let mut params = Map::new();
         params.insert("name".into(), json!(name.into()));
         params.insert("arguments".into(), Value::Object(arguments));
-        let v = self.versioned_request(request::PROMPTS_GET, params).await?;
+        let v = self.mrtr_request(request::PROMPTS_GET, params).await?;
         self.decode::<draft::GetPromptResult, legacy::GetPromptResult, _>(v)
     }
 
@@ -380,6 +397,62 @@ impl Client {
             .versioned_request(request::COMPLETION_COMPLETE, params)
             .await?;
         self.decode::<draft::CompleteResult, legacy::CompleteResult, _>(v)
+    }
+
+    /// Issue an MRTR-capable request (`tools/call`, `resources/read`,
+    /// `prompts/get`), driving the draft input-required loop.
+    ///
+    /// On the modern path a server can answer `{ resultType: "input_required",
+    /// inputRequests, requestState }`; this gathers each packaged request via the
+    /// [`ClientHandler`] and re-issues the call with `inputResponses` + the echoed
+    /// `requestState`, until a real result comes back. On the legacy path the
+    /// server elicits inline (handled by the connection actor), so the first
+    /// result is final and the loop runs exactly once.
+    async fn mrtr_request(
+        &self,
+        method: &str,
+        mut params: Map<String, Value>,
+    ) -> ClientResult<Value> {
+        for _ in 0..MAX_MRTR_ROUNDS {
+            let result = self.versioned_request(method, params.clone()).await?;
+            let input_required = result.get("resultType").and_then(Value::as_str)
+                == Some(neutral::result_type::INPUT_REQUIRED);
+            if !input_required {
+                return Ok(result);
+            }
+
+            let handler = self.handler.as_deref().ok_or_else(|| {
+                ClientError::Protocol(
+                    "server requires input (MRTR) but the client has no handler".into(),
+                )
+            })?;
+
+            // Answer each packaged input request, keyed exactly as the server sent.
+            let mut responses = Map::new();
+            if let Some(requests) = result.get("inputRequests").and_then(Value::as_object) {
+                for (key, req) in requests {
+                    let req_method = req
+                        .get("method")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let req_params = req.get("params").cloned();
+                    let answer = dispatch_server_request(handler, req_method, req_params)
+                        .await
+                        .map_err(|e| {
+                            ClientError::Protocol(format!("input handler failed: {}", e.message))
+                        })?;
+                    responses.insert(key.clone(), answer);
+                }
+            }
+            params.insert("inputResponses".into(), Value::Object(responses));
+            // Carry the opaque resume state back verbatim, if present.
+            if let Some(state) = result.get("requestState") {
+                params.insert("requestState".into(), state.clone());
+            }
+        }
+        Err(ClientError::Protocol(format!(
+            "MRTR did not converge after {MAX_MRTR_ROUNDS} rounds"
+        )))
     }
 
     /// Issue a request, stamping the modern `_meta` envelope when the negotiated

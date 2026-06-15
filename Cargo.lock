@@ -6245,6 +6245,7 @@ dependencies = [
 name = "turbomcp4-client"
 version = "4.0.0-alpha.1"
 dependencies = [
+ "async-trait",
  "eventsource-stream",
  "futures",
  "reqwest 0.13.3",

@@ -15,12 +15,18 @@
 mod client;
 mod connection;
 mod error;
+mod handler;
 mod stdio;
 
 pub use client::{Client, ClientBuilder, ConnectMode};
 pub use connection::{Connection, DEFAULT_REQUEST_TIMEOUT};
 pub use error::{ClientError, ClientResult};
+pub use handler::ClientHandler;
 pub use stdio::connect_child;
+
+/// Re-exported so implementers of [`ClientHandler`] can write
+/// `#[async_trait]` without taking a direct dependency on the crate.
+pub use async_trait::async_trait;
 
 #[cfg(feature = "http")]
 mod http;
