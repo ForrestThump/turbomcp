@@ -47,6 +47,10 @@ members = [
     "crates/turbomcp4-ext-apps",
     "crates/turbomcp4",
 ]
+# Cross-SDK interop suite. Excluded from the workspace so rmcp's large dependency
+# tree never touches the main lockfile/gate; it carries its own lockfile and is
+# run on its own (`cd crates/turbomcp4-interop && cargo test`).
+exclude = ["crates/turbomcp4-interop"]
 resolver = "2"
 
 [workspace.lints.rust]
