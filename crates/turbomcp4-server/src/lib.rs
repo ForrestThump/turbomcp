@@ -22,6 +22,7 @@ mod adapter;
 mod builder;
 mod context;
 mod dispatcher;
+mod extension;
 mod inflight;
 mod logging;
 mod mrtr;
@@ -40,6 +41,7 @@ pub use context::{
     ListResourceTemplatesContext, ListResourcesContext, ListToolsContext, ReadResourceContext,
 };
 pub use dispatcher::{DispatcherSessionTerminator, VersionDispatcher};
+pub use extension::{Extension, ExtensionRequest};
 pub use logging::LogSender;
 pub use mrtr::ClientHandle;
 pub use progress::ProgressReporter;

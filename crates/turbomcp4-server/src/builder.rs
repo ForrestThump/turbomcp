@@ -16,7 +16,10 @@
 //!   `into_server` on the user's type that pre-registers exactly the capabilities
 //!   it found (inherent methods shadow the trait method, so there's no clash).
 
+use std::sync::Arc;
+
 use crate::dispatcher::VersionDispatcher;
+use crate::extension::Extension;
 use crate::router::MethodRouter;
 use crate::traits::{McpServerCore, WithCompletions, WithPrompts, WithResources, WithTools};
 
@@ -26,6 +29,7 @@ pub struct ServerBuilder<S> {
     router: MethodRouter<S>,
     tasks: bool,
     session_idle_timeout: Option<std::time::Duration>,
+    extensions: Vec<Arc<dyn Extension>>,
 }
 
 impl<S: McpServerCore> ServerBuilder<S> {
@@ -37,6 +41,7 @@ impl<S: McpServerCore> ServerBuilder<S> {
             router: MethodRouter::new(),
             tasks: false,
             session_idle_timeout: None,
+            extensions: Vec::new(),
         }
     }
 
@@ -49,6 +54,7 @@ impl<S: McpServerCore> ServerBuilder<S> {
             router,
             tasks: false,
             session_idle_timeout: None,
+            extensions: Vec::new(),
         }
     }
 
@@ -81,6 +87,16 @@ impl<S: McpServerCore> ServerBuilder<S> {
     #[must_use]
     pub fn with_logging(mut self) -> Self {
         self.router = self.router.with_logging();
+        self
+    }
+
+    /// Register a draft [`Extension`] (PLAN D10): advertised in
+    /// `server/discover` under `capabilities.extensions[id]` and owning its
+    /// declared methods on the modern (`DRAFT-2026-v1`) path. The reference
+    /// extension is the draft Tasks extension (`turbomcp4-ext-tasks`).
+    #[must_use]
+    pub fn with_extension(mut self, extension: Arc<dyn Extension>) -> Self {
+        self.extensions.push(extension);
         self
     }
 
@@ -133,6 +149,9 @@ impl<S: McpServerCore> ServerBuilder<S> {
         }
         if let Some(timeout) = self.session_idle_timeout {
             dispatcher = dispatcher.with_session_idle_timeout(timeout);
+        }
+        for extension in self.extensions {
+            dispatcher = dispatcher.with_extension(extension);
         }
         dispatcher
     }

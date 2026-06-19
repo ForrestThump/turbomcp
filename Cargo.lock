@@ -6308,7 +6308,18 @@ dependencies = [
 name = "turbomcp4-ext-tasks"
 version = "4.0.0-alpha.1"
 dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "time",
+ "tokio",
+ "tower",
+ "tracing",
  "turbomcp4-core",
+ "turbomcp4-protocol",
+ "turbomcp4-server",
+ "turbomcp4-service",
+ "uuid",
 ]
 
 [[package]]
@@ -6333,6 +6344,7 @@ dependencies = [
 name = "turbomcp4-server"
 version = "4.0.0-alpha.1"
 dependencies = [
+ "async-trait",
  "base64",
  "futures",
  "hmac 0.13.0",

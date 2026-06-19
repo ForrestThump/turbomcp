@@ -42,6 +42,7 @@ use crate::context::{
     CallToolContext, CompleteContext, GetPromptContext, ListPromptsContext,
     ListResourceTemplatesContext, ListResourcesContext, ListToolsContext, ReadResourceContext,
 };
+use crate::extension::{Extension, ExtensionRequest};
 use crate::inflight::InFlightRegistry;
 use crate::logging::LogSender;
 use crate::mrtr::{ClientHandle, PendingRequests, StateSigner};
@@ -75,6 +76,10 @@ struct Shared {
     subs: Arc<SubscriptionRegistry>,
     signer: Arc<StateSigner>,
     pending: Arc<PendingRequests>,
+    /// Registered draft extensions (PLAN D10), consulted for `server/discover`
+    /// advertisement and modern-path method routing. One `Arc` to keep the
+    /// per-request `Shared` clone cheap.
+    extensions: Arc<Vec<Arc<dyn Extension>>>,
 }
 
 impl Shared {
@@ -142,6 +147,7 @@ impl<S: McpServerCore> VersionDispatcher<S> {
                 subs: Arc::new(SubscriptionRegistry::default()),
                 signer: Arc::new(StateSigner::new()),
                 pending: Arc::new(PendingRequests::default()),
+                extensions: Arc::new(Vec::new()),
             },
         }
     }
@@ -175,6 +181,21 @@ impl<S: McpServerCore> VersionDispatcher<S> {
     #[must_use]
     pub fn with_task_support(mut self) -> Self {
         self.shared.tasks = Some(Arc::new(TaskStore::default()));
+        self
+    }
+
+    /// Register a draft [`Extension`] (PLAN D10): it is advertised in
+    /// `server/discover` under `capabilities.extensions[id]` and owns its
+    /// declared methods on the modern (`DRAFT-2026-v1`) path. Extensions are
+    /// draft-only — the legacy `2025-11-25` path serves its built-in
+    /// equivalents (core Tasks via [`with_task_support`](Self::with_task_support)).
+    #[must_use]
+    pub fn with_extension(mut self, extension: Arc<dyn Extension>) -> Self {
+        // `with_extension` runs at build time (rare); rebuild the shared `Arc`
+        // so per-request `Shared` clones stay a single `Arc` bump.
+        let mut extensions = Vec::clone(&self.shared.extensions);
+        extensions.push(extension);
+        self.shared.extensions = Arc::new(extensions);
         self
     }
 
@@ -336,12 +357,45 @@ async fn handle_request<S: McpServerCore>(
     let id = req.id.clone();
     let method = req.method.clone();
 
+    // Extension-owned methods (PLAN D10) are draft-only: on the modern path
+    // route them to the registered extension once the client has declared its
+    // capability; the legacy path falls through to the built-in equivalents
+    // (core Tasks) handled by the arms below.
+    if let Some(ext) = shared
+        .extensions
+        .iter()
+        .find(|e| e.methods().contains(&method.as_str()))
+        .cloned()
+        && matches!(
+            classify_version(req.params.as_ref(), supported),
+            VersionRoute::Modern
+        )
+    {
+        let ctx = build_context(&req);
+        if !context_declares_extension(&ctx, ext.id()) {
+            // SEP-2663: a client that didn't declare the extension capability
+            // gets `-32601` for the extension's methods.
+            return Ok(error_response(id, &McpError::method_not_found(method)));
+        }
+        let connection_id = connection_id(req.params.as_ref()).map(str::to_owned);
+        return Ok(ext
+            .dispatch(ExtensionRequest {
+                request: req,
+                context: ctx,
+                connection_id,
+            })
+            .await);
+    }
+
     match method.as_str() {
         // Version-agnostic methods: a client may call these before it knows
         // which version to pin (discovery) or merely to probe liveness.
-        methods::request::DISCOVER => Ok(ok_value(
+        methods::request::DISCOVER => Ok(discover_response(
             id,
-            &build_discover_result(&server, router, supported),
+            &server,
+            router,
+            supported,
+            &shared.extensions,
         )),
         methods::request::PING => Ok(JsonRpcResponse::success(id, serde_json::json!({})).into()),
 
@@ -1469,6 +1523,50 @@ fn task_error_response(id: RequestId, e: &TaskError) -> JsonRpcMessage {
 }
 
 // ---- response builders -------------------------------------------------------
+
+/// Build the `server/discover` response, patching each registered extension's
+/// settings into `capabilities.extensions[id]`. The generated `extensions` map
+/// holds the draft `JsonObject` newtype; merging arbitrary settings JSON is
+/// simplest post-serialization (the same presence-marker patch trick
+/// `handle_initialize` uses).
+fn discover_response<S: McpServerCore>(
+    id: RequestId,
+    server: &S,
+    router: &MethodRouter<S>,
+    supported: &[ProtocolVersion],
+    extensions: &[Arc<dyn Extension>],
+) -> JsonRpcMessage {
+    let result = build_discover_result(server, router, supported);
+    let mut value = match serde_json::to_value(&result) {
+        Ok(v) => v,
+        Err(e) => return error_response(id, &McpError::internal(format!("serialize result: {e}"))),
+    };
+    if !extensions.is_empty()
+        && let Some(caps) = value.get_mut("capabilities").and_then(Value::as_object_mut)
+    {
+        let ext_map = caps
+            .entry("extensions")
+            .or_insert_with(|| Value::Object(Map::new()));
+        if let Some(ext_map) = ext_map.as_object_mut() {
+            for ext in extensions {
+                ext_map.insert(ext.id().to_owned(), ext.settings());
+            }
+        }
+    }
+    JsonRpcResponse::success(id, value).into()
+}
+
+/// Whether the request's per-request client capabilities declare `ext_id` under
+/// `extensions` (SEP-2663 capability negotiation). The draft client stamps its
+/// capabilities into `_meta` (lifted into [`RequestContext::client_capabilities`]
+/// by [`build_context`]).
+fn context_declares_extension(ctx: &RequestContext, ext_id: &str) -> bool {
+    ctx.client_capabilities
+        .as_ref()
+        .and_then(|caps| caps.get("extensions"))
+        .and_then(Value::as_object)
+        .is_some_and(|exts| exts.contains_key(ext_id))
+}
 
 fn build_discover_result<S: McpServerCore>(
     server: &S,

@@ -15,6 +15,7 @@ turbomcp4-protocol = { workspace = true }
 turbomcp4-service = { workspace = true }
 tower = { workspace = true }
 futures = { workspace = true }
+async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
