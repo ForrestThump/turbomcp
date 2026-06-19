@@ -141,6 +141,13 @@ pub use turbomcp4_telemetry as telemetry;
 #[cfg(feature = "client")]
 pub use turbomcp4_client as client;
 
+/// The draft Tasks extension (`io.modelcontextprotocol/tasks`, SEP-2663):
+/// register [`ext_tasks::TasksExtension`] with `ServerBuilder::with_extension`
+/// to answer `tools/call` with an async task handle. Enable with the
+/// `ext-tasks` feature.
+#[cfg(feature = "ext-tasks")]
+pub use turbomcp4_ext_tasks as ext_tasks;
+
 // ---- macros -----------------------------------------------------------------
 
 pub use turbomcp4_macros::{mcp_header, prompt, resource, server, tool};

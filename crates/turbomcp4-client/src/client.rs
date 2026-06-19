@@ -289,6 +289,19 @@ impl Client {
         self.conn.request(request::PING, None).await.map(|_| ())
     }
 
+    /// Issue a raw request for `method` with `params`, stamped with the
+    /// negotiated protocol version and this client's declared capabilities
+    /// (the same envelope the typed methods use). The escape hatch for methods
+    /// the typed API doesn't model — notably extension methods such as the
+    /// draft Tasks extension's `tasks/get`/`tasks/update`/`tasks/cancel`
+    /// (SEP-2663). Returns the raw result `Value`.
+    ///
+    /// # Errors
+    /// Propagates RPC failures (the server's JSON-RPC error).
+    pub async fn request(&self, method: &str, params: Map<String, Value>) -> ClientResult<Value> {
+        self.versioned_request(method, params).await
+    }
+
     /// List the server's tools (one page; pass a `cursor` to continue).
     ///
     /// # Errors

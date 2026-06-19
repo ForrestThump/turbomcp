@@ -1,0 +1,53 @@
+//! The draft Tasks extension (`io.modelcontextprotocol/tasks`, SEP-2663):
+//! answer a `tools/call` with an asynchronous task handle instead of blocking.
+//!
+//! A `#[server]` exposes one slow tool, `generate_report`, which the
+//! [`TasksExtension`] is configured to run as a *task*. A client that declares
+//! the `io.modelcontextprotocol/tasks` capability gets a `CreateTaskResult`
+//! (`resultType: "task"`) immediately and polls `tasks/get` for the outcome; a
+//! client that doesn't runs the tool synchronously. (Run with
+//! `--features ext-tasks`; speak the modern `DRAFT-2026-v1` path.)
+//!
+//! ```text
+//! cargo run -p turbomcp4 --example tasks --features ext-tasks
+//! ```
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use turbomcp4::ext_tasks::TasksExtension;
+use turbomcp4::prelude::*;
+use turbomcp4::{LegacySessionAdapter, ProtocolError, serve_stdio};
+
+#[derive(Clone)]
+struct Reports;
+
+#[server(name = "reports", version = "1.0.0")]
+impl Reports {
+    /// Generate a report on a topic. Slow enough to be worth deferring — the
+    /// Tasks extension runs it as a background task.
+    #[tool]
+    async fn generate_report(
+        &self,
+        #[description("What to report on")] topic: String,
+    ) -> McpResult<String> {
+        // Stand-in for expensive work (a real server would do I/O here).
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        Ok(format!("# Report: {topic}\n\nAll systems nominal."))
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), ProtocolError> {
+    // Build the dispatcher with the Tasks extension registered, opting the
+    // slow tool into task execution.
+    let dispatcher = Reports
+        .into_server()
+        .with_extension(Arc::new(
+            TasksExtension::new().task_tools(["generate_report"]),
+        ))
+        .build();
+
+    // Wrap in the legacy session adapter (dual-stack) and serve over stdio.
+    serve_stdio(LegacySessionAdapter::new(dispatcher)).await
+}

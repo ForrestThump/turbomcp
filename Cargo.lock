@@ -6215,6 +6215,7 @@ dependencies = [
  "turbomcp4-client",
  "turbomcp4-codec",
  "turbomcp4-core",
+ "turbomcp4-ext-tasks",
  "turbomcp4-macros",
  "turbomcp4-protocol",
  "turbomcp4-server",
