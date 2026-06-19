@@ -41,7 +41,7 @@ pub use context::{
     ListResourceTemplatesContext, ListResourcesContext, ListToolsContext, ReadResourceContext,
 };
 pub use dispatcher::{DispatcherSessionTerminator, VersionDispatcher};
-pub use extension::{Extension, ExtensionRequest};
+pub use extension::{CallAugmentRequest, CallRunner, Extension, ExtensionRequest};
 pub use logging::LogSender;
 pub use mrtr::ClientHandle;
 pub use progress::ProgressReporter;

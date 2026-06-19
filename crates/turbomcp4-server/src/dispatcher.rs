@@ -42,7 +42,7 @@ use crate::context::{
     CallToolContext, CompleteContext, GetPromptContext, ListPromptsContext,
     ListResourceTemplatesContext, ListResourcesContext, ListToolsContext, ReadResourceContext,
 };
-use crate::extension::{Extension, ExtensionRequest};
+use crate::extension::{CallAugmentRequest, CallRunner, Extension, ExtensionRequest};
 use crate::inflight::InFlightRegistry;
 use crate::logging::LogSender;
 use crate::mrtr::{ClientHandle, PendingRequests, StateSigner};
@@ -436,6 +436,18 @@ async fn handle_request<S: McpServerCore>(
                         Ok(level) => ctx.log_level = level,
                         Err(e) => return Ok(error_response(id, &e)),
                     }
+                    // Draft Tasks extension (SEP-2663): a `tools/call` from a
+                    // client that declared a call-augmenting extension may be
+                    // converted into a task (`CreateTaskResult`) instead of
+                    // running synchronously. The extension decides per call; a
+                    // `None` here falls through to the normal dispatch.
+                    if method == methods::request::TOOLS_CALL
+                        && let Some(resp) =
+                            try_augment_call(&server, router, &req, &ctx, &shared.extensions, &id)
+                                .await
+                    {
+                        return Ok(resp);
+                    }
                     Ok(
                         dispatch_capability::<S, DraftWire>(server, router, &req, &ctx, shared, id)
                             .await,
@@ -745,6 +757,79 @@ async fn dispatch_capability<S: McpServerCore, W: WireFamily>(
         }
         _ => unreachable!("dispatch_capability called with an unrouted method"),
     }
+}
+
+// ---- draft Tasks extension augmentation (SEP-2663) -----------------------------
+
+/// Offer a draft `tools/call` to each call-augmenting extension the client
+/// declared. The first extension to take over returns the response (a
+/// `CreateTaskResult`); `None` means run the call normally. Only declared
+/// clients are offered augmentation — SEP-2663 forbids returning a
+/// `CreateTaskResult` to a client that didn't declare the extension.
+async fn try_augment_call<S: McpServerCore>(
+    server: &S,
+    router: &MethodRouter<S>,
+    req: &JsonRpcRequest,
+    ctx: &RequestContext,
+    extensions: &[Arc<dyn Extension>],
+    id: &RequestId,
+) -> Option<JsonRpcMessage> {
+    for ext in extensions {
+        if !(ext.augments_calls() && context_declares_extension(ctx, ext.id())) {
+            continue;
+        }
+        let run = match build_call_runner(server, router, req, ctx) {
+            Ok(run) => run,
+            // A malformed `tools/call` envelope is `-32602` regardless of
+            // augmentation (mirrors the normal `dispatch_capability` path).
+            Err(e) => return Some(error_response(id.clone(), &e)),
+        };
+        let connection_id = connection_id(req.params.as_ref()).map(str::to_owned);
+        if let Some(resp) = ext
+            .augment_call(CallAugmentRequest {
+                request: req.clone(),
+                context: ctx.clone(),
+                connection_id,
+                run,
+            })
+            .await
+        {
+            return Some(resp);
+        }
+    }
+    None
+}
+
+/// Prepare the underlying `tools/call` as a [`CallRunner`]: parse the envelope,
+/// mint the task's cancellation token, wire it into a fresh context, and build
+/// the handler future that renders to draft `CallToolResult` JSON (or the
+/// JSON-RPC error). Taskified calls get no MRTR/progress/log channel — the
+/// originating request returns `CreateTaskResult` immediately, so its stream is
+/// gone; mid-task input rides `tasks/get`/`tasks/update` instead (9c).
+fn build_call_runner<S: McpServerCore>(
+    server: &S,
+    router: &MethodRouter<S>,
+    req: &JsonRpcRequest,
+    ctx: &RequestContext,
+) -> Result<CallRunner, McpError> {
+    let params = parse_call_tool_params(req.params.as_ref())?;
+    let cancel = CancellationToken::new();
+    let mut call_ctx = ctx.clone();
+    call_ctx.cancellation = cancel.clone();
+    let fut = router.dispatch_call_tool(server.clone(), CallToolContext::new(call_ctx), params);
+    let future: BoxFuture<'static, Result<Value, JsonRpcError>> = Box::pin(async move {
+        match fut {
+            None => Err(mcp_to_jsonrpc_error(&McpError::method_not_found(
+                methods::request::TOOLS_CALL,
+            ))),
+            Some(f) => match f.await {
+                Ok(result) => serde_json::to_value(draft::CallToolResult::from(result))
+                    .map_err(|e| mcp_to_jsonrpc_error(&McpError::internal(e.to_string()))),
+                Err(e) => Err(mcp_to_jsonrpc_error(&e)),
+            },
+        }
+    });
+    Ok(CallRunner::new(future, cancel))
 }
 
 // ---- MRTR (SEP-2322) -----------------------------------------------------------
