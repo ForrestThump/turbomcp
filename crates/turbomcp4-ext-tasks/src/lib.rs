@@ -51,12 +51,14 @@ use serde_json::json;
 use turbomcp4_core::{
     JsonRpcError, JsonRpcMessage, JsonRpcRequest, JsonRpcResponse, RequestContext, RequestId,
 };
-use turbomcp4_server::{CallAugmentRequest, Extension, ExtensionRequest};
+use turbomcp4_server::{CallAugmentRequest, Extension, ExtensionRequest, SubscribeOutcome};
 
 mod store;
+mod subs;
 pub mod wire;
 
 use store::{DraftTaskStore, TaskOutcome};
+use subs::TaskSubscriptions;
 use wire::CreateTaskResult;
 
 /// The extension identifier, advertised under `server/discover`
@@ -95,6 +97,7 @@ type TaskDecider = Arc<dyn Fn(&str, &RequestContext) -> bool + Send + Sync>;
 #[derive(Clone)]
 pub struct TasksExtension {
     store: Arc<DraftTaskStore>,
+    subs: Arc<TaskSubscriptions>,
     taskify: Option<TaskDecider>,
     ttl_ms: Option<i64>,
     poll_interval_ms: Option<i64>,
@@ -104,6 +107,7 @@ impl Default for TasksExtension {
     fn default() -> Self {
         Self {
             store: Arc::new(DraftTaskStore::default()),
+            subs: Arc::new(TaskSubscriptions::default()),
             taskify: None,
             ttl_ms: Some(DEFAULT_TTL_MS),
             poll_interval_ms: Some(DEFAULT_POLL_INTERVAL_MS),
@@ -236,6 +240,34 @@ impl Extension for TasksExtension {
         self.taskify.is_some()
     }
 
+    fn notification_topics(&self) -> &'static [&'static str] {
+        &[subs::NOTIFICATIONS_TASKS]
+    }
+
+    fn on_subscribe(
+        &self,
+        connection_id: &str,
+        notifications: &serde_json::Value,
+        client_declared: bool,
+    ) -> SubscribeOutcome {
+        // The Tasks extension owns the `taskIds` filter on `subscriptions/listen`.
+        let task_ids = notifications.get("taskIds").and_then(|v| v.as_array());
+        let Some(task_ids) = task_ids.filter(|ids| !ids.is_empty()) else {
+            return SubscribeOutcome::NotApplicable;
+        };
+        // SEP-2663: a client requesting task notifications without declaring the
+        // extension capability is `-32003`.
+        if !client_declared {
+            return SubscribeOutcome::MissingCapability;
+        }
+        let ids: Vec<String> = task_ids
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect();
+        self.subs.subscribe(connection_id, &ids);
+        SubscribeOutcome::Subscribed(json!({ "taskIds": ids }))
+    }
+
     async fn augment_call(&self, augment: CallAugmentRequest) -> Option<JsonRpcMessage> {
         // `CallAugmentRequest` is `#[non_exhaustive]`; take fields by access.
         let request = augment.request;
@@ -261,6 +293,7 @@ impl Extension for TasksExtension {
             .create(self.ttl_ms, self.poll_interval_ms, cancel)?; // capacity ⇒ run normally
 
         let store = Arc::clone(&self.store);
+        let subs = Arc::clone(&self.subs);
         let task_id = task.task_id.clone();
         tokio::spawn(async move {
             let outcome = match run.run().await {
@@ -268,6 +301,9 @@ impl Extension for TasksExtension {
                 Err(err) => TaskOutcome::Failed(err),
             };
             store.complete(&task_id, outcome);
+            // Push the terminal status to any `subscriptions/listen` subscribers
+            // (spec-optional; pollers see it via `tasks/get` regardless).
+            subs::push_status(&subs, &store, &task_id).await;
         });
 
         let value = serde_json::to_value(CreateTaskResult::new(task)).ok()?;
@@ -302,6 +338,7 @@ impl Extension for TasksExtension {
             // eventually consistent); unknown ⇒ `-32602` (SHOULD).
             methods::TASKS_CANCEL => {
                 if self.store.cancel(&task_id) {
+                    subs::push_status(&self.subs, &self.store, &task_id).await;
                     ack(id)
                 } else {
                     error(id, task_not_found(&task_id))

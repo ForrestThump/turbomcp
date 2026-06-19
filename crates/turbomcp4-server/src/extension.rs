@@ -101,6 +101,21 @@ pub struct CallAugmentRequest {
     pub run: CallRunner,
 }
 
+/// The result of offering a `subscriptions/listen` request to an extension
+/// (SEP-2663 task-status notifications ride this stream).
+pub enum SubscribeOutcome {
+    /// The listen request doesn't reference this extension's notifications.
+    NotApplicable,
+    /// The request targets the extension but the client didn't declare its
+    /// capability → the dispatcher answers `-32003` (Missing Required Client
+    /// Capability), per SEP-2663.
+    MissingCapability,
+    /// The extension recorded the subscription against the connection; the
+    /// returned object is merged into the acknowledgement's `notifications`
+    /// (echoing the filters the server agreed to honor).
+    Subscribed(Value),
+}
+
 /// A multi-method server extension (PLAN D10).
 ///
 /// An extension bundles a cohesive feature that lives outside the core protocol
@@ -148,5 +163,28 @@ pub trait Extension: Send + Sync + 'static {
     /// declared the extension capability. Defaults to `None` (never taskify).
     async fn augment_call(&self, _request: CallAugmentRequest) -> Option<JsonRpcMessage> {
         None
+    }
+
+    /// Notification methods this extension may push on `subscriptions/listen`
+    /// streams (e.g. `notifications/tasks`). Informational — surfaced for
+    /// introspection; the extension itself pushes via
+    /// [`turbomcp4_service::outbound`]. Defaults to none.
+    fn notification_topics(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    /// Offer a `subscriptions/listen` request to the extension. `notifications`
+    /// is the raw filter object from the request (so the extension reads its own
+    /// fields, e.g. the Tasks extension's `taskIds`); `client_declared` is
+    /// whether the client declared this extension's capability. The extension
+    /// records the subscription against `connection_id` and returns a
+    /// [`SubscribeOutcome`]. Defaults to [`SubscribeOutcome::NotApplicable`].
+    fn on_subscribe(
+        &self,
+        _connection_id: &str,
+        _notifications: &Value,
+        _client_declared: bool,
+    ) -> SubscribeOutcome {
+        SubscribeOutcome::NotApplicable
     }
 }

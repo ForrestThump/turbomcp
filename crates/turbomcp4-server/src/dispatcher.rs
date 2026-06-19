@@ -42,7 +42,9 @@ use crate::context::{
     CallToolContext, CompleteContext, GetPromptContext, ListPromptsContext,
     ListResourceTemplatesContext, ListResourcesContext, ListToolsContext, ReadResourceContext,
 };
-use crate::extension::{CallAugmentRequest, CallRunner, Extension, ExtensionRequest};
+use crate::extension::{
+    CallAugmentRequest, CallRunner, Extension, ExtensionRequest, SubscribeOutcome,
+};
 use crate::inflight::InFlightRegistry;
 use crate::logging::LogSender;
 use crate::mrtr::{ClientHandle, PendingRequests, StateSigner};
@@ -257,6 +259,7 @@ async fn handle<S: McpServerCore>(
                     &router,
                     &supported,
                     &shared.subs,
+                    &shared.extensions,
                     &req,
                     &cancel,
                 )
@@ -978,6 +981,7 @@ async fn handle_subscriptions_listen<S: McpServerCore>(
     router: &MethodRouter<S>,
     supported: &[ProtocolVersion],
     subs: &Arc<SubscriptionRegistry>,
+    extensions: &[Arc<dyn Extension>],
     req: &JsonRpcRequest,
     cancel: &CancellationToken,
 ) -> Result<Option<JsonRpcMessage>, ProtocolError> {
@@ -1045,13 +1049,49 @@ async fn handle_subscriptions_listen<S: McpServerCore>(
         },
     };
 
+    // The acknowledgment's `notifications` echoes the core filters the server
+    // agreed to honor, plus any extension-owned filters (e.g. the Tasks
+    // extension's `taskIds`). Build it as a value so extensions can merge in.
+    let mut ack_notifications =
+        serde_json::to_value(&agreed).unwrap_or_else(|_| Value::Object(Map::new()));
+    // Offer the raw `notifications` filter to each extension (it reads its own
+    // fields). A non-declaring client requesting an extension's notifications
+    // is `-32003` (SEP-2663); accepted filters are merged into the ack.
+    if !extensions.is_empty() {
+        let raw_notifications = req
+            .params
+            .as_ref()
+            .and_then(|p| p.get("notifications"))
+            .cloned()
+            .unwrap_or(Value::Null);
+        let ctx = build_context(req);
+        for ext in extensions {
+            let declared = context_declares_extension(&ctx, ext.id());
+            match ext.on_subscribe(&conn, &raw_notifications, declared) {
+                SubscribeOutcome::NotApplicable => {}
+                SubscribeOutcome::MissingCapability => {
+                    return Ok(Some(missing_capability_response(id, ext.id())));
+                }
+                SubscribeOutcome::Subscribed(contribution) => {
+                    if let (Some(ack_obj), Some(extra)) =
+                        (ack_notifications.as_object_mut(), contribution.as_object())
+                    {
+                        for (key, value) in extra {
+                            ack_obj.insert(key.clone(), value.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Acknowledged MUST be the first message on the stream — send it before
     // the subscription can receive its first event.
     let ack = JsonRpcNotification::new(
         methods::notification::SUBSCRIPTIONS_ACKNOWLEDGED,
         Some(serde_json::json!({
             "_meta": { meta::keys::SUBSCRIPTION_ID: subscription_id_value(&id) },
-            "notifications": &agreed,
+            "notifications": ack_notifications,
         })),
     );
     if writer.send(ack.into()).await.is_err() {
@@ -1916,6 +1956,20 @@ fn ok_value<T: Serialize>(id: RequestId, value: &T) -> JsonRpcMessage {
 
 fn error_response(id: RequestId, err: &McpError) -> JsonRpcMessage {
     JsonRpcResponse::error(id, mcp_to_jsonrpc_error(err)).into()
+}
+
+/// `-32003` Missing Required Client Capability (SEP-2663): the client requested
+/// an extension's behavior without declaring its capability. The `data` names
+/// the required extension so the client can re-declare and retry.
+fn missing_capability_response(id: RequestId, extension_id: &str) -> JsonRpcMessage {
+    let err = JsonRpcError {
+        code: -32003,
+        message: "missing required client capability".to_owned(),
+        data: Some(serde_json::json!({
+            "requiredCapabilities": { "extensions": { extension_id: {} } }
+        })),
+    };
+    JsonRpcResponse::error(id, err).into()
 }
 
 fn unsupported_version(
