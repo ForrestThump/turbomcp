@@ -6203,6 +6203,7 @@ name = "turbomcp4"
 version = "4.0.0-alpha.1"
 dependencies = [
  "axum",
+ "criterion",
  "http-body-util",
  "insta",
  "reqwest 0.13.3",
