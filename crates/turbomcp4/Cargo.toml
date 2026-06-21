@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.85"
 authors = ["Nicholas Paterno <nick@epistates.com>"]
 description = "TurboMCP v4 SDK facade: re-exports + prelude."
+readme = "README.md"
 license = "MIT"
 repository = "https://github.com/Epistates/turbomcp"
 homepage = "https://turbomcp.org"
