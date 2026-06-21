@@ -12,7 +12,10 @@ use rmcp::model::{
     CallToolRequestParams, CallToolResult, Content, Implementation, ProtocolVersion,
     ServerCapabilities, ServerInfo,
 };
-use rmcp::{ErrorData as RmcpError, ServerHandler, ServiceExt, object, schemars, tool, tool_handler, tool_router};
+use rmcp::{
+    ErrorData as RmcpError, ServerHandler, ServiceExt, object, schemars, tool, tool_handler,
+    tool_router,
+};
 
 use tokio::io::{BufReader, split};
 use turbomcp4::client::{ClientBuilder, ConnectMode};
@@ -109,7 +112,10 @@ async fn turbomcp4_client_drives_rmcp_server() {
         .expect("turbomcp4 handshakes with rmcp server");
 
     // The handshake negotiated against the real SDK and surfaced its identity.
-    assert!(client.server_info().is_some(), "rmcp advertised server info");
+    assert!(
+        client.server_info().is_some(),
+        "rmcp advertised server info"
+    );
 
     let tools = client.list_tools(None).await.expect("list_tools");
     assert!(tools.tools.iter().any(|t| t.name == "add"));
@@ -135,10 +141,7 @@ async fn rmcp_client_drives_turbomcp4_server() {
     tokio::spawn(serve(transport, service));
 
     // rmcp client on the other end (`()` is the no-op client handler).
-    let client = ()
-        .serve(client_io)
-        .await
-        .expect("rmcp handshakes with turbomcp4 server");
+    let client = ().serve(client_io).await.expect("rmcp handshakes with turbomcp4 server");
 
     let tools = client.list_all_tools().await.expect("list_all_tools");
     assert!(tools.iter().any(|t| t.name == "add"));
