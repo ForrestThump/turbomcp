@@ -68,6 +68,18 @@ doctest = false
 name = "hello_world"
 
 [[example]]
+name = "calculator"
+
+[[example]]
+name = "stateful"
+
+[[example]]
+name = "validation"
+
+[[example]]
+name = "resources_prompts"
+
+[[example]]
 name = "dual_transport"
 required-features = ["http"]
 
