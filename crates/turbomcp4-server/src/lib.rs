@@ -47,7 +47,7 @@ pub use extension::{
 pub use logging::LogSender;
 pub use mrtr::ClientHandle;
 pub use progress::ProgressReporter;
-pub use response::{IntoCallToolResult, IntoGetPromptResult, IntoReadResourceResult};
+pub use response::{IntoCallToolResult, IntoGetPromptResult, IntoReadResourceResult, Json};
 pub use router::MethodRouter;
 pub use session::{SessionState, SessionStore};
 pub use subscriptions::ServerNotifier;

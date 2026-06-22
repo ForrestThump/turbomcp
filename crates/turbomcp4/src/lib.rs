@@ -42,12 +42,17 @@ pub use turbomcp4_service::{
 
 pub use turbomcp4_server::{
     CallToolContext, ClientHandle, CompleteContext, GetPromptContext, IntoCallToolResult,
-    IntoGetPromptResult, IntoReadResourceResult, IntoServerBuilder, LegacySessionAdapter,
+    IntoGetPromptResult, IntoReadResourceResult, IntoServerBuilder, Json, LegacySessionAdapter,
     ListPromptsContext, ListResourceTemplatesContext, ListResourcesContext, ListToolsContext,
     LogSender, McpServerCore, MethodRouter, ProgressReporter, ReadResourceContext, ServerBuilder,
     ServerNotifier, SessionState, SessionStore, VersionDispatcher, WithCompletions, WithPrompts,
     WithResources, WithTools,
 };
+
+/// Re-export of [`schemars`] for deriving `JsonSchema` on `#[tool]` argument
+/// structs and [`Json`] structured-output types, so downstream crates don't pin
+/// a separate `schemars` version. Use `#[derive(turbomcp4::schemars::JsonSchema)]`.
+pub use schemars;
 
 // ---- transports -------------------------------------------------------------
 
@@ -171,9 +176,9 @@ pub mod prelude {
     pub use crate::neutral;
     pub use turbomcp4_core::{Implementation, LogLevel, McpError, McpResult, RequestContext};
     pub use turbomcp4_server::{
-        CallToolContext, CompleteContext, GetPromptContext, IntoServerBuilder, ListPromptsContext,
-        ListResourceTemplatesContext, ListResourcesContext, ListToolsContext, McpServerCore,
-        ServerBuilder, WithCompletions, WithPrompts, WithResources, WithTools,
+        CallToolContext, CompleteContext, GetPromptContext, IntoServerBuilder, Json,
+        ListPromptsContext, ListResourceTemplatesContext, ListResourcesContext, ListToolsContext,
+        McpServerCore, ServerBuilder, WithCompletions, WithPrompts, WithResources, WithTools,
     };
     pub use turbomcp4_transport_stdio::serve_stdio;
 

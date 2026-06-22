@@ -10,6 +10,7 @@
 //! - **Resources / prompts**: a handler error *propagates* as a JSON-RPC error,
 //!   since `resources/read` and `prompts/get` have no `is_error` channel.
 
+use serde::Serialize;
 use turbomcp4_core::{McpError, McpResult};
 use turbomcp4_protocol::neutral;
 
@@ -18,6 +19,29 @@ pub trait IntoCallToolResult {
     /// Perform the conversion.
     fn into_call_tool_result(self) -> McpResult<neutral::CallToolResult>;
 }
+
+/// Wrap a serializable value to return it from a `#[tool]` as **structured
+/// output**: the value is placed in `structuredContent` and a JSON text mirror
+/// is added to `content` for backward compatibility (the spec's recommended
+/// shape for typed results).
+///
+/// When the `#[server]` macro sees a `-> Json<T>` return it also emits the
+/// tool's `outputSchema` from `T` (requires `T: schemars::JsonSchema`).
+///
+/// ```ignore
+/// #[derive(serde::Serialize, schemars::JsonSchema)]
+/// struct Stats { count: u64, mean: f64 }
+///
+/// #[tool(description = "Compute stats")]
+/// async fn stats(&self) -> Json<Stats> { Json(Stats { count: 3, mean: 1.5 }) }
+/// ```
+///
+/// Note: on the `2025-11-25` wire, `structuredContent` must be a JSON object, so
+/// a `Json<T>` whose `T` serializes to a non-object (a scalar or array) carries
+/// its value only in the text mirror there; the `DRAFT-2026-v1` wire accepts any
+/// JSON value.
+#[derive(Clone, Copy, Debug)]
+pub struct Json<T>(pub T);
 
 impl IntoCallToolResult for neutral::CallToolResult {
     fn into_call_tool_result(self) -> McpResult<neutral::CallToolResult> {
@@ -62,6 +86,18 @@ macro_rules! scalar_tool_result {
 scalar_tool_result!(
     i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize, f32, f64, bool,
 );
+
+impl<T: Serialize> IntoCallToolResult for Json<T> {
+    fn into_call_tool_result(self) -> McpResult<neutral::CallToolResult> {
+        let value = serde_json::to_value(&self.0)
+            .map_err(|e| McpError::internal(format!("serializing Json tool result: {e}")))?;
+        // Text mirror (spec backward-compat): the compact JSON rendering.
+        let mirror = value.to_string();
+        let mut result = neutral::CallToolResult::text(mirror);
+        result.structured_content = Some(value);
+        Ok(result)
+    }
+}
 
 /// A fallible tool: an error becomes an `is_error` result (spec convention) —
 /// its text is the tool-failure message. The one exception is the MRTR abort

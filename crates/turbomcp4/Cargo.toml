@@ -82,6 +82,9 @@ name = "validation"
 name = "resources_prompts"
 
 [[example]]
+name = "structured_output"
+
+[[example]]
 name = "dual_transport"
 required-features = ["http"]
 
