@@ -37,6 +37,32 @@ impl IntoCallToolResult for &str {
     }
 }
 
+/// A tool that does work but returns nothing → a successful, empty-content
+/// result (the spec permits an empty `content` array).
+impl IntoCallToolResult for () {
+    fn into_call_tool_result(self) -> McpResult<neutral::CallToolResult> {
+        Ok(neutral::CallToolResult::default())
+    }
+}
+
+/// Scalar returns become a single text block of their `Display` form. This is a
+/// *concrete* set, not a blanket `impl<T: Display>`: a blanket would overlap the
+/// `String`/`&str` impls (no specialization) and silently accept any `Display`
+/// type. Structured/object data should use `Json` (→ `structuredContent`)
+/// instead of a stringified scalar.
+macro_rules! scalar_tool_result {
+    ($($t:ty),* $(,)?) => {$(
+        impl IntoCallToolResult for $t {
+            fn into_call_tool_result(self) -> McpResult<neutral::CallToolResult> {
+                Ok(neutral::CallToolResult::text(self.to_string()))
+            }
+        }
+    )*};
+}
+scalar_tool_result!(
+    i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize, f32, f64, bool,
+);
+
 /// A fallible tool: an error becomes an `is_error` result (spec convention) —
 /// its text is the tool-failure message. The one exception is the MRTR abort
 /// sentinel, which must keep propagating so the dispatcher can answer an

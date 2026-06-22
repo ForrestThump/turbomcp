@@ -23,18 +23,18 @@ struct CounterServer {
 impl CounterServer {
     /// Increment a counter by name, returning its new value.
     #[tool(description = "Increment a counter by name")]
-    async fn increment(&self, name: String) -> McpResult<String> {
+    async fn increment(&self, name: String) -> McpResult<i64> {
         let mut counters = self.counters.write().await;
         let counter = counters.entry(name).or_insert(0);
         *counter += 1;
-        Ok(counter.to_string())
+        Ok(*counter)
     }
 
     /// Get a counter's current value (0 if it has never been incremented).
     #[tool(description = "Get a counter's current value")]
-    async fn get(&self, name: String) -> McpResult<String> {
+    async fn get(&self, name: String) -> McpResult<i64> {
         let counters = self.counters.read().await;
-        Ok(counters.get(&name).copied().unwrap_or(0).to_string())
+        Ok(counters.get(&name).copied().unwrap_or(0))
     }
 
     /// Reset a counter, removing it from the map.
