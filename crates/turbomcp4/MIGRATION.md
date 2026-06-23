@@ -25,22 +25,36 @@ context types, and `run_stdio`.
 
 ## Tool return types
 
-v3 auto-stringified bare scalar returns (`-> i64`, `-> f64`, `-> bool`). v4 does
-**not** — a tool returns `String`, `McpResult<String>`, or a
-`neutral::CallToolResult`. Format the value yourself:
+A `#[tool]` may return `String`/`&str`, any numeric or `bool` scalar (→ text),
+`()` (empty success), `Json<T>` (structured output), or a
+`neutral::CallToolResult` — each optionally wrapped in `McpResult<_>`. Bare
+scalars work as in v3:
 
 ```rust
-// v3
-#[tool] async fn add(&self, a: i64, b: i64) -> i64 { a + b }
-
-// v4
-#[tool(description = "Add two numbers")]
-async fn add(&self, a: f64, b: f64) -> String { format!("{}", a + b) }
+// v3 and v4
+#[tool(description = "Add")] async fn add(&self, a: i64, b: i64) -> i64 { a + b }
 ```
 
-This is explicit about exactly what text the client receives. A returned
-`McpError` still becomes a tool-level error (`CallToolResult { isError: true }`),
-not a transport error.
+A returned `McpError` becomes a tool-level error (`CallToolResult { isError:
+true }`), not a transport error.
+
+### Structured output: `Json<T>`
+
+v3's `Json<T>` carries over. Returning `Json<T>` (with `T: Serialize +
+schemars::JsonSchema`) places the value in `structuredContent`, adds a JSON text
+mirror, and — new in v4 — makes the macro generate the tool's `outputSchema` from
+`T`. `schemars` is re-exported as `turbomcp4::schemars`.
+
+```rust
+#[derive(serde::Serialize, turbomcp4::schemars::JsonSchema)]
+struct Stats { count: u64 }
+
+#[tool(description = "Stats")] async fn stats(&self) -> Json<Stats> { Json(Stats { count: 3 }) }
+```
+
+(On the `2025-11-25` wire `structuredContent` must be an object, so a `Json<T>`
+serializing to a scalar/array is carried in the text mirror only there; the
+`DRAFT-2026-v1` wire accepts any JSON value.)
 
 ## Error constructors
 
@@ -123,6 +137,8 @@ v3 surfaced Tasks one way. In v4 they split by protocol version:
 Tracked for later phases; absent in this alpha:
 
 - **Transports**: TCP, Unix-socket, and WebSocket (v4 surfaces stdio + HTTP).
+- **Multimodal tool returns** (v3's `Image<…>`/`Audio<…>` wrappers): return a
+  `neutral::CallToolResult` with the desired content blocks for now.
 - **`#[completion]`** marker (the `WithCompletions` trait + dispatch exist; the
   macro marker does not).
 - **Templated resource URIs** (RFC 6570, e.g. `file://{path}`) — v4 serves

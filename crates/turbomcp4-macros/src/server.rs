@@ -238,6 +238,9 @@ struct Handler {
     args: Vec<ArgParam>,
     /// Ordered call sites (skipping the receiver) so the call can be rebuilt.
     slots: Vec<Slot>,
+    /// The declared return type (`None` for `-> ()`), used to detect a
+    /// `Json<T>` result and generate the tool's `outputSchema`.
+    ret_ty: Option<Type>,
 }
 
 impl Handler {
@@ -289,12 +292,18 @@ impl Handler {
             }
         }
 
+        let ret_ty = match &f.sig.output {
+            syn::ReturnType::Type(_, ty) => Some((**ty).clone()),
+            syn::ReturnType::Default => None,
+        };
+
         Ok(Self {
             kind,
             method: f.sig.ident.clone(),
             description,
             args,
             slots,
+            ret_ty,
         })
     }
 
@@ -417,6 +426,19 @@ fn gen_tool_list_entry(t: &Handler) -> TokenStream {
         let prop = a.ident.to_string();
         quote!(::turbomcp4::__macros::mark_mcp_header(&mut __schema, #prop);)
     });
+    // A `-> Json<T>` (optionally inside `McpResult<_>`) return produces the
+    // tool's outputSchema from `T` (requires `T: schemars::JsonSchema`).
+    let output_schema = t.ret_ty.as_ref().and_then(json_output_inner).map(|inner| {
+        quote!(.with_output_schema(
+            ::turbomcp4::__macros::normalize_input_schema(
+                ::turbomcp4::__macros::serde_json::to_value(
+                    ::turbomcp4::__macros::schemars::schema_for!(#inner)
+                ).unwrap_or_else(|_| ::turbomcp4::__macros::serde_json::Value::Object(
+                    ::core::default::Default::default()
+                ))
+            )
+        ))
+    });
     quote! {
         {
             let mut __schema = ::turbomcp4::__macros::normalize_input_schema(
@@ -427,7 +449,7 @@ fn gen_tool_list_entry(t: &Handler) -> TokenStream {
                 ))
             );
             #(#header_marks)*
-            ::turbomcp4::neutral::Tool::new(#name, __schema) #desc
+            ::turbomcp4::neutral::Tool::new(#name, __schema) #desc #output_schema
         }
     }
 }
@@ -686,4 +708,29 @@ fn type_is_option(ty: &Type) -> bool {
         }
     }
     false
+}
+
+/// The first angle-bracketed generic type argument of a path segment, if any
+/// (e.g. `T` of `Json<T>`).
+fn first_generic_type(seg: &syn::PathSegment) -> Option<&Type> {
+    let syn::PathArguments::AngleBracketed(ab) = &seg.arguments else {
+        return None;
+    };
+    ab.args.iter().find_map(|a| match a {
+        syn::GenericArgument::Type(t) => Some(t),
+        _ => None,
+    })
+}
+
+/// If `ty` is `Json<T>` — possibly wrapped in `Result<_, _>` / `McpResult<_>` —
+/// return `T`, the type whose schema becomes the tool's `outputSchema`. Matching
+/// is by the last path segment's identifier, so `turbomcp4::Json<T>` works too.
+fn json_output_inner(ty: &Type) -> Option<&Type> {
+    let Type::Path(p) = ty else { return None };
+    let seg = p.path.segments.last()?;
+    match seg.ident.to_string().as_str() {
+        "Json" => first_generic_type(seg),
+        "Result" | "McpResult" => json_output_inner(first_generic_type(seg)?),
+        _ => None,
+    }
 }

@@ -64,6 +64,9 @@ pub struct Tool {
     /// JSON Schema object describing the tool's arguments
     /// (e.g. `{"type":"object","properties":{…}}`).
     pub input_schema: Value,
+    /// Optional JSON Schema object describing the tool's structured result
+    /// (`structuredContent`). Generated from a `Json<T>` return type.
+    pub output_schema: Option<Value>,
 }
 
 impl Tool {
@@ -74,6 +77,7 @@ impl Tool {
             title: None,
             description: None,
             input_schema,
+            output_schema: None,
         }
     }
 
@@ -81,6 +85,14 @@ impl Tool {
     #[must_use]
     pub fn with_description(mut self, description: impl Into<String>) -> Self {
         self.description = Some(description.into());
+        self
+    }
+
+    /// Set the output schema (builder style) — the JSON Schema for the tool's
+    /// `structuredContent`.
+    #[must_use]
+    pub fn with_output_schema(mut self, output_schema: Value) -> Self {
+        self.output_schema = Some(output_schema);
         self
     }
 
@@ -837,7 +849,9 @@ impl From<Tool> for draft::Tool {
             input_schema,
             meta: None,
             name: t.name,
-            output_schema: None,
+            // The draft `ToolOutputSchema` is a permissive bag ($schema + a
+            // flattened `extra`), so any JSON Schema object deserializes into it.
+            output_schema: t.output_schema.and_then(|v| serde_json::from_value(v).ok()),
             title: t.title,
         }
     }
@@ -1102,7 +1116,10 @@ impl From<Tool> for legacy::Tool {
             input_schema,
             meta: Map::new(),
             name: t.name,
-            output_schema: None,
+            // The legacy `ToolOutputSchema` is a closed object schema (requires
+            // `type`); a schemars-generated struct schema deserializes cleanly,
+            // and anything that doesn't is dropped rather than failing.
+            output_schema: t.output_schema.and_then(|v| serde_json::from_value(v).ok()),
             title: t.title,
         }
     }
@@ -1347,6 +1364,7 @@ impl From<draft::Tool> for Tool {
             description: t.description,
             input_schema: serde_json::to_value(&t.input_schema)
                 .unwrap_or_else(|_| Value::Object(Map::new())),
+            output_schema: t.output_schema.and_then(|s| serde_json::to_value(s).ok()),
         }
     }
 }
@@ -1532,6 +1550,7 @@ impl From<legacy::Tool> for Tool {
             description: t.description,
             input_schema: serde_json::to_value(&t.input_schema)
                 .unwrap_or_else(|_| Value::Object(Map::new())),
+            output_schema: t.output_schema.and_then(|s| serde_json::to_value(s).ok()),
         }
     }
 }

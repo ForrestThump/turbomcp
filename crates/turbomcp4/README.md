@@ -84,9 +84,26 @@ impl Docs {
 }
 ```
 
-Tools return `String`, `McpResult<String>`, or a `neutral::CallToolResult`. A
+Tools return `String`/`&str`, any numeric or `bool` scalar, `()` (empty
+success), `Json<T>` (structured output — see below), or a
+`neutral::CallToolResult` — each optionally wrapped in `McpResult<_>`. A
 returned `McpError` becomes a tool-level error (`CallToolResult { isError }`) the
 model can see — not a transport error.
+
+### Structured output
+
+Return `Json<T>` (where `T: Serialize + schemars::JsonSchema`) to produce a typed
+result: the value goes in `structuredContent` with a JSON text mirror for
+backward compatibility, and the macro generates the tool's `outputSchema` from
+`T`.
+
+```rust,ignore
+#[derive(serde::Serialize, turbomcp4::schemars::JsonSchema)]
+struct Stats { count: u64, mean: f64 }
+
+#[tool(description = "Compute stats")]
+async fn stats(&self) -> Json<Stats> { Json(Stats { count: 3, mean: 1.5 }) }
+```
 
 ## Feature flags
 
@@ -110,6 +127,7 @@ In [`examples/`](examples/) — run with `cargo run -p turbomcp4 --example <name
 | `stateful` | shared `Arc<RwLock<…>>` state across requests |
 | `validation` | handler-body validation → tool-level errors |
 | `resources_prompts` | the non-tool surface: resources + prompts |
+| `structured_output` | `Json<T>` → `structuredContent` + generated `outputSchema` |
 | `elicitation` | asking the user for input (MRTR + legacy inline) |
 | `dual_transport` | one server over stdio **and** HTTP (`--features http`) |
 | `tasks` | the draft Tasks extension (`--features ext-tasks`) |
