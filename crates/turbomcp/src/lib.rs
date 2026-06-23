@@ -137,7 +137,7 @@ pub const CRATE_NAME: &str = env!("CARGO_PKG_NAME");
 pub use turbomcp_macros::{description, prompt, resource, server, tool};
 
 // Re-export core types
-pub use turbomcp_core::context::RequestContext;
+pub use turbomcp_core::context::{REQUEST_META_KEY, RequestContext};
 pub use turbomcp_core::error::{McpError, McpResult};
 pub use turbomcp_core::handler::McpHandler;
 
@@ -332,8 +332,8 @@ pub mod prelude {
 
     // Common protocol types
     pub use super::{
-        CallToolRequest, CallToolResult, Message, Prompt, PromptArgument, RequestContext, Resource,
-        ResourceContents, Role, ServerInfo, Tool, ToolInputSchema,
+        CallToolRequest, CallToolResult, Message, Prompt, PromptArgument, REQUEST_META_KEY,
+        RequestContext, Resource, ResourceContents, Role, ServerInfo, Tool, ToolInputSchema,
     };
 
     // Unified response types

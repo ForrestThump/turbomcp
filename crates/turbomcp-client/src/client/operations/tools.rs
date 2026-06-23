@@ -188,6 +188,30 @@ impl<T: turbomcp_transport::Transport + 'static> super::super::core::Client<T> {
         }
     }
 
+    /// Call a tool with request-level `_meta`, returning the complete `CallToolResult`.
+    ///
+    /// `_meta` is the MCP spec's open, implementation-defined per-request metadata object. It is
+    /// **not** part of the tool's `arguments` and is not shown to the model — use it for
+    /// out-of-band concerns like provenance, trace context, or tenancy. A spec-compliant server
+    /// surfaces it to its tool handlers (see turbomcp-core's `REQUEST_META_KEY`); servers that
+    /// ignore `_meta` are unaffected.
+    pub async fn call_tool_with_meta(
+        &self,
+        name: &str,
+        arguments: Option<HashMap<String, serde_json::Value>>,
+        meta: Option<serde_json::Value>,
+    ) -> Result<CallToolResult> {
+        match self
+            .call_tool_response_with_meta(name, arguments, meta, None)
+            .await?
+        {
+            CallToolResponse::Result(result) => Ok(result),
+            CallToolResponse::Task(_) => Err(Error::invalid_request(
+                "task-augmented tools/call returned CreateTaskResult; use call_tool_task or call_tool_response",
+            )),
+        }
+    }
+
     /// Call a tool and preserve the spec-level response variant.
     ///
     /// MCP 2025-11-25 task-augmented `tools/call` returns `CreateTaskResult`
@@ -196,6 +220,21 @@ impl<T: turbomcp_transport::Transport + 'static> super::super::core::Client<T> {
         &self,
         name: &str,
         arguments: Option<HashMap<String, serde_json::Value>>,
+        task: Option<TaskMetadata>,
+    ) -> Result<CallToolResponse> {
+        self.call_tool_response_with_meta(name, arguments, None, task)
+            .await
+    }
+
+    /// [`call_tool_response`](Self::call_tool_response) with request-level `_meta`.
+    ///
+    /// Threads the supplied `_meta` into the `tools/call` request. All other `call_tool*` methods
+    /// delegate here so `_meta` is the single place request metadata is set.
+    pub async fn call_tool_response_with_meta(
+        &self,
+        name: &str,
+        arguments: Option<HashMap<String, serde_json::Value>>,
+        meta: Option<serde_json::Value>,
         task: Option<TaskMetadata>,
     ) -> Result<CallToolResponse> {
         if !self.inner.initialized.load(Ordering::Relaxed) {
@@ -207,7 +246,7 @@ impl<T: turbomcp_transport::Transport + 'static> super::super::core::Client<T> {
             name: name.to_string(),
             arguments: Some(arguments.unwrap_or_default()),
             task,
-            _meta: None,
+            _meta: meta,
         };
 
         let raw_result: serde_json::Value = self

@@ -137,6 +137,20 @@ pub async fn route_request<H: McpHandler>(
                 .unwrap_or_default();
             let args = params.get("arguments").cloned().unwrap_or_default();
 
+            // Surface the request's wire-level `_meta` to the handler via context metadata, so a
+            // tool can read per-call metadata (provenance, trace context, …) without a signature
+            // change. When `_meta` is absent we pass the borrowed context through untouched.
+            let augmented_ctx;
+            let ctx = match params.get("_meta") {
+                Some(meta) => {
+                    augmented_ctx = ctx
+                        .clone()
+                        .with_metadata(crate::context::REQUEST_META_KEY, meta.clone());
+                    &augmented_ctx
+                }
+                None => ctx,
+            };
+
             match handler.call_tool(name, args, ctx).await {
                 Ok(result) => match serde_json::to_value(&result) {
                     Ok(result_value) => JsonRpcOutgoing::success(id, result_value),
@@ -442,15 +456,22 @@ mod tests {
             &'a self,
             name: &'a str,
             args: Value,
-            _ctx: &'a RequestContext,
+            ctx: &'a RequestContext,
         ) -> impl Future<Output = McpResult<ToolResult>> + MaybeSend + 'a {
             let name = name.to_string();
+            // Echo the request `_meta` the router surfaced into context (or "<none>" when absent),
+            // so a test can assert the plumbing.
+            let echoed_meta = ctx
+                .get_metadata(crate::context::REQUEST_META_KEY)
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "<none>".to_string());
             async move {
                 match name.as_str() {
                     "greet" => {
                         let who = args.get("name").and_then(|v| v.as_str()).unwrap_or("World");
                         Ok(ToolResult::text(alloc::format!("Hello, {}!", who)))
                     }
+                    "echo_meta" => Ok(ToolResult::text(echoed_meta)),
                     _ => Err(McpError::tool_not_found(&name)),
                 }
             }
@@ -847,6 +868,54 @@ mod tests {
         let response = route_request(&handler, request, &ctx, &config).await;
         assert!(response.result.is_some());
         assert!(response.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_tools_call_surfaces_meta_to_handler() {
+        let handler = TestHandler;
+        let ctx = RequestContext::stdio();
+        let config = RouteConfig::default();
+        let request = JsonRpcIncoming {
+            jsonrpc: "2.0".to_string(),
+            id: Some(serde_json::json!(1)),
+            method: "tools/call".to_string(),
+            params: Some(serde_json::json!({
+                "name": "echo_meta",
+                "arguments": {},
+                "_meta": { "trace_id": "abc-123" }
+            })),
+        };
+
+        let response = route_request(&handler, request, &ctx, &config).await;
+        let result = response
+            .result
+            .expect("tool call should succeed")
+            .to_string();
+        assert!(result.contains("trace_id"), "meta not surfaced: {result}");
+        assert!(result.contains("abc-123"), "meta not surfaced: {result}");
+    }
+
+    #[tokio::test]
+    async fn test_tools_call_without_meta_is_absent() {
+        let handler = TestHandler;
+        let ctx = RequestContext::stdio();
+        let config = RouteConfig::default();
+        let request = JsonRpcIncoming {
+            jsonrpc: "2.0".to_string(),
+            id: Some(serde_json::json!(1)),
+            method: "tools/call".to_string(),
+            params: Some(serde_json::json!({
+                "name": "echo_meta",
+                "arguments": {}
+            })),
+        };
+
+        let response = route_request(&handler, request, &ctx, &config).await;
+        let result = response
+            .result
+            .expect("tool call should succeed")
+            .to_string();
+        assert!(result.contains("<none>"), "expected no meta: {result}");
     }
 
     #[tokio::test]

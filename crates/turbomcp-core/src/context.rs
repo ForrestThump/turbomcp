@@ -100,6 +100,15 @@ impl core::fmt::Display for TransportType {
     }
 }
 
+/// Metadata key under which the request's wire-level `_meta` object is surfaced to handlers via
+/// [`RequestContext::metadata`].
+///
+/// The MCP spec defines `_meta` as an open, implementation-defined object carried on requests. The
+/// router lifts a `tools/call` request's `_meta` into the context under this key so tool handlers
+/// can read per-call metadata (provenance, trace context, etc.) without any change to handler
+/// signatures. Absent `_meta`, the key is simply not present.
+pub const REQUEST_META_KEY: &str = "_meta";
+
 /// Canonical per-request context.
 ///
 /// Carries request identity, transport information, authentication principal,

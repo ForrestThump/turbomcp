@@ -40,6 +40,10 @@ parking_lot = "0.12"
 [dev-dependencies]
 bytes = { workspace = true }
 tracing-subscriber = { workspace = true }
+# Round-trip integration tests: drive a real in-process server (channel transport).
+turbomcp-server = { workspace = true, features = ["channel"] }
+turbomcp-core = { workspace = true, features = ["std"] }
+turbomcp-types = { workspace = true }
 
 [features]
 default = ["stdio"]
