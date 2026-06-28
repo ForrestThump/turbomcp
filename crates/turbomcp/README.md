@@ -1,926 +1,139 @@
-# TurboMCP
+# turbomcp
 
-[![Crates.io](https://img.shields.io/crates/v/turbomcp.svg)](https://crates.io/crates/turbomcp)
-[![Documentation](https://docs.rs/turbomcp/badge.svg)](https://docs.rs/turbomcp)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](../../LICENSE)
-[![Tests](https://github.com/Epistates/turbomcp/actions/workflows/test.yml/badge.svg)](https://github.com/Epistates/turbomcp/actions/workflows/test.yml)
+A ground-up Rust SDK for the [Model Context Protocol](https://modelcontextprotocol.io),
+both halves of the protocol — server **and** client — with a macro-driven,
+zero-boilerplate surface and strict spec compliance as a feature.
 
-Rust SDK for the Model Context Protocol (MCP) with comprehensive specification support and performance optimizations.
+> **Status: `4.0.0-alpha.1`.** A ground-up rewrite of `turbomcp` for the v4
+> major version; the stable line is `3.x`. Edition 2024, MSRV 1.85.
 
-## Quick Navigation
+## What you get
 
-**Jump to section:**
-[Overview](#overview) | [Quick Start](#quick-start) | [Core Concepts](#core-concepts) | [Advanced Features](#mcp-2025-11-25-enhanced-features) | [Security](#security-features) | [Performance](#performance) | [Deployment](#deployment--operations) | [Examples](#examples)
+- **One macro defines a server.** `#[server]` over an `impl` block turns
+  `#[tool]` / `#[resource]` / `#[prompt]` methods into a fully-wired MCP server.
+  JSON schemas are generated from your function signatures at compile time, and
+  the advertised capabilities are *derived* from which markers are present — they
+  can't drift from the implementation.
+- **Two protocol versions, one handler.** The same server answers both
+  `2025-11-25` and the `DRAFT-2026-v1` draft. Your handlers speak
+  version-neutral types; the version-specific wire shapes are conversions, not
+  signature changes.
+- **Transports behind one builder.** stdio (default) and Streamable HTTP
+  (axum). `MyServer.run_stdio()` or `MyServer.into_server().run_http(addr, cfg)`.
+- **The client too.** A typed `Client` runs the handshake, negotiates the
+  version, and speaks the same neutral API — interoperating with the official
+  Rust SDK (rmcp) both directions.
+- **Production seams.** OAuth 2.1 resource-server auth, identity-keyed rate
+  limiting, OpenTelemetry tracing, progress/logging, subscriptions, and
+  bidirectional elicitation (MRTR) — each opt-in behind a feature flag.
 
-## Overview
-
-`turbomcp` is a Rust framework for implementing the Model Context Protocol. It provides tools, servers, clients, and transport layers with MCP specification compliance, security features, and performance optimizations.
-
-### Security Features
-- Zero known vulnerabilities - Security audit with `cargo-deny` policy
-- Dependency security - Eliminated RSA and paste crate vulnerabilities
-- MIT-compatible dependencies - Permissive license enforcement
-- Security hardening - Dependency optimization for security
-
-### Performance Monitoring
-- Benchmarking infrastructure - Automated regression detection
-- Cross-platform testing - Ubuntu, Windows, macOS CI validation
-- CI/CD integration - GitHub Actions with performance tracking
-
-## Key Features
-
-### Performance Features
-- Optimized JSON processing - Optional SIMD acceleration with fast libraries
-- Efficient message handling - Minimal memory allocations with zero-copy patterns
-- Connection management - Connection pooling and reuse strategies
-- Request routing - Efficient handler lookup with parameter injection
-
-### Developer Experience
-- Procedural macros - `#[server]`, `#[tool]`, `#[resource]`, `#[prompt]`
-- Type-state capability builders - Compile-time validated capability configuration
-- Automatic schema generation - JSON schemas from Rust types
-- Type-safe parameters - Compile-time validation and conversion
-- Context injection - Request context available in handler signatures
-- Builder patterns for user input and message handling
-- Context API - Access to user information, authentication, and request metadata
-
-### Security Features
-- OAuth 2.0 integration - Google, GitHub, Microsoft provider support
-- PKCE security - Proof Key for Code Exchange implementation
-- CORS protection - Cross-origin resource sharing policies
-- Rate limiting - Token bucket algorithm with burst capacity
-- Security headers - CSP, HSTS, X-Frame-Options configuration
-
-### Multi-Transport Support
-- STDIO - Command-line integration with protocol compliance
-- **Streamable HTTP** - MCP HTTP transport with session management and SSE support
-- **WebSocket** - Real-time bidirectional communication with connection lifecycle management
-- **TCP** - Direct socket connections with connection pooling
-- **Unix Sockets** - Local inter-process communication with file permissions
-
-All transport protocols provide MCP protocol compliance with bidirectional communication, automatic reconnection, and session management.
-
-> **⚠️ STDIO Transport Output Constraint** ⚠️
->
-> When using STDIO transport, **ALL application output must go to stderr**.
-> Any writes to stdout will corrupt the MCP protocol and break client communication.
->
-> **Compile-Time Safety:** The `#[server(transports = ["stdio"])]` macro will **reject** any use of `println!()` at compile time.
-> This is impossible to bypass - bad code simply won't compile.
->
-> **Correct Pattern:**
-> ```rust
-> // All output goes to stderr via tracing_subscriber
-> tracing_subscriber::fmt().with_writer(std::io::stderr).init();
-> tracing::info!("message");  // ✅ Goes to stderr
-> eprintln!("error");         // ✅ Explicit stderr
-> ```
->
-> **Wrong Pattern:**
-> ```rust
-> println!("debug");           // ❌ COMPILE ERROR in stdio servers
-> std::io::stdout().write_all(b"...");  // ❌ Won't compile
-> ```
->
-> See [Stdio Output Guide](docs/stdio-output-guide.md) for comprehensive details.
-
-### 🌟 **MCP Enhanced Features**
-- **🎵 AudioContent Support** - Multimedia content handling for audio data
-- **📝 Enhanced Annotations** - Rich metadata with ISO 8601 timestamp support
-- **🏷️ BaseMetadata Pattern** - Proper name/title separation for MCP compliance
-- **📋 Advanced Elicitation** - Interactive forms with validation support
-
-### ⚡ **Circuit Breaker & Reliability**
-- **Circuit breaker pattern** - Prevents cascade failures
-- **Exponential backoff retry** - Intelligent error recovery
-- **Connection health monitoring** - Automatic failure detection
-- **Graceful degradation** - Fallback mechanisms
-
-### 🔄 **Sharing Patterns for Async Concurrency**
-- **Client Clone Pattern** - Directly cloneable (Arc-wrapped internally, no wrapper needed)
-- **SharedTransport** - Concurrent transport sharing across async tasks
-- **McpServer Clone Pattern** - Axum/Tower standard (cheap Arc increments, no wrappers)
-- **Generic Shareable Pattern** - Shared<T> and ConsumableShared<T> abstractions
-- **Arc/Mutex Encapsulation** - Hide synchronization complexity from public APIs
-
-## Architecture
-
-TurboMCP is built as a layered architecture with clear separation of concerns:
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                      TurboMCP Framework                     │
-│              Ergonomic APIs & Developer Experience         │
-├─────────────────────────────────────────────────────────────┤
-│                   Infrastructure Layer                     │
-│          Server • Client • Transport • Protocol            │
-├─────────────────────────────────────────────────────────────┤
-│                     Foundation Layer                       │
-│             Core Types • Messages • State                  │
-└─────────────────────────────────────────────────────────────┘
-```
-
-**Components:**
-- **[turbomcp-protocol](../turbomcp-protocol/)** - MCP specification implementation, core utilities, and SIMD acceleration
-- **[turbomcp-transport](../turbomcp-transport/)** - Multi-protocol transport with circuit breakers
-- **[turbomcp-server](../turbomcp-server/)** - Server framework with OAuth 2.0
-- **[turbomcp-client](../turbomcp-client/)** - Client implementation with error recovery
-- **[turbomcp-macros](../turbomcp-macros/)** - Procedural macros for ergonomic APIs
-- **[turbomcp-cli](../turbomcp-cli/)** - Command-line tools for development and testing
-
-## Quick Start
-
-### Installation
-
-Add TurboMCP to your `Cargo.toml`:
-
-```toml
-[dependencies]
-turbomcp = "3.1.4"
-tokio = { version = "1.0", features = ["full"] }
-```
-
-### Basic Server
-
-Create a simple calculator server:
+## Quickstart
 
 ```rust
 use turbomcp::prelude::*;
 
 #[derive(Clone)]
-struct Calculator;
+struct Hello;
 
-#[server]
-impl Calculator {
-    #[tool("Add two numbers")]
-    async fn add(&self, a: i32, b: i32) -> McpResult<i32> {
-        Ok(a + b)
-    }
-
-    #[tool("Get server status")]
-    async fn status(&self) -> McpResult<String> {
-        Ok("Server running".to_string())
+#[server(name = "hello", version = "1.0.0")]
+impl Hello {
+    /// Say hello to someone.
+    #[tool(description = "Say hello to someone")]
+    async fn hello(&self, name: String) -> McpResult<String> {
+        Ok(format!("Hello, {name}!"))
     }
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    Calculator.run_stdio().await?;
-    Ok(())
+async fn main() -> Result<(), turbomcp::ProtocolError> {
+    // Logs MUST go to stderr — stdout carries the MCP protocol framing.
+    Hello.run_stdio().await
 }
 ```
 
-### Run the Server
+Serve the same server over Streamable HTTP instead (feature `http`):
 
-```bash
-# Build and run
-cargo run
+```rust,ignore
+use turbomcp::http::{HttpConfig, ServeHttp};
 
-# Test with TurboMCP CLI
-cargo install turbomcp-cli
-
-# For HTTP server
-turbomcp-cli tools list --url http://localhost:8080/mcp
-
-# For STDIO server
-turbomcp-cli tools list --command "./target/debug/my-server"
-```
-
-## Type-State Capability Builders
-
-TurboMCP provides compile-time validated capability builders that ensure correct configuration at build time:
-
-```rust
-use turbomcp_protocol::capabilities::builders::{ServerCapabilitiesBuilder, ClientCapabilitiesBuilder};
-
-// Server capabilities with compile-time validation
-let server_caps = ServerCapabilitiesBuilder::new()
-    .enable_tools()                    // Enable tools capability
-    .enable_prompts()                  // Enable prompts capability
-    .enable_resources()                // Enable resources capability
-    .enable_tool_list_changed()        // ✅ Only available when tools enabled
-    .enable_resources_subscribe()      // ✅ Only available when resources enabled
-    .build();
-
-// Usage in server macro
-#[server(
-    name = "my-server",
-    version = "1.0.0",
-    capabilities = ServerCapabilities::builder()
-        .enable_tools()
-        .enable_tool_list_changed()
-        .build()
-)]
-impl MyServer {
-    // Implementation...
-}
-
-// Client capabilities with opt-out model (all enabled by default)
-let client_caps = ClientCapabilitiesBuilder::new()
-    .enable_roots_list_changed()       // Configure sub-capabilities
-    .build();                          // All capabilities enabled!
-
-// Opt-in pattern for restrictive clients
-let minimal_client = ClientCapabilitiesBuilder::minimal()
-    .enable_sampling()                 // Only enable what you need
-    .enable_roots()
-    .build();
-```
-
-### Benefits
-- **Compile-time validation** - Invalid configurations caught at build time
-- **Zero-cost abstractions** - No runtime overhead for validation
-- **Method availability** - Sub-capabilities only available when parent capability is enabled
-- **Fluent API** - Readable and maintainable capability configuration
-- **Backwards compatibility** - Existing code continues to work unchanged
-
-## Core Concepts
-
-### Server Definition
-
-Use the `#[server]` macro to automatically implement the MCP server trait:
-
-```rust
-use turbomcp::prelude::*;
-
-#[derive(Clone)]
-struct MyServer {
-    database: Arc<Database>,
-    cache: Arc<Cache>,
-}
-
-#[server]
-impl MyServer {
-    // Tools, resources, and prompts defined here
-}
-```
-
-### Tool Handlers
-
-Transform functions into MCP tools with automatic parameter handling:
-
-```rust
-#[tool("Calculate expression")]
-async fn calculate(
-    &self,
-    #[description("Mathematical expression")]
-    expression: String,
-    #[description("Precision for results")]
-    precision: Option<u32>,
-) -> McpResult<f64> {
-    let precision = precision.unwrap_or(2);
-
-    // Calculation logic
-    let result = evaluate_expression(&expression)?;
-    Ok(round_to_precision(result, precision))
-}
-```
-
-### Resource Handlers
-
-Create URI template-based resource handlers:
-
-```rust
-#[resource("file://{path}")]
-async fn read_file(
-    &self,
-    #[description("File path to read")]
-    path: String,
-) -> McpResult<String> {
-    tokio::fs::read_to_string(&path).await
-        .map_err(|e| McpError::internal(e.to_string()))
-}
-```
-
-### Prompt Templates
-
-Generate dynamic prompts with parameter substitution:
-
-```rust
-#[prompt("code_review")]
-async fn code_review_prompt(
-    &self,
-    #[description("Programming language")]
-    language: String,
-    #[description("Code to review")]
-    code: String,
-) -> McpResult<String> {
-    Ok(format!(
-        "Please review the following {} code:\n\n```{}\n{}\n```",
-        language, language, code
-    ))
-}
-```
-
-### MCP 2025-11-25 Enhanced Features
-
-TurboMCP targets MCP `2025-11-25` (with `2025-06-18` accepted by default via
-per-version response adapters). Protocol-level features such as resource URI
-templates (RFC 6570), elicitation, sampling, tasks, and draft extensions are
-implemented in `turbomcp-protocol`; see the crate-level docs for current
-surface area. The available attribute macros for server authors are:
-`#[server]`, `#[tool]`, `#[resource]`, `#[prompt]`, and `#[description]`.
-
-### Resource Templates (RFC 6570)
-
-```rust
-#[resource("users/{user_id}/posts/{post_id}")]
-async fn get_user_post(&self, user_id: String, post_id: String) -> McpResult<String> {
-    // RFC 6570 URI template with multiple parameters
-    Ok(format!("post {post_id} for user {user_id}"))
-}
-```
-
-### Context Injection
-
-Inject `&RequestContext` as the first parameter to access per-request
-metadata (correlation IDs, transport info, session state). Auth, structured
-logging, metrics, and server-initiated sampling are handled through separate
-facilities (middleware, the `turbomcp-telemetry` crate, and the client-side
-`create_message` API respectively) rather than on the context itself.
-
-```rust
-#[tool("Inspect request context")]
-async fn inspect(&self, ctx: &RequestContext) -> McpResult<String> {
-    Ok(format!("request_id={} transport={:?}", ctx.request_id, ctx.transport))
-}
-```
-
-## Authentication & Security
-
-### OAuth 2.1 Setup
-
-TurboMCP ships an OAuth 2.1 + PKCE implementation in the `turbomcp-auth`
-crate, re-exported from the main crate as `turbomcp::auth` when the `auth`
-feature is enabled. DPoP (RFC 9449) proof-of-possession lives in
-`turbomcp-dpop` and is enabled via the `dpop` feature (which pulls in
-`auth`). Authenticated identity is attached to requests through
-`RequestContext::principal` via middleware; tools read it from the context
-rather than calling an `authenticated_user()` helper. See the
-`turbomcp-auth` crate docs for the provider / middleware construction APIs.
-
-### Security Configuration
-
-Configure HTTP origin policy through the spec-compliant server builder:
-
-```rust
-use turbomcp_server::{McpServerExt, ServerConfig};
-
-let config = ServerConfig::builder()
-    .allow_origin("https://app.example.com")
-    .max_message_size(10 * 1024 * 1024)
-    .build();
-
-let app = MyServer::new()
-    .builder()
-    .with_config(config)
-    .into_axum_router();
-```
-
-## Transport Configuration
-
-### STDIO Transport (Default)
-
-Perfect for Claude Desktop and local development:
-
-```rust
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    MyServer::new().run_stdio().await?;
-    Ok(())
-}
-```
-
-### Streamable HTTP Transport
-
-For web applications and browser integration:
-
-```rust
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    MyServer::new().run_http("0.0.0.0:8080").await?;
-    Ok(())
-}
-```
-
-### WebSocket Transport
-
-For real-time bidirectional communication:
-
-```rust
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    MyServer::new().run_websocket("0.0.0.0:8080").await?;
-    Ok(())
-}
-```
-
-### Multi-Transport Runtime Selection
-
-```rust
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let server = MyServer::new();
-    
-    match std::env::var("TRANSPORT").as_deref() {
-        Ok("http") => server.run_http("0.0.0.0:8080").await?,
-        Ok("websocket") => server.run_websocket("0.0.0.0:8080").await?,
-        Ok("tcp") => server.run_tcp("0.0.0.0:8080").await?,
-        Ok("unix") => server.run_unix("/tmp/mcp.sock").await?,
-        _ => server.run_stdio().await?, // Default
-    }
-    Ok(())
-}
-```
-
-## Cloning & Concurrency Patterns
-
-TurboMCP provides clean concurrency patterns with Arc-wrapped internals:
-
-### Client Clone Pattern - Direct Cloning (No Wrapper Needed)
-
-```rust
-use turbomcp_client::Client;
-
-// Client is directly cloneable (Arc-wrapped internally)
-let client = Client::connect_http("http://localhost:8080").await?;
-
-// Clone for concurrent usage (cheap Arc increments)
-let client1 = client.clone();
-let client2 = client.clone();
-
-// Both tasks can access the client concurrently
-let handle1 = tokio::spawn(async move {
-    client1.list_tools().await
-});
-
-let handle2 = tokio::spawn(async move {
-    client2.list_prompts().await
-});
-
-let (tools, prompts) = tokio::join!(handle1, handle2);
-```
-
-### SharedTransport - Concurrent Transport Access
-
-```rust
-use turbomcp_transport::{StdioTransport, SharedTransport};
-
-// Wrap any transport for sharing across multiple clients
-let transport = StdioTransport::new();
-let shared = SharedTransport::new(transport);
-
-// Connect once
-shared.connect().await?;
-
-// Share across tasks
-let shared1 = shared.clone();
-let shared2 = shared.clone();
-
-let handle1 = tokio::spawn(async move {
-    shared1.send(message).await
-});
-
-let handle2 = tokio::spawn(async move {
-    shared2.receive().await
-});
-```
-
-### Generic Shareable Pattern
-
-```rust
-use turbomcp_protocol::shared::{Shared, ConsumableShared};
-
-// Any type can be made shareable
-let counter = MyCounter::new();
-let shared = Shared::new(counter);
-
-// Use with closures for fine-grained control
-shared.with_mut(|c| c.increment()).await;
-let value = shared.with(|c| c.get()).await;
-
-// Consumable variant for one-time use
-let server = MyServer::new();
-let shared = ConsumableShared::new(server);
-let server = shared.consume().await?; // Extracts the value
-```
-
-### Benefits
-- **Clean APIs**: No exposed Arc/Mutex types
-- **Easy Sharing**: Clone for concurrent access
-- **Thread Safety**: Built-in synchronization
-- **Zero Overhead**: Same performance as direct usage
-- **MCP Compliant**: Preserves all protocol semantics
-
-## Error Handling
-
-### Error Architecture
-
-TurboMCP exposes a single unified error type — `McpError` — defined in
-`turbomcp-core` and re-exported as `turbomcp::McpError` /
-`turbomcp::McpResult`. There is **one error type across the whole stack:**
-handlers, middleware, transport, and protocol layers all speak the same
-`McpError`.
-
-This is a deliberate simplification over the earlier two-tier
-(`McpError` → `ProtocolError`) design: `McpError` already carries
-JSON-RPC error codes, HTTP status mapping, retryability metadata, and a
-fluent `.with_operation(...)` / `.with_component(...)` context chain,
-which is everything the old `ProtocolError` provided.
-
-#### Flow
-
-```
-Your Tool Handler
-    ↓ returns McpResult<T> (i.e. Result<T, McpError>)
-Server Layer (turbomcp-server)
-    ↓ inspects McpError metadata (jsonrpc_code, retryability, context)
-Protocol / JSON-RPC Response
-```
-
-Use `McpError` everywhere. For MCP-specification error codes, the
-appropriate constructor (`tool_not_found`, `invalid_params`,
-`resource_not_found`, `authentication`, `permission_denied`,
-`rate_limited`, `timeout`, `transport`, `internal`, …) picks the right
-JSON-RPC / MCP code for you — see the "Error Handling" examples below.
-
-### Ergonomic Error Creation
-
-Use `McpError` constructors for error creation:
-
-```rust
-#[tool("Divide numbers")]
-async fn divide(&self, a: f64, b: f64) -> McpResult<f64> {
-    if b == 0.0 {
-        return Err(McpError::invalid_params(format!("Division by zero: {} / {}", a, b)));
-    }
-    Ok(a / b)
-}
-
-#[tool("Read file")]
-async fn read_file(&self, path: String) -> McpResult<String> {
-    tokio::fs::read_to_string(&path).await
-        .map_err(|e| McpError::internal(format!("Failed to read file {}: {}", path, e)))
-}
-```
-
-### Application-Level Errors (`McpError`)
-
-Construct errors with fluent constructors:
-
-```rust
-use turbomcp::McpError;
-
-// Construct with appropriate constructor
-let err = McpError::invalid_params("Name must not be empty");
-let err = McpError::authentication("Token expired");
-let err = McpError::resource_not_found("file://missing.txt");
-let err = McpError::transport("Connection dropped");
-let err = McpError::internal("Unexpected state")
-    .with_operation("process")
-    .with_component("handler");
-
-// Query error metadata
-assert!(err.is_retryable() || !err.is_retryable());
-let _code = err.jsonrpc_code();
-let _status = err.http_status();
-```
-
-### Protocol-Level Error Codes
-
-`McpError` exposes its MCP / JSON-RPC semantics directly — no separate
-error type is needed:
-
-```rust
-use turbomcp::McpError;
-
-let err = McpError::internal("Database connection failed")
-    .with_operation("user_lookup")
-    .with_component("auth_service");
-
-assert_eq!(err.jsonrpc_code(), -32603);   // Internal error
-let _http_status = err.http_status();     // HTTP mapping
-let _retryable = err.is_retryable();      // Retry hint for clients
-```
-
-Constructors such as `tool_not_found`, `invalid_params`,
-`resource_not_found`, `capability_not_supported`, and `rate_limited`
-emit the MCP-spec JSON-RPC codes defined in `turbomcp-core::error_codes`.
-
-## Advanced Features
-
-### Custom Types and Schema Generation
-
-TurboMCP automatically generates JSON schemas for custom types:
-
-```rust
-use serde::{Serialize, Deserialize};
-
-#[derive(Serialize, Deserialize)]
-struct CreateUserRequest {
-    name: String,
-    email: String,
-    age: Option<u32>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct User {
-    id: u64,
-    name: String,
-    email: String,
-    created_at: chrono::DateTime<chrono::Utc>,
-}
-
-#[tool("Create a new user")]
-async fn create_user(&self, request: CreateUserRequest) -> McpResult<User> {
-    // Schema automatically generated for both types
-    let user = User {
-        id: generate_id(),
-        name: request.name,
-        email: request.email,
-        created_at: chrono::Utc::now(),
-    };
-    
-    // Save to database
-    self.database.save_user(&user).await?;
-    
-    Ok(user)
-}
-```
-
-### Graceful Shutdown
-
-The HTTP transport integrates with Tokio signal handlers for graceful
-shutdown. Configure the drain timeout through the server builder
-(`ServerBuilder::with_graceful_shutdown`); the HTTP runner awaits SIGINT
-(and SIGTERM on Unix) and drains in-flight requests up to the configured
-deadline. For STDIO, the process exits cleanly when stdin closes.
-
-### Performance Tuning
-
-SIMD-accelerated JSON parsing is provided by `turbomcp-protocol` (enabled by default via its `simd` feature, which selects `sonic-rs`). No extra flag is required on the `turbomcp` crate.
-
-Configure server behavior via `ServerConfig` and pass it through the
-server builder — the convenience methods (`run_stdio`, `run_http`, …)
-use defaults and ignore any standalone `ServerConfig`, so reach for
-`.builder().with_config(...)` when you need custom settings:
-
-```rust
-use turbomcp::prelude::*;
-use turbomcp_server::{ServerConfig, Transport};
-
-let config = ServerConfig::builder()
-    .max_message_size(10 * 1024 * 1024)   // 10 MB
-    .build();
-
-Calculator
-    .builder()
-    .with_config(config)
-    .transport(Transport::stdio())         // or http/tcp/websocket/unix
-    .serve()
+Hello.into_server()
+    .run_http("127.0.0.1:8080".parse()?, HttpConfig::new())
     .await?;
 ```
 
-## Testing
+## Tools, resources, prompts
 
-### Unit Testing
+```rust,ignore
+#[server(name = "docs", version = "1.0.0")]
+impl Docs {
+    /// A tool: arguments come from the signature; the schema is generated.
+    #[tool(description = "Add two numbers")]
+    async fn add(&self, a: f64, b: f64) -> String { format!("{}", a + b) }
 
-Test your tools directly by calling them as normal methods:
+    /// A resource at a fixed URI (resources/list + resources/read).
+    #[resource("config://app")]
+    async fn config(&self) -> McpResult<String> { Ok(r#"{"debug":false}"#.into()) }
 
-```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use turbomcp::prelude::*;
-
-    #[tokio::test]
-    async fn test_calculator() {
-        let calc = Calculator;
-
-        // Call the tool method directly
-        let result = calc.add(5, 3).await.unwrap();
-
-        assert_eq!(result, 8);
+    /// A prompt template; its arguments are the function arguments.
+    #[prompt]
+    async fn summarize(&self, text: String) -> McpResult<String> {
+        Ok(format!("Summarize:\n\n{text}"))
     }
 }
 ```
 
-### Integration Testing
+Tools return `String`/`&str`, any numeric or `bool` scalar, `()` (empty
+success), `Json<T>` (structured output — see below), or a
+`neutral::CallToolResult` — each optionally wrapped in `McpResult<_>`. A
+returned `McpError` becomes a tool-level error (`CallToolResult { isError }`) the
+model can see — not a transport error.
 
-Use the TurboMCP CLI for integration testing:
+### Structured output
 
-```bash
-# Install CLI
-cargo install turbomcp-cli
+Return `Json<T>` (where `T: Serialize + schemars::JsonSchema`) to produce a typed
+result: the value goes in `structuredContent` with a JSON text mirror for
+backward compatibility, and the macro generates the tool's `outputSchema` from
+`T`.
 
-# Test server functionality
-turbomcp-cli tools list --url http://localhost:8080/mcp
-turbomcp-cli tools call add --arguments '{"a": 5, "b": 3}' --url http://localhost:8080/mcp
-turbomcp-cli tools schema --url http://localhost:8080/mcp
+```rust,ignore
+#[derive(serde::Serialize, turbomcp::schemars::JsonSchema)]
+struct Stats { count: u64, mean: f64 }
 
-# Test STDIO server
-turbomcp-cli tools list --command "./target/debug/my-server"
-turbomcp-cli resources list --command "./target/debug/my-server"
+#[tool(description = "Compute stats")]
+async fn stats(&self) -> Json<Stats> { Json(Stats { count: 3, mean: 1.5 }) }
 ```
 
-## Client Setup
+## Feature flags
 
-### Claude Desktop
-
-Add to your Claude Desktop configuration:
-
-```json
-{
-  "mcpServers": {
-    "my-turbomcp-server": {
-      "command": "/path/to/your/server/binary",
-      "args": []
-    }
-  }
-}
-```
-
-### Programmatic Client
-
-Use the TurboMCP client:
-
-```rust
-use std::collections::HashMap;
-use turbomcp_client::Client;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Connect over HTTP (other helpers: Client::connect_stdio, etc.)
-    let client = Client::connect_http("http://localhost:8080/mcp").await?;
-
-    let tools = client.list_tools().await?;
-    println!("Available tools: {:?}", tools);
-
-    let mut args = HashMap::new();
-    args.insert("a".into(), serde_json::json!(5));
-    args.insert("b".into(), serde_json::json!(3));
-
-    // call_tool(name, arguments, task_metadata)
-    let result = client.call_tool("add", Some(args), None).await?;
-    println!("Result: {:?}", result);
-
-    Ok(())
-}
-```
+| Feature | Enables |
+|---|---|
+| *(default)* | stdio transport (always linked) |
+| `http` | Streamable HTTP transport (axum); the client's HTTP transport when `client` is on |
+| `client` | the typed `Client` + `ConnectMode` negotiation |
+| `auth` | OAuth 2.1 resource-server auth (bearer validation, RFC 9728 metadata) |
+| `telemetry` | OpenTelemetry tracing (`TraceContextLayer`, W3C `_meta` propagation, PII-safe spans) |
+| `ext-tasks` | the draft Tasks extension (`io.modelcontextprotocol/tasks`, SEP-2663) |
 
 ## Examples
 
-Explore examples in the `examples/` directory:
+In [`examples/`](examples/) — run with `cargo run -p turbomcp --example <name>`:
 
-```bash
-# Minimal server
-cargo run --example hello_world
-cargo run --example calculator
-cargo run --example macro_server
+| Example | Shows |
+|---|---|
+| `hello_world` | the minimal one-tool server |
+| `calculator` | several tools; infallible vs fallible returns |
+| `stateful` | shared `Arc<RwLock<…>>` state across requests |
+| `validation` | handler-body validation → tool-level errors |
+| `resources_prompts` | the non-tool surface: resources + prompts |
+| `structured_output` | `Json<T>` → `structuredContent` + generated `outputSchema` |
+| `elicitation` | asking the user for input (MRTR + legacy inline) |
+| `dual_transport` | one server over stdio **and** HTTP (`--features http`) |
+| `tasks` | the draft Tasks extension (`--features ext-tasks`) |
 
-# Server patterns
-cargo run --example stateful
-cargo run --example validation
-cargo run --example composition
-cargo run --example middleware
-cargo run --example visibility
-cargo run --example tags_versioning
+## Migrating from v3
 
-# Transports (require the matching feature flag)
-cargo run --example tcp_server  --features tcp
-cargo run --example tcp_client  --features tcp
-cargo run --example unix_client --features unix
-cargo run --example transports_demo --features "stdio,http,tcp"
-
-# Capability builders & testing
-cargo run --example type_state_builders_demo
-cargo run --example test_client
-```
-
-## Feature Flags
-
-| Feature | Description | Default |
-|---------|-------------|---------|
-| `stdio` | STDIO transport | ✅ |
-| `http` | HTTP / SSE (Streamable HTTP) transport | ❌ |
-| `websocket` | WebSocket bidirectional transport | ❌ |
-| `tcp` | Raw TCP socket transport | ❌ |
-| `unix` | Unix domain socket transport | ❌ |
-| `channel` | In-process channel transport (testing/benchmarks) | ❌ |
-| `minimal` | Bundle: STDIO only (= `stdio`) | ❌ |
-| `full` | Bundle: all transports + telemetry | ❌ |
-| `full-stack` | Bundle: `full` + `full-client` | ❌ |
-| `all-transports` | Bundle: all transports incl. `channel` (no telemetry) | ❌ |
-| `telemetry` | OpenTelemetry, metrics, structured logging | ❌ |
-| `auth` | OAuth 2.1, JWT, API key auth (turbomcp-auth) | ❌ |
-| `dpop` | RFC 9449 DPoP (requires `auth`) | ❌ |
-| `client-integration` | Re-export minimal `turbomcp-client` (STDIO) | ❌ |
-| `full-client` | `turbomcp-client` with all transports | ❌ |
-| `experimental-tasks` | Tasks API (SEP-1686) | ❌ |
-
-### Important: Minimum Feature Requirements
-
-When using `default-features = false`, you must explicitly enable at least one transport feature to have a functional MCP server. The available transport features are:
-
-- `stdio` - STDIO transport (included in default features)
-- `http` - Streamable HTTP transport
-- `websocket` - WebSocket transport
-- `tcp` - TCP transport
-- `unix` - Unix socket transport
-
-**Example configurations:**
-
-```toml
-# Minimal STDIO-only server
-[dependencies]
-turbomcp = { version = "3.1.4", default-features = false, features = ["stdio"] }
-
-# HTTP-only server
-[dependencies]
-turbomcp = { version = "3.1.4", default-features = false, features = ["http"] }
-
-# Multiple transports without default features
-[dependencies]
-turbomcp = { version = "3.1.4", default-features = false, features = ["stdio", "http", "websocket"] }
-```
-
-Without at least one transport feature enabled, the server will not be able to communicate using the MCP protocol.
-
-## Development
-
-### Building
-
-```bash
-# Build with all features
-cargo build --all-features
-
-# Build optimized for production (SIMD JSON is enabled by default via turbomcp-protocol)
-cargo build --release --features full
-
-# Run tests
-cargo test --workspace
-```
-
-### Contributing
-
-1. Fork the repository
-2. Create a feature branch: `git checkout -b feature-name`
-3. Make your changes and add tests
-4. Run the full test suite: `just test`
-5. Submit a pull request
-
-## Performance Architecture
-
-### Compile-Time Optimization
-
-TurboMCP uses a compile-time first approach with these characteristics:
-
-**Build-Time Features:**
-- Macro-driven code generation pre-computes metadata at build time
-- Tool schemas, parameter validation, and handler dispatch tables generated statically
-- Rust's type system provides compile-time safety and optimization opportunities
-- Feature flags allow selective compilation for lean binaries
-
-**Runtime Characteristics:**
-- Static schema generation eliminates per-request computation
-- Direct function dispatch without hash table lookups
-- Zero-copy message handling where possible
-- Async runtime scaling with Tokio
-
-**Implementation Approach:**
-```rust
-// Compile-time schema generation
-#[tool("Add numbers")]
-async fn add(&self, a: i32, b: i32) -> McpResult<i32> {
-    Ok(a + b)  // Schema and dispatch code generated at build time
-}
-```
-
-### Benchmarks
-
-```bash
-# Run performance benchmarks
-cargo bench
-```
-
-## Documentation
-
-- **[Architecture Guide](../../ARCHITECTURE.md)** - System design and components
-- **[Security Features](../turbomcp-transport/SECURITY_FEATURES.md)** - Comprehensive security documentation
-- **[API Documentation](https://docs.rs/turbomcp)** - Complete API reference
-- **[Stdio Output Guide](./docs/stdio-output-guide.md)** - STDIO transport output requirements
-- **[Examples](./examples/)** - Ready-to-use code examples
-
-## Related Projects
-
-- **[Model Context Protocol](https://modelcontextprotocol.io/)** - Official protocol specification
-- **[Claude Desktop](https://claude.ai)** - AI assistant with MCP support
-- **[MCP Servers](https://github.com/modelcontextprotocol/servers)** - Official server implementations
+See [`MIGRATION.md`](MIGRATION.md) for the v3 → v4 deltas.
 
 ## License
 
-Licensed under the [MIT License](../../LICENSE).
-
----
-
-*Built with ❤️ by the TurboMCP team*
+MIT

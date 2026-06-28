@@ -1,88 +1,41 @@
 [package]
 name = "turbomcp-telemetry"
-version = "3.1.5"
+version = "4.0.0-alpha.1"
 edition = "2024"
-rust-version = "1.89.0"
+rust-version = "1.85"
+authors = ["Nicholas Paterno <nick@epistates.com>"]
+description = "TurboMCP v4 telemetry: OpenTelemetry, W3C Trace Context, metrics."
 license = "MIT"
-description = "OpenTelemetry integration and observability for TurboMCP SDK"
 repository = "https://github.com/Epistates/turbomcp"
-documentation = "https://docs.rs/turbomcp-telemetry"
 homepage = "https://turbomcp.org"
-keywords = ["mcp", "opentelemetry", "telemetry", "tracing", "metrics"]
-categories = ["development-tools::debugging", "development-tools::profiling", "asynchronous"]
-readme = "README.md"
 
 [dependencies]
-# Core dependencies
-turbomcp-protocol = { workspace = true }
-
-# Tracing foundation (always required)
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
-
-# OpenTelemetry core (optional)
-opentelemetry = { version = "0.31", default-features = false, optional = true, features = ["trace", "metrics"] }
-opentelemetry_sdk = { version = "0.31", default-features = false, optional = true, features = ["trace", "metrics", "rt-tokio"] }
-opentelemetry-otlp = { version = "0.31", default-features = false, optional = true, features = ["trace", "metrics", "http-proto", "reqwest-blocking-client"] }
-tracing-opentelemetry = { version = "0.32", optional = true }
-
-# Prometheus metrics (alternative to OTLP)
-metrics = { version = "0.24", optional = true }
-metrics-exporter-prometheus = { version = "0.18", optional = true, default-features = false, features = ["http-listener"] }
-
-# Tower integration
-tower = { workspace = true, optional = true }
-tower-service = { version = "0.3", optional = true }
-futures-util = { version = "0.3", optional = true }
-pin-project-lite = { version = "0.2", optional = true }
-
-# HTTP types
-http = "1.4"
-
-# Async runtime
-tokio = { workspace = true }
-
-# Serialization
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-
-# Utilities
+turbomcp-core = { workspace = true }
+turbomcp-service = { workspace = true }
+tower = { workspace = true }
+tracing = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 
-[dev-dependencies]
-tokio = { workspace = true }
-tokio-test = "0.4"
-proptest = "1.11"
-tower = { version = "0.5", features = ["util"] }
-tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+# The OTLP export pipeline (gRPC via tonic) + a turnkey subscriber installer.
+# Off by default: the TraceContextLayer + W3C propagation + redaction work with
+# any `tracing` subscriber and pull no network/runtime deps.
+opentelemetry-otlp = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
 
 [features]
-default = ["tracing-json"]
-
-# Tracing output formats
-tracing-json = []
-tracing-pretty = []
-
-# OpenTelemetry integration (full OTLP export)
-opentelemetry = [
-    "dep:opentelemetry",
-    "dep:opentelemetry_sdk",
+default = []
+otlp = [
     "dep:opentelemetry-otlp",
-    "dep:tracing-opentelemetry"
+    "opentelemetry-otlp/grpc-tonic",
+    "dep:tracing-subscriber",
+    "dep:tokio",
 ]
 
-# Prometheus metrics (standalone, without OpenTelemetry)
-prometheus = ["dep:metrics", "dep:metrics-exporter-prometheus"]
-
-# Tower middleware integration
-tower = ["dep:tower", "dep:tower-service", "dep:futures-util", "dep:pin-project-lite"]
-
-# Full telemetry stack
-full = ["opentelemetry", "prometheus", "tower"]
-
-[lints]
-workspace = true
-
-[package.metadata.docs.rs]
-all-features = true
-rustdoc-args = ["--cfg", "docsrs"]
+[dev-dependencies]
+futures = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }

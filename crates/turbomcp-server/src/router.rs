@@ -1,488 +1,301 @@
-//! JSON-RPC request routing for McpHandler.
+//! [`MethodRouter`]: the capability registry that backs a [`VersionDispatcher`].
 //!
-//! This module provides the native server's request routing with additional
-//! configuration validation beyond the core router.
+//! The router stores one type-erased handler closure per supported method.
+//! Registration methods (`with_tools`, `with_resources`, …) are bounded on the
+//! corresponding capability trait, so a server can only register `tools/*` if it
+//! actually implements [`WithTools`] — yet the *dispatcher* needs only
+//! [`McpServerCore`], because the trait bound is erased into the stored closure
+//! (axum's pattern).
 //!
-//! # Architecture
+//! Two consequences fall out for free:
+//! - Advertised capabilities are derived from what's registered ([`has_tools`]
+//!   et al.), so they cannot drift from the handlers.
+//! - A future macro (`#[server]`, Phase 3) registers exactly the capabilities
+//!   the user implemented, with no per-server boilerplate here.
 //!
-//! The native router layers on top of `turbomcp_core::router`:
-//! - **Core router**: Basic MCP method dispatch (shared with WASM)
-//! - **Native router**: Protocol negotiation, capability validation
+//! Every handler closure has the same shape — `Fn(S, Ctx, Params) -> BoxFuture`
+//! — so the slot type aliases and dispatch methods are generated from two small
+//! macros to keep them in lockstep.
 //!
-//! # MCP Protocol Compliance
-//!
-//! This router implements the MCP 2025-11-25 specification:
-//! - Initialize request validates `clientInfo` and `protocolVersion`
-//! - Notifications (requests without `id`) do not receive responses
-//! - Capability structure follows the spec format
-//! - Error codes follow JSON-RPC 2.0 standard
+//! [`VersionDispatcher`]: crate::VersionDispatcher
+//! [`has_tools`]: MethodRouter::has_tools
 
-use super::config::{ClientCapabilities, ServerConfig};
-use turbomcp_core::context::RequestContext;
-use turbomcp_core::error::McpError;
-use turbomcp_core::handler::McpHandler;
-use turbomcp_protocol::versioning::adapter::{VersionAdapter, adapter_for_version};
+use futures::future::BoxFuture;
 
-// Re-export canonical JSON-RPC types from turbomcp-core
-pub use turbomcp_core::jsonrpc::{JsonRpcIncoming, JsonRpcOutgoing};
-// Re-export core router utilities
-pub use turbomcp_core::router::{parse_request, parse_request_from_value, serialize_response};
+use turbomcp_core::McpResult;
+use turbomcp_protocol::neutral;
 
-/// Route a JSON-RPC request to the appropriate handler method.
-///
-/// This is the simple routing function that uses default configuration.
-/// For more control, use `route_request_with_config`.
-pub async fn route_request<H: McpHandler>(
-    handler: &H,
-    request: JsonRpcIncoming,
-    ctx: &RequestContext,
-) -> JsonRpcOutgoing {
-    route_request_with_config(handler, request, ctx, None).await
-}
+use crate::context::{
+    CallToolContext, CompleteContext, GetPromptContext, ListPromptsContext,
+    ListResourceTemplatesContext, ListResourcesContext, ListToolsContext, ReadResourceContext,
+};
+use crate::traits::{McpServerCore, WithCompletions, WithPrompts, WithResources, WithTools};
 
-/// Route a JSON-RPC request with custom server configuration.
-///
-/// This function provides full control over protocol negotiation,
-/// capability validation, and other server behavior.
-///
-/// # Additional Validation (vs core router)
-///
-/// When a `ServerConfig` is provided, this function adds:
-/// - Protocol version negotiation
-/// - Required client capability validation
-pub async fn route_request_with_config<H: McpHandler>(
-    handler: &H,
-    request: JsonRpcIncoming,
-    ctx: &RequestContext,
-    config: Option<&ServerConfig>,
-) -> JsonRpcOutgoing {
-    if request.is_notification() {
-        return JsonRpcOutgoing::notification_ack();
-    }
-
-    let id = request.id.clone();
-
-    // Validate message size against configured limit
-    if let Some(config) = config
-        && let Some(ref params) = request.params
-    {
-        let estimated_size = params.to_string().len();
-        if estimated_size > config.max_message_size {
-            return JsonRpcOutgoing::error(
-                id,
-                McpError::invalid_request(format!(
-                    "Message size {} exceeds maximum allowed size of {} bytes",
-                    estimated_size, config.max_message_size
-                )),
-            );
-        }
-    }
-
-    // For initialize requests, apply native-specific validation
-    if request.method == "initialize" {
-        let params_owned;
-        let params = match request.params.as_ref() {
-            Some(p) => p,
-            None => {
-                params_owned = serde_json::Value::default();
-                &params_owned
-            }
-        };
-
-        // Validate clientInfo is present (MCP spec requirement)
-        let Some(client_info) = params.get("clientInfo") else {
-            return JsonRpcOutgoing::error(
-                id,
-                McpError::invalid_params("Missing required field: clientInfo"),
-            );
-        };
-
-        // Validate clientInfo has required fields
-        let client_name = client_info.get("name").and_then(|v| v.as_str());
-        let client_version = client_info.get("version").and_then(|v| v.as_str());
-        let Some(name) = client_name else {
-            return JsonRpcOutgoing::error(
-                id,
-                McpError::invalid_params("clientInfo must contain 'name' and 'version' fields"),
-            );
-        };
-        let Some(version) = client_version else {
-            return JsonRpcOutgoing::error(
-                id,
-                McpError::invalid_params("clientInfo must contain 'name' and 'version' fields"),
-            );
-        };
-        // Bound length and reject empty / control-char values so they don't
-        // become a log-injection / telemetry-noise vector.
-        const CLIENT_INFO_MAX_LEN: usize = 128;
-        let is_bad = |s: &str| {
-            let trimmed = s.trim();
-            trimmed.is_empty()
-                || trimmed.len() > CLIENT_INFO_MAX_LEN
-                || trimmed.chars().any(|c| c.is_control())
-        };
-        if is_bad(name) || is_bad(version) {
-            return JsonRpcOutgoing::error(
-                id,
-                McpError::invalid_params(
-                    "clientInfo.name / clientInfo.version must be non-empty, \
-                     <=128 chars, and contain no control characters",
-                ),
-            );
-        }
-
-        // Extract client's requested protocol version
-        let protocol_version = params.get("protocolVersion").and_then(|v| v.as_str());
-
-        // Get protocol config (use default if none provided)
-        let protocol_config = config.map(|c| &c.protocol).cloned().unwrap_or_default();
-
-        // Negotiate protocol version
-        let negotiated_version = match protocol_config.negotiate(protocol_version) {
-            Some(version) => {
-                // Log if server fell back to a different version
-                if let Some(client_ver) = protocol_version
-                    && client_ver != version
-                {
-                    tracing::warn!(
-                        client_version = client_ver,
-                        negotiated_version = %version,
-                        supported = ?protocol_config.supported_versions,
-                        "Protocol version fallback: client requested unsupported version"
-                    );
-                }
-                version
-            }
-            None => {
-                return JsonRpcOutgoing::error(
-                    id,
-                    McpError::invalid_request(format!(
-                        "Unsupported protocol version: {}. Supported versions: {:?}",
-                        protocol_version.unwrap_or("none"),
-                        protocol_config.supported_versions
-                    )),
-                );
-            }
-        };
-
-        // Parse and validate client capabilities if required
-        if let Some(cfg) = config {
-            let client_caps = ClientCapabilities::from_params(params);
-            let validation = cfg.required_capabilities.validate(&client_caps);
-
-            if let Some(missing) = validation.missing() {
-                return JsonRpcOutgoing::error(
-                    id,
-                    McpError::invalid_request(format!(
-                        "Missing required client capabilities: {}",
-                        missing.join(", ")
-                    )),
-                );
-            }
-        }
-
-        // Use core router with negotiated version
-        let version_str = negotiated_version.as_str();
-        let core_config = turbomcp_core::router::RouteConfig {
-            protocol_version: Some(version_str),
-        };
-        let response =
-            turbomcp_core::router::route_request(handler, request, ctx, &core_config).await;
-
-        // Apply version adapter to the initialize response
-        let adapter = adapter_for_version(&negotiated_version);
-        return apply_adapter_to_response(adapter, "initialize", response);
-    }
-
-    // For all other methods, delegate to core router (no adapter — caller
-    // must use route_request_versioned for post-initialize adapter filtering)
-    let core_config = turbomcp_core::router::RouteConfig::default();
-    turbomcp_core::router::route_request(handler, request, ctx, &core_config).await
-}
-
-/// Route a JSON-RPC request with version-aware adapter filtering.
-///
-/// This is the recommended entry point for post-initialize requests when the
-/// session has a negotiated protocol version. It:
-/// 1. Validates the method is available in the negotiated version
-/// 2. Delegates to the core router
-/// 3. Applies the version adapter to filter the response
-///
-/// Transport layers should store the negotiated [`turbomcp_protocol::types::ProtocolVersion`] from
-/// the initialize handshake and pass it here for all subsequent requests.
-pub async fn route_request_versioned<H: McpHandler>(
-    handler: &H,
-    request: JsonRpcIncoming,
-    ctx: &RequestContext,
-    negotiated_version: &turbomcp_types::ProtocolVersion,
-) -> JsonRpcOutgoing {
-    if request.is_notification() {
-        return JsonRpcOutgoing::notification_ack();
-    }
-
-    let adapter = adapter_for_version(negotiated_version);
-    let method = request.method.clone();
-
-    // Validate that the method exists in the negotiated version
-    if let Err(reason) = adapter.validate_method(&method) {
-        return JsonRpcOutgoing::error(request.id.clone(), McpError::method_not_found(reason));
-    }
-
-    // Route through core
-    let core_config = turbomcp_core::router::RouteConfig::default();
-    let response = turbomcp_core::router::route_request(handler, request, ctx, &core_config).await;
-
-    // Apply version adapter to filter the response
-    apply_adapter_to_response(adapter, &method, response)
-}
-
-/// Apply a version adapter to a JSON-RPC response.
-///
-/// This filters the result value through the adapter's `filter_result` method,
-/// stripping fields that don't exist in the target spec version.
-///
-/// Transport layers should call this on outgoing responses when the session
-/// has a negotiated version different from the latest.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// use turbomcp_server::router::apply_adapter_to_response;
-/// use turbomcp_protocol::versioning::adapter::adapter_for_version;
-///
-/// let adapter = adapter_for_version(&negotiated_version);
-/// let filtered = apply_adapter_to_response(adapter, "tools/list", response);
-/// ```
-pub fn apply_adapter_to_response(
-    adapter: &dyn VersionAdapter,
-    method: &str,
-    mut response: JsonRpcOutgoing,
-) -> JsonRpcOutgoing {
-    // Only filter successful responses (errors pass through unchanged)
-    if let Some(result) = response.result.take() {
-        response.result = Some(adapter.filter_result(method, result));
-    }
-    response
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::Value;
-    use turbomcp_core::error::McpResult;
-    use turbomcp_types::{
-        Prompt, PromptResult, Resource, ResourceResult, ServerInfo, Tool, ToolResult,
+/// Type alias for a type-erased `Fn(S, Ctx, Params) -> BoxFuture<Result>` slot.
+macro_rules! handler_slot {
+    ($alias:ident<$s:ident>, $ctx:ty, $params:ty, $result:ty) => {
+        type $alias<$s> =
+            Box<dyn Fn($s, $ctx, $params) -> BoxFuture<'static, McpResult<$result>> + Send + Sync>;
     };
+}
 
-    #[derive(Clone)]
-    struct TestHandler;
+handler_slot!(
+    ListToolsHandler<S>,
+    ListToolsContext,
+    neutral::ListParams,
+    neutral::ListToolsResult
+);
+handler_slot!(
+    CallToolHandler<S>,
+    CallToolContext,
+    neutral::CallToolParams,
+    neutral::CallToolResult
+);
+handler_slot!(
+    ListResourcesHandler<S>,
+    ListResourcesContext,
+    neutral::ListParams,
+    neutral::ListResourcesResult
+);
+handler_slot!(
+    ReadResourceHandler<S>,
+    ReadResourceContext,
+    neutral::ReadResourceParams,
+    neutral::ReadResourceResult
+);
+handler_slot!(
+    ListResourceTemplatesHandler<S>,
+    ListResourceTemplatesContext,
+    neutral::ListParams,
+    neutral::ListResourceTemplatesResult
+);
+handler_slot!(
+    ListPromptsHandler<S>,
+    ListPromptsContext,
+    neutral::ListParams,
+    neutral::ListPromptsResult
+);
+handler_slot!(
+    GetPromptHandler<S>,
+    GetPromptContext,
+    neutral::GetPromptParams,
+    neutral::GetPromptResult
+);
+handler_slot!(
+    CompleteHandler<S>,
+    CompleteContext,
+    neutral::CompleteParams,
+    neutral::CompleteResult
+);
 
-    impl McpHandler for TestHandler {
-        fn server_info(&self) -> ServerInfo {
-            ServerInfo::new("test", "1.0.0")
+/// Per-method handler table, generic over the server type `S`.
+pub struct MethodRouter<S> {
+    list_tools: Option<ListToolsHandler<S>>,
+    call_tool: Option<CallToolHandler<S>>,
+    list_resources: Option<ListResourcesHandler<S>>,
+    read_resource: Option<ReadResourceHandler<S>>,
+    list_resource_templates: Option<ListResourceTemplatesHandler<S>>,
+    list_prompts: Option<ListPromptsHandler<S>>,
+    get_prompt: Option<GetPromptHandler<S>>,
+    complete: Option<CompleteHandler<S>>,
+    logging: bool,
+}
+
+impl<S> Default for MethodRouter<S> {
+    fn default() -> Self {
+        Self {
+            list_tools: None,
+            call_tool: None,
+            list_resources: None,
+            read_resource: None,
+            list_resource_templates: None,
+            list_prompts: None,
+            get_prompt: None,
+            complete: None,
+            logging: false,
         }
+    }
+}
 
-        fn list_tools(&self) -> Vec<Tool> {
-            vec![Tool::new("test_tool", "A test tool")]
-        }
-
-        fn list_resources(&self) -> Vec<Resource> {
-            vec![]
-        }
-
-        fn list_prompts(&self) -> Vec<Prompt> {
-            vec![]
-        }
-
-        fn call_tool(
+/// Emit a `pub(crate) fn $name(&self, server, ctx, params) -> Option<BoxFuture>`
+/// that invokes the registered handler in `self.$field`, if present.
+macro_rules! dispatch_fn {
+    ($name:ident, $field:ident, $ctx:ty, $params:ty, $result:ty) => {
+        pub(crate) fn $name(
             &self,
-            name: &str,
-            _args: Value,
-            _ctx: &RequestContext,
-        ) -> impl std::future::Future<Output = McpResult<ToolResult>> + Send {
-            let name = name.to_string();
-            async move {
-                if name == "test_tool" {
-                    Ok(ToolResult::text("Tool executed"))
-                } else {
-                    Err(McpError::tool_not_found(&name))
-                }
-            }
+            server: S,
+            ctx: $ctx,
+            params: $params,
+        ) -> Option<BoxFuture<'static, McpResult<$result>>> {
+            self.$field.as_ref().map(|h| h(server, ctx, params))
         }
+    };
+}
 
-        fn read_resource(
-            &self,
-            uri: &str,
-            _ctx: &RequestContext,
-        ) -> impl std::future::Future<Output = McpResult<ResourceResult>> + Send {
-            let uri = uri.to_string();
-            async move { Err(McpError::resource_not_found(&uri)) }
-        }
-
-        fn get_prompt(
-            &self,
-            name: &str,
-            _args: Option<Value>,
-            _ctx: &RequestContext,
-        ) -> impl std::future::Future<Output = McpResult<PromptResult>> + Send {
-            let name = name.to_string();
-            async move { Err(McpError::prompt_not_found(&name)) }
-        }
+impl<S: McpServerCore> MethodRouter<S> {
+    /// An empty router — no capabilities registered.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    #[test]
-    fn test_parse_request() {
-        let input = r#"{"jsonrpc": "2.0", "id": 1, "method": "ping"}"#;
-        let request = parse_request(input).unwrap();
-        assert_eq!(request.method, "ping");
-        assert_eq!(request.id, Some(serde_json::json!(1)));
+    /// Register the `tools/*` methods. Available only when `S: WithTools`; the
+    /// bound is erased into the stored closures so the dispatcher stays generic
+    /// over plain `McpServerCore`.
+    #[must_use]
+    pub fn with_tools(mut self) -> Self
+    where
+        S: WithTools,
+    {
+        self.list_tools = Some(Box::new(|server: S, ctx, params| {
+            Box::pin(async move { server.list_tools(&ctx, params).await })
+        }));
+        self.call_tool = Some(Box::new(|server: S, ctx, params| {
+            Box::pin(async move { server.call_tool(&ctx, params).await })
+        }));
+        self
     }
 
-    #[test]
-    fn test_serialize_response() {
-        let response = JsonRpcOutgoing::success(Some(serde_json::json!(1)), serde_json::json!({}));
-        let serialized = serialize_response(&response).unwrap();
-        assert!(serialized.contains("\"jsonrpc\":\"2.0\""));
-        assert!(serialized.contains("\"id\":1"));
+    /// Register the `resources/*` methods. Available only when `S: WithResources`.
+    #[must_use]
+    pub fn with_resources(mut self) -> Self
+    where
+        S: WithResources,
+    {
+        self.list_resources = Some(Box::new(|server: S, ctx, params| {
+            Box::pin(async move { server.list_resources(&ctx, params).await })
+        }));
+        self.read_resource = Some(Box::new(|server: S, ctx, params| {
+            Box::pin(async move { server.read_resource(&ctx, params).await })
+        }));
+        self.list_resource_templates = Some(Box::new(|server: S, ctx, params| {
+            Box::pin(async move { server.list_resource_templates(&ctx, params).await })
+        }));
+        self
     }
 
-    #[tokio::test]
-    async fn test_route_initialize() {
-        let handler = TestHandler;
-        let ctx = RequestContext::stdio();
-        let request = JsonRpcIncoming {
-            jsonrpc: "2.0".to_string(),
-            id: Some(serde_json::json!(1)),
-            method: "initialize".to_string(),
-            // MCP spec requires clientInfo with name and version
-            params: Some(serde_json::json!({
-                "protocolVersion": "2025-11-25",
-                "clientInfo": {
-                    "name": "test-client",
-                    "version": "1.0.0"
-                },
-                "capabilities": {}
-            })),
-        };
-
-        let response = route_request(&handler, request, &ctx).await;
-        assert!(response.result.is_some());
-        assert!(response.error.is_none());
-
-        let result = response.result.unwrap();
-        assert_eq!(result["serverInfo"]["name"], "test");
-        // Verify capabilities structure per MCP spec
-        assert!(result["capabilities"]["tools"].is_object());
-        assert_eq!(result["capabilities"]["tools"]["listChanged"], true);
+    /// Register the `prompts/*` methods. Available only when `S: WithPrompts`.
+    #[must_use]
+    pub fn with_prompts(mut self) -> Self
+    where
+        S: WithPrompts,
+    {
+        self.list_prompts = Some(Box::new(|server: S, ctx, params| {
+            Box::pin(async move { server.list_prompts(&ctx, params).await })
+        }));
+        self.get_prompt = Some(Box::new(|server: S, ctx, params| {
+            Box::pin(async move { server.get_prompt(&ctx, params).await })
+        }));
+        self
     }
 
-    #[tokio::test]
-    async fn test_route_initialize_missing_client_info() {
-        let handler = TestHandler;
-        let ctx = RequestContext::stdio();
-        let request = JsonRpcIncoming {
-            jsonrpc: "2.0".to_string(),
-            id: Some(serde_json::json!(1)),
-            method: "initialize".to_string(),
-            params: Some(serde_json::json!({
-                "protocolVersion": "2025-11-25"
-            })),
-        };
-
-        let response = route_request(&handler, request, &ctx).await;
-        assert!(response.error.is_some());
-        let error = response.error.unwrap();
-        assert_eq!(error.code, -32602); // INVALID_PARAMS
-        assert!(error.message.contains("clientInfo"));
+    /// Register `completion/complete`. Available only when `S: WithCompletions`.
+    #[must_use]
+    pub fn with_completions(mut self) -> Self
+    where
+        S: WithCompletions,
+    {
+        self.complete = Some(Box::new(|server: S, ctx, params| {
+            Box::pin(async move { server.complete(&ctx, params).await })
+        }));
+        self
     }
 
-    #[tokio::test]
-    async fn test_route_initialized_notification() {
-        let handler = TestHandler;
-        let ctx = RequestContext::stdio();
-        // Notification has no id
-        let request = JsonRpcIncoming {
-            jsonrpc: "2.0".to_string(),
-            id: None,
-            method: "notifications/initialized".to_string(),
-            params: None,
-        };
-
-        let response = route_request(&handler, request, &ctx).await;
-        // Notification responses should not be sent
-        assert!(!response.should_send());
+    /// Enable the `logging` capability (framework-implemented, no handler
+    /// trait): handlers gain a live `ctx.log` when the client opts in —
+    /// `logging/setLevel` per session on `2025-11-25`, the per-request
+    /// `_meta` `io.modelcontextprotocol/logLevel` on the draft (where the
+    /// feature is deprecated by SEP-2577 but remains functional).
+    #[must_use]
+    pub fn with_logging(mut self) -> Self {
+        self.logging = true;
+        self
     }
 
-    #[tokio::test]
-    async fn test_route_request_method_without_id_is_not_sent() {
-        let handler = TestHandler;
-        let ctx = RequestContext::stdio();
-        let request = JsonRpcIncoming {
-            jsonrpc: "2.0".to_string(),
-            id: None,
-            method: "tools/list".to_string(),
-            params: None,
-        };
-
-        let response = route_request(&handler, request, &ctx).await;
-        assert!(!response.should_send());
+    /// Whether `tools/*` is served (drives capability advertisement).
+    #[must_use]
+    pub fn has_tools(&self) -> bool {
+        self.list_tools.is_some()
     }
 
-    #[tokio::test]
-    async fn test_route_tools_list() {
-        let handler = TestHandler;
-        let ctx = RequestContext::stdio();
-        let request = JsonRpcIncoming {
-            jsonrpc: "2.0".to_string(),
-            id: Some(serde_json::json!(1)),
-            method: "tools/list".to_string(),
-            params: None,
-        };
-
-        let response = route_request(&handler, request, &ctx).await;
-        assert!(response.result.is_some());
-
-        let result = response.result.unwrap();
-        let tools = result["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0]["name"], "test_tool");
+    /// Whether `resources/*` is served.
+    #[must_use]
+    pub fn has_resources(&self) -> bool {
+        self.list_resources.is_some()
     }
 
-    #[tokio::test]
-    async fn test_route_tools_call() {
-        let handler = TestHandler;
-        let ctx = RequestContext::stdio();
-        let request = JsonRpcIncoming {
-            jsonrpc: "2.0".to_string(),
-            id: Some(serde_json::json!(1)),
-            method: "tools/call".to_string(),
-            params: Some(serde_json::json!({
-                "name": "test_tool",
-                "arguments": {}
-            })),
-        };
-
-        let response = route_request(&handler, request, &ctx).await;
-        assert!(response.result.is_some());
-        assert!(response.error.is_none());
+    /// Whether `prompts/*` is served.
+    #[must_use]
+    pub fn has_prompts(&self) -> bool {
+        self.list_prompts.is_some()
     }
 
-    #[tokio::test]
-    async fn test_route_unknown_method() {
-        let handler = TestHandler;
-        let ctx = RequestContext::stdio();
-        let request = JsonRpcIncoming {
-            jsonrpc: "2.0".to_string(),
-            id: Some(serde_json::json!(1)),
-            method: "unknown/method".to_string(),
-            params: None,
-        };
-
-        let response = route_request(&handler, request, &ctx).await;
-        assert!(response.result.is_none());
-        assert!(response.error.is_some());
-
-        let error = response.error.unwrap();
-        assert_eq!(error.code, -32601); // METHOD_NOT_FOUND
+    /// Whether `completion/complete` is served.
+    #[must_use]
+    pub fn has_completions(&self) -> bool {
+        self.complete.is_some()
     }
+
+    /// Whether the `logging` capability is enabled.
+    #[must_use]
+    pub fn has_logging(&self) -> bool {
+        self.logging
+    }
+
+    dispatch_fn!(
+        dispatch_list_tools,
+        list_tools,
+        ListToolsContext,
+        neutral::ListParams,
+        neutral::ListToolsResult
+    );
+    dispatch_fn!(
+        dispatch_call_tool,
+        call_tool,
+        CallToolContext,
+        neutral::CallToolParams,
+        neutral::CallToolResult
+    );
+    dispatch_fn!(
+        dispatch_list_resources,
+        list_resources,
+        ListResourcesContext,
+        neutral::ListParams,
+        neutral::ListResourcesResult
+    );
+    dispatch_fn!(
+        dispatch_read_resource,
+        read_resource,
+        ReadResourceContext,
+        neutral::ReadResourceParams,
+        neutral::ReadResourceResult
+    );
+    dispatch_fn!(
+        dispatch_list_resource_templates,
+        list_resource_templates,
+        ListResourceTemplatesContext,
+        neutral::ListParams,
+        neutral::ListResourceTemplatesResult
+    );
+    dispatch_fn!(
+        dispatch_list_prompts,
+        list_prompts,
+        ListPromptsContext,
+        neutral::ListParams,
+        neutral::ListPromptsResult
+    );
+    dispatch_fn!(
+        dispatch_get_prompt,
+        get_prompt,
+        GetPromptContext,
+        neutral::GetPromptParams,
+        neutral::GetPromptResult
+    );
+    dispatch_fn!(
+        dispatch_complete,
+        complete,
+        CompleteContext,
+        neutral::CompleteParams,
+        neutral::CompleteResult
+    );
 }

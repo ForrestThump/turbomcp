@@ -1,204 +1,100 @@
 [package]
 name = "turbomcp"
-version = "3.1.5"
+version = "4.0.0-alpha.1"
 edition = "2024"
+rust-version = "1.85"
 authors = ["Nicholas Paterno <nick@epistates.com>"]
-description = "Rust SDK for Model Context Protocol (MCP) with zero-boilerplate macros and WASM support"
+description = "TurboMCP v4 SDK facade: re-exports + prelude."
+readme = "README.md"
 license = "MIT"
 repository = "https://github.com/Epistates/turbomcp"
 homepage = "https://turbomcp.org"
-documentation = "https://docs.rs/turbomcp"
-readme = "README.md"
-keywords = ["mcp", "protocol", "sdk", "llm", "ai"]
-categories = ["development-tools", "network-programming", "asynchronous", "web-programming"]
-rust-version = "1.89.0"
 
-[lints]
-workspace = true
+[features]
+# stdio is the default transport and is always linked; http is opt-in.
+default = []
+# Also lights up the client's Streamable HTTP transport when `client` is on.
+http = ["dep:turbomcp-transport-http", "turbomcp-client?/http"]
+# OAuth 2.1 resource-server auth (bearer validation, RFC 9728). Most useful
+# with `http`; the metadata endpoint + challenges are HTTP-level.
+auth = ["dep:turbomcp-auth"]
+# OpenTelemetry observability: the TraceContextLayer + W3C propagation +
+# redaction. Add `otlp` (on the telemetry crate) for the export pipeline.
+telemetry = ["dep:turbomcp-telemetry"]
+# The MCP client (ClientBuilder, ConnectMode probe, typed neutral API). The
+# other half of the protocol; opt-in for server-only users.
+client = ["dep:turbomcp-client"]
+# The draft Tasks extension (io.modelcontextprotocol/tasks, SEP-2663):
+# resultType:"task" augmentation, tasks/get|update|cancel, notifications/tasks.
+ext-tasks = ["dep:turbomcp-ext-tasks"]
 
 [dependencies]
-# Async runtime
-tokio = { workspace = true }
-
-# Serialization
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-
-# Logging
-tracing = "0.1"
-
-# HTTP framework (optional)
-axum = { workspace = true, optional = true }
-tower = { workspace = true }
-
-# Schema generation (always required by macros)
-schemars = { version = "1.2", features = ["chrono04", "uuid1"] }
-uuid = { version = "1.23", features = ["v4", "v7", "serde"] }
-
-# Internal dependencies
 turbomcp-core = { workspace = true }
-turbomcp-types = { workspace = true }
-turbomcp-protocol = { version = "3.1.5", path = "../turbomcp-protocol", default-features = false }
-turbomcp-transport = { version = "3.1.5", path = "../turbomcp-transport", default-features = false }
-turbomcp-server = { version = "3.1.5", path = "../turbomcp-server", default-features = false }
-turbomcp-macros = { version = "3.1.5", path = "../turbomcp-macros", default-features = false }
-turbomcp-telemetry = { version = "3.1.5", path = "../turbomcp-telemetry", optional = true, default-features = false }
-
-# Optional dependencies
-turbomcp-client = { version = "3.1.5", path = "../turbomcp-client", optional = true, default-features = false }
+turbomcp-protocol = { workspace = true }
+turbomcp-codec = { workspace = true }
+turbomcp-service = { workspace = true }
+turbomcp-server = { workspace = true }
+turbomcp-transport-stdio = { workspace = true }
+turbomcp-transport-http = { workspace = true, optional = true }
 turbomcp-auth = { workspace = true, optional = true }
-turbomcp-dpop = { workspace = true, optional = true }
+turbomcp-telemetry = { workspace = true, optional = true }
+turbomcp-client = { workspace = true, optional = true }
+turbomcp-ext-tasks = { workspace = true, optional = true }
+turbomcp-macros = { workspace = true }
+
+# Re-exported for `#[server]`-generated code (schema derivation + (de)serialization).
+schemars = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
-tokio-test = "0.4"
-criterion = { version = "0.8", features = ["html_reports"] }
-tempfile = "3.27"
-proptest = "1.11"
-serial_test = "3.4"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-chrono = "0.4"
+tokio = { workspace = true, features = [
+    "macros",
+    "rt",
+    "rt-multi-thread",
+    "io-util",
+    "time",
+] }
+insta = { workspace = true }
+criterion = { workspace = true, features = ["async_tokio"] }
+tower = { workspace = true, features = ["util"] }
+axum = { workspace = true }
+http-body-util = "0.1"
+reqwest = { workspace = true }
+turbomcp-transport-stdio = { workspace = true }
 
-# ============================================================================
-# Examples
-# ============================================================================
+[lib]
+doctest = false
 
 [[example]]
 name = "hello_world"
-required-features = ["stdio"]
-
-[[example]]
-name = "macro_server"
-required-features = ["stdio"]
 
 [[example]]
 name = "calculator"
-required-features = ["stdio"]
 
 [[example]]
 name = "stateful"
-required-features = ["stdio"]
 
 [[example]]
 name = "validation"
-required-features = ["stdio"]
 
 [[example]]
-name = "tcp_client"
-required-features = ["tcp", "full-client"]
+name = "resources_prompts"
 
 [[example]]
-name = "tcp_server"
-required-features = ["tcp"]
+name = "structured_output"
 
 [[example]]
-name = "unix_client"
-required-features = ["unix", "full-client"]
+name = "dual_transport"
+required-features = ["http"]
 
 [[example]]
-name = "unix_server"
-required-features = ["unix"]
+name = "elicitation"
 
 [[example]]
-name = "transports_demo"
-required-features = ["stdio"]
+name = "tasks"
+required-features = ["ext-tasks"]
 
-[[example]]
-name = "type_state_builders_demo"
-
-[[example]]
-name = "tags_versioning"
-required-features = ["stdio"]
-
-[[example]]
-name = "visibility"
-
-[[example]]
-name = "composition"
-
-[[example]]
-name = "middleware"
-
-[[example]]
-name = "test_client"
-
-# ============================================================================
-# Features
-# ============================================================================
-
-[features]
-# Default: STDIO transport with server capabilities
-default = ["stdio"]
-
-# === Feature Bundles ===
-# Minimal configuration with STDIO only (recommended for CLI tools and Claude Desktop integration)
-minimal = ["stdio"]
-
-# Full server with all transports (Streamable HTTP, WebSocket, TCP, Unix sockets)
-full = ["stdio", "http", "websocket", "tcp", "unix", "telemetry"]
-
-# Complete stack including client library with all transports
-full-stack = ["full", "full-client"]
-
-# === Telemetry & Observability ===
-# OpenTelemetry, metrics, and structured logging
-telemetry = ["dep:turbomcp-telemetry", "turbomcp-telemetry/full"]
-
-# === Transport Features ===
-# Standard I/O transport for CLI tools and subprocess communication (works with Claude Desktop)
-stdio = ["turbomcp-transport/stdio", "turbomcp-server/stdio"]
-
-# Streamable HTTP server transport with Axum router integration
-http = [
-    "turbomcp-transport/http",
-    "turbomcp-server/http",
-    "turbomcp-macros/http",
-    "dep:axum",
-]
-
-# WebSocket bidirectional transport with full-duplex communication
-websocket = ["turbomcp-transport/websocket", "turbomcp-server/websocket"]
-
-# Raw TCP socket transport for low-latency network communication
-tcp = ["turbomcp-transport/tcp", "turbomcp-server/tcp", "turbomcp-macros/tcp"]
-
-# Unix domain socket transport for high-performance IPC (Unix/Linux only)
-unix = ["turbomcp-transport/unix", "turbomcp-server/unix", "turbomcp-macros/unix"]
-
-# === Security & Authentication Features ===
-# OAuth 2.1 authentication with PKCE and multi-provider support
-auth = ["dep:turbomcp-auth"]
-
-# RFC 9449 DPoP (Demonstrating Proof-of-Possession) for token binding (requires auth)
-dpop = ["dep:turbomcp-dpop", "auth", "turbomcp-auth/dpop"]
-
-# === Client Integration Features ===
-# Minimal client integration with STDIO transport only
-client-integration = ["dep:turbomcp-client", "turbomcp-client/stdio"]
-
-# Full client library with all transport support (includes client-integration)
-full-client = [
-    "client-integration",
-    "turbomcp-client/http",
-    "turbomcp-client/websocket",
-    "turbomcp-client/tcp",
-    "turbomcp-client/unix",
-]
-
-# === Convenience Aliases ===
-# Enable all transport protocols (same as full without auth)
-all-transports = ["stdio", "http", "websocket", "tcp", "unix", "channel"]
-
-# In-process channel transport (zero-overhead for testing and benchmarks)
-channel = ["turbomcp-server/channel"]
-
-# === Experimental Features ===
-experimental-tasks = [
-    "turbomcp-protocol/experimental-tasks",
-    "turbomcp-types/experimental-tasks",
-    "turbomcp-client/experimental-tasks",
-    "turbomcp-server/experimental-tasks"
-]
-
-[package.metadata.docs.rs]
-features = ["full"]
-rustdoc-args = ["--cfg", "docsrs"]
+[[bench]]
+name = "dispatch"
+harness = false

@@ -2,55 +2,27 @@
 
 [workspace]
 members = [
-    "crates/turbomcp-types",             # v3.0: Unified types (THE source of truth)
-    "crates/turbomcp-core",              # v3.0: no_std core types (foundation layer)
-    "crates/turbomcp-transport-traits",  # v3.0: lean transport traits (foundation layer)
-    "crates/turbomcp-stdio",             # v3.0: STDIO transport (extracted)
-    "crates/turbomcp-http",              # v3.0: HTTP/SSE client transport (extracted)
-    "crates/turbomcp-websocket",         # v3.0: WebSocket bidirectional transport (extracted)
-    "crates/turbomcp-tcp",               # v3.0: TCP transport (extracted)
-    "crates/turbomcp-unix",              # v3.0: Unix domain socket transport (extracted)
+    "crates/turbomcp-core",
     "crates/turbomcp-protocol",
-    "crates/turbomcp-transport",
+    "crates/turbomcp-codec",
+    "crates/turbomcp-service",
     "crates/turbomcp-server",
     "crates/turbomcp-client",
-    "crates/turbomcp-cli",
-    "crates/turbomcp",
+    "crates/turbomcp-transport-stdio",
+    "crates/turbomcp-transport-http",
+    "crates/turbomcp-transport-ws",
     "crates/turbomcp-macros",
-    "crates/turbomcp-dpop",  # 2.0.0: Re-extracted for clean minimal build
-    "crates/turbomcp-auth",  # 2.0.0: Extracted for clean minimal build
-    "crates/turbomcp-proxy", # Phase 2: Universal MCP adapter/generator
-    "crates/turbomcp-telemetry", # v3.0: OpenTelemetry integration
-    "crates/turbomcp-grpc",      # v3.0: gRPC transport with tonic
-    "crates/turbomcp-wasm",      # v3.0: WebAssembly bindings for browsers and WASI
-    "crates/turbomcp-wasm-macros", # v3.0: WASM server proc macros
-    "crates/turbomcp-wire",      # v3.0: Wire format codec abstraction
-    "crates/turbomcp-openapi",   # v3.0: OpenAPI to MCP conversion
-    "crates/turbomcp-transport-streamable", # v3.0: Streamable HTTP transport types
-    "demo",
-
-    # --- v4 (branch v4-rewrite): parallel crates, renamed to turbomcp at GA ---
-    "crates/turbomcp4-core",
-    "crates/turbomcp4-protocol",
-    "crates/turbomcp4-codec",
-    "crates/turbomcp4-service",
-    "crates/turbomcp4-server",
-    "crates/turbomcp4-client",
-    "crates/turbomcp4-transport-stdio",
-    "crates/turbomcp4-transport-http",
-    "crates/turbomcp4-transport-ws",
-    "crates/turbomcp4-macros",
-    "crates/turbomcp4-codegen",
-    "crates/turbomcp4-auth",
-    "crates/turbomcp4-telemetry",
-    "crates/turbomcp4-ext-tasks",
-    "crates/turbomcp4-ext-apps",
-    "crates/turbomcp4",
+    "crates/turbomcp-codegen",
+    "crates/turbomcp-auth",
+    "crates/turbomcp-telemetry",
+    "crates/turbomcp-ext-tasks",
+    "crates/turbomcp-ext-apps",
+    "crates/turbomcp",
 ]
 # Cross-SDK interop suite. Excluded from the workspace so rmcp's large dependency
 # tree never touches the main lockfile/gate; it carries its own lockfile and is
-# run on its own (`cd crates/turbomcp4-interop && cargo test`).
-exclude = ["crates/turbomcp4-interop"]
+# run on its own (`cd crates/turbomcp-interop && cargo test`).
+exclude = ["crates/turbomcp-interop"]
 resolver = "2"
 
 [workspace.lints.rust]
@@ -227,63 +199,24 @@ testcontainers = "0.27"
 # Documentation
 doc-comment = "0.3"
 
-# Workspace dependencies are defined below
-# Internal workspace crate dependencies
-#
-# NOTE on `default-features = false`:
-# - turbomcp-core: Has `default = ["std"]` - needed for no_std/WASM builds
-# - turbomcp-wire: Has `default = ["std", "json"]` - needed for no_std builds
-# - turbomcp-transport: Has `default = ["stdio"]` - needed because turbomcp-client
-#   uses `default-features = false` to control transport selection via its own features
-#
-# All other crates either have empty defaults (removed vestigial `default-features = false`)
-# or useful defaults that should be enabled by default.
-turbomcp = { version = "3.1.5", path = "crates/turbomcp" }
-# v3: turbomcp-types is THE source of truth for all MCP types
-turbomcp-types = { version = "3.1.5", path = "crates/turbomcp-types" }
-# v3: turbomcp-core is the no_std foundation layer
-turbomcp-core = { version = "3.1.5", path = "crates/turbomcp-core", default-features = false }
-# v3: turbomcp-transport-traits is the lean transport traits crate
-turbomcp-transport-traits = { version = "3.1.5", path = "crates/turbomcp-transport-traits" }
-# v3: Individual transport crates extracted from monolithic turbomcp-transport
-turbomcp-stdio = { version = "3.1.5", path = "crates/turbomcp-stdio" }
-turbomcp-http = { version = "3.1.5", path = "crates/turbomcp-http" }
-turbomcp-websocket = { version = "3.1.5", path = "crates/turbomcp-websocket" }
-turbomcp-tcp = { version = "3.1.5", path = "crates/turbomcp-tcp" }
-turbomcp-unix = { version = "3.1.5", path = "crates/turbomcp-unix" }
-turbomcp-protocol = { version = "3.1.5", path = "crates/turbomcp-protocol" }
-turbomcp-transport = { version = "3.1.5", path = "crates/turbomcp-transport", default-features = false }
-turbomcp-client = { version = "3.1.5", path = "crates/turbomcp-client" }
-turbomcp-server = { version = "3.1.5", path = "crates/turbomcp-server" }
-turbomcp-macros = { version = "3.1.5", path = "crates/turbomcp-macros" }
-turbomcp-cli = { version = "3.1.5", path = "crates/turbomcp-cli" }
-turbomcp-telemetry = { version = "3.1.5", path = "crates/turbomcp-telemetry" }
-turbomcp-auth = { version = "3.1.5", path = "crates/turbomcp-auth" }
-turbomcp-dpop = { version = "3.1.5", path = "crates/turbomcp-dpop" }
-turbomcp-proxy = { version = "3.1.5", path = "crates/turbomcp-proxy" }
-turbomcp-grpc = { version = "3.1.5", path = "crates/turbomcp-grpc" }
-turbomcp-openapi = { version = "3.1.5", path = "crates/turbomcp-openapi" }
-turbomcp-wire = { version = "3.1.5", path = "crates/turbomcp-wire", default-features = false }
-turbomcp-wasm = { version = "3.1.5", path = "crates/turbomcp-wasm" }
-turbomcp-wasm-macros = { version = "3.1.5", path = "crates/turbomcp-wasm-macros" }
-turbomcp-transport-streamable = { version = "3.1.5", path = "crates/turbomcp-transport-streamable", default-features = false }
-
-# --- v4 internal crates (branch v4-rewrite) ---
-turbomcp4 = { version = "4.0.0-alpha.1", path = "crates/turbomcp4" }
-turbomcp4-core = { version = "4.0.0-alpha.1", path = "crates/turbomcp4-core", default-features = false }
-turbomcp4-protocol = { version = "4.0.0-alpha.1", path = "crates/turbomcp4-protocol", default-features = false }
-turbomcp4-codec = { version = "4.0.0-alpha.1", path = "crates/turbomcp4-codec" }
-turbomcp4-service = { version = "4.0.0-alpha.1", path = "crates/turbomcp4-service" }
-turbomcp4-server = { version = "4.0.0-alpha.1", path = "crates/turbomcp4-server" }
-turbomcp4-client = { version = "4.0.0-alpha.1", path = "crates/turbomcp4-client" }
-turbomcp4-transport-stdio = { version = "4.0.0-alpha.1", path = "crates/turbomcp4-transport-stdio" }
-turbomcp4-transport-http = { version = "4.0.0-alpha.1", path = "crates/turbomcp4-transport-http" }
-turbomcp4-transport-ws = { version = "4.0.0-alpha.1", path = "crates/turbomcp4-transport-ws" }
-turbomcp4-macros = { version = "4.0.0-alpha.1", path = "crates/turbomcp4-macros" }
-turbomcp4-auth = { version = "4.0.0-alpha.1", path = "crates/turbomcp4-auth" }
-turbomcp4-telemetry = { version = "4.0.0-alpha.1", path = "crates/turbomcp4-telemetry" }
-turbomcp4-ext-tasks = { version = "4.0.0-alpha.1", path = "crates/turbomcp4-ext-tasks" }
-turbomcp4-ext-apps = { version = "4.0.0-alpha.1", path = "crates/turbomcp4-ext-apps" }
+# Internal workspace crate dependencies.
+# `default-features = false` on turbomcp-core / turbomcp-protocol keeps the
+# no_std/WASM foundation portable (their `default = ["std"]` is opt-in per crate).
+turbomcp = { version = "4.0.0-alpha.1", path = "crates/turbomcp" }
+turbomcp-core = { version = "4.0.0-alpha.1", path = "crates/turbomcp-core", default-features = false }
+turbomcp-protocol = { version = "4.0.0-alpha.1", path = "crates/turbomcp-protocol", default-features = false }
+turbomcp-codec = { version = "4.0.0-alpha.1", path = "crates/turbomcp-codec" }
+turbomcp-service = { version = "4.0.0-alpha.1", path = "crates/turbomcp-service" }
+turbomcp-server = { version = "4.0.0-alpha.1", path = "crates/turbomcp-server" }
+turbomcp-client = { version = "4.0.0-alpha.1", path = "crates/turbomcp-client" }
+turbomcp-transport-stdio = { version = "4.0.0-alpha.1", path = "crates/turbomcp-transport-stdio" }
+turbomcp-transport-http = { version = "4.0.0-alpha.1", path = "crates/turbomcp-transport-http" }
+turbomcp-transport-ws = { version = "4.0.0-alpha.1", path = "crates/turbomcp-transport-ws" }
+turbomcp-macros = { version = "4.0.0-alpha.1", path = "crates/turbomcp-macros" }
+turbomcp-auth = { version = "4.0.0-alpha.1", path = "crates/turbomcp-auth" }
+turbomcp-telemetry = { version = "4.0.0-alpha.1", path = "crates/turbomcp-telemetry" }
+turbomcp-ext-tasks = { version = "4.0.0-alpha.1", path = "crates/turbomcp-ext-tasks" }
+turbomcp-ext-apps = { version = "4.0.0-alpha.1", path = "crates/turbomcp-ext-apps" }
 
 [profile.dev]
 opt-level = 1

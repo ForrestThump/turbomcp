@@ -1,29 +1,28 @@
-//! # Stateful Server - Shared State Management
+//! # Stateful server (v4)
 //!
-//! Demonstrates managing shared state across requests with Arc<RwLock<T>>.
+//! Shared mutable state across requests. The server struct holds an
+//! `Arc<RwLock<…>>`; because `#[server]` only requires the type to be `Clone`,
+//! every cloned handler shares the same state through the `Arc`. Named counters
+//! are incremented, read, and reset concurrently.
 //!
-//! Run with: `cargo run --example stateful`
+//! Run with: `cargo run -p turbomcp --example stateful`
 
 use std::collections::HashMap;
 use std::sync::Arc;
+
 use tokio::sync::RwLock;
 use turbomcp::prelude::*;
 
 #[derive(Clone)]
 struct CounterServer {
-    /// Shared state: counters keyed by name
+    /// Counters keyed by name, shared across every request.
     counters: Arc<RwLock<HashMap<String, i64>>>,
 }
 
-#[turbomcp::server(name = "counter", version = "1.0.0")]
+#[server(name = "counter", version = "1.0.0")]
 impl CounterServer {
-    fn new() -> Self {
-        Self {
-            counters: Arc::new(RwLock::new(HashMap::new())),
-        }
-    }
-
-    #[tool("Increment a counter by name")]
+    /// Increment a counter by name, returning its new value.
+    #[tool(description = "Increment a counter by name")]
     async fn increment(&self, name: String) -> McpResult<i64> {
         let mut counters = self.counters.write().await;
         let counter = counters.entry(name).or_insert(0);
@@ -31,40 +30,39 @@ impl CounterServer {
         Ok(*counter)
     }
 
-    #[tool("Get current counter value")]
+    /// Get a counter's current value (0 if it has never been incremented).
+    #[tool(description = "Get a counter's current value")]
     async fn get(&self, name: String) -> McpResult<i64> {
         let counters = self.counters.read().await;
-        Ok(*counters.get(&name).unwrap_or(&0))
+        Ok(counters.get(&name).copied().unwrap_or(0))
     }
 
-    #[tool("Reset a counter")]
+    /// Reset a counter, removing it from the map.
+    #[tool(description = "Reset a counter")]
     async fn reset(&self, name: String) -> McpResult<String> {
         let mut counters = self.counters.write().await;
         counters.remove(&name);
-        Ok(format!("Counter '{}' reset", name))
+        Ok(format!("counter '{name}' reset"))
     }
 
-    #[tool("List all counters")]
+    /// List every counter and its value.
+    #[tool(description = "List all counters")]
     async fn list(&self) -> McpResult<String> {
         let counters = self.counters.read().await;
-        let list: Vec<String> = counters
-            .iter()
-            .map(|(k, v)| format!("{}: {}", k, v))
-            .collect();
-        Ok(list.join(", "))
+        if counters.is_empty() {
+            return Ok("(no counters yet)".to_string());
+        }
+        let mut lines: Vec<String> = counters.iter().map(|(k, v)| format!("{k}: {v}")).collect();
+        lines.sort();
+        Ok(lines.join(", "))
     }
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize tracing to stderr (MUST NOT write to stdout as it pollutes the MCP protocol)
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
-
-    tracing::info!("Starting Stateful Counter Server...");
-
-    CounterServer::new().run_stdio().await?;
-    Ok(())
+async fn main() -> Result<(), turbomcp::ProtocolError> {
+    // Logs MUST go to stderr — stdout carries the MCP protocol framing.
+    let server = CounterServer {
+        counters: Arc::new(RwLock::new(HashMap::new())),
+    };
+    server.run_stdio().await
 }

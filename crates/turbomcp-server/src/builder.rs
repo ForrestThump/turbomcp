@@ -1,732 +1,169 @@
-//! Server Builder - SOTA fluent API for MCP server configuration.
+//! [`ServerBuilder`]: assemble a server value and the capabilities it implements
+//! into a [`VersionDispatcher`] ready to hand to a transport.
 //!
-//! This module provides a builder pattern for configuring and running MCP servers
-//! with full control over transport selection and server integration.
+//! The builder is deliberately transport- and codec-agnostic: it produces the
+//! `tower::Service<JsonRpcMessage>` and nothing more. Codec selection, RPC
+//! middleware stacks (`with_rpc_middleware`), and extensions (`with_extension`)
+//! attach at the transport/facade layer and land in Phases 4/8 — adding them
+//! here now would be infrastructure with no consumer.
 //!
-//! # Design Principles
-//!
-//! 1. **Zero Configuration Required** - Sensible defaults for quick starts
-//! 2. **Transport Agnostic** - Choose transport at runtime, not compile time
-//! 3. **BYO Server Support** - Integrate with existing Axum/Tower infrastructure
-//! 4. **Platform Transparent** - Works on native and WASM without `#[cfg]` in user code
-//!
-//! # Examples
-//!
-//! ## Simplest Usage (STDIO default)
-//!
-//! ```rust,ignore
-//! use turbomcp::prelude::*;
-//!
-//! #[tokio::main]
-//! async fn main() {
-//!     MyServer.serve().await.unwrap();
-//! }
-//! ```
-//!
-//! ## Choose Transport at Runtime
-//!
-//! ```rust,ignore
-//! use turbomcp::prelude::*;
-//!
-//! #[tokio::main]
-//! async fn main() {
-//!     let transport = std::env::var("TRANSPORT").unwrap_or("stdio".into());
-//!
-//!     MyServer.builder()
-//!         .transport(match transport.as_str() {
-//!             "http" => Transport::http("0.0.0.0:8080"),
-//!             "tcp" => Transport::tcp("0.0.0.0:9000"),
-//!             _ => Transport::stdio(),
-//!         })
-//!         .serve()
-//!         .await
-//!         .unwrap();
-//! }
-//! ```
-//!
-//! ## Full Configuration
-//!
-//! ```rust,ignore
-//! use turbomcp::prelude::*;
-//!
-//! #[tokio::main]
-//! async fn main() {
-//!     MyServer.builder()
-//!         .transport(Transport::http("0.0.0.0:8080"))
-//!         .with_rate_limit(100, Duration::from_secs(1))
-//!         .with_connection_limit(1000)
-//!         .with_graceful_shutdown(Duration::from_secs(30))
-//!         .serve()
-//!         .await
-//!         .unwrap();
-//! }
-//! ```
-//!
-//! ## Bring Your Own Server (Axum Integration)
-//!
-//! ```rust,ignore
-//! use axum::Router;
-//! use turbomcp::prelude::*;
-//!
-//! #[tokio::main]
-//! async fn main() {
-//!     // Get MCP routes as an Axum router
-//!     let mcp_router = MyServer.builder().into_axum_router();
-//!
-//!     // Merge with your existing routes
-//!     let app = Router::new()
-//!         .route("/health", get(health_check))
-//!         .merge(mcp_router);
-//!
-//!     // Use your own server
-//!     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
-//!     axum::serve(listener, app).await?;
-//! }
-//! ```
+//! Two entry points:
+//! - [`ServerBuilder::new`] starts with an empty router; chain `with_tools()`
+//!   etc. to register the capabilities the server implements.
+//! - [`IntoServerBuilder::into_server`] (blanket-implemented for every
+//!   [`McpServerCore`]) gives the same empty-router builder as a method, so
+//!   `my_server.into_server()` works. The `#[server]` macro emits an *inherent*
+//!   `into_server` on the user's type that pre-registers exactly the capabilities
+//!   it found (inherent methods shadow the trait method, so there's no clash).
 
-use std::time::Duration;
+use std::sync::Arc;
 
-use turbomcp_core::error::McpResult;
-use turbomcp_core::handler::McpHandler;
+use crate::dispatcher::VersionDispatcher;
+use crate::extension::Extension;
+use crate::router::MethodRouter;
+use crate::traits::{McpServerCore, WithCompletions, WithPrompts, WithResources, WithTools};
 
-use super::config::{
-    ConnectionLimits, OriginValidationConfig, ProtocolConfig, RateLimitConfig, ServerConfig,
-    ServerConfigBuilder,
-};
-
-/// Transport configuration for the server.
-///
-/// Use the associated functions to create transport configurations:
-/// - `Transport::stdio()` - Standard I/O (default, works with Claude Desktop)
-/// - `Transport::http(addr)` - HTTP JSON-RPC
-/// - `Transport::websocket(addr)` - WebSocket bidirectional
-/// - `Transport::tcp(addr)` - Raw TCP sockets
-/// - `Transport::unix(path)` - Unix domain sockets
-#[derive(Debug, Clone, Default)]
-pub enum Transport {
-    /// Standard I/O transport (line-based JSON-RPC).
-    /// This is the default and works with Claude Desktop.
-    #[default]
-    Stdio,
-
-    /// HTTP transport (JSON-RPC over HTTP POST).
-    #[cfg(feature = "http")]
-    Http {
-        /// Bind address (e.g., "0.0.0.0:8080")
-        addr: String,
-    },
-
-    /// WebSocket transport (bidirectional JSON-RPC).
-    #[cfg(feature = "websocket")]
-    WebSocket {
-        /// Bind address (e.g., "0.0.0.0:8080")
-        addr: String,
-    },
-
-    /// TCP transport (line-based JSON-RPC over TCP).
-    #[cfg(feature = "tcp")]
-    Tcp {
-        /// Bind address (e.g., "0.0.0.0:9000")
-        addr: String,
-    },
-
-    /// Unix domain socket transport (line-based JSON-RPC).
-    #[cfg(all(feature = "unix", unix))]
-    Unix {
-        /// Socket path (e.g., "/tmp/mcp.sock")
-        path: String,
-    },
+/// Assembles a server and its [`MethodRouter`] into a [`VersionDispatcher`].
+pub struct ServerBuilder<S> {
+    server: S,
+    router: MethodRouter<S>,
+    tasks: bool,
+    session_idle_timeout: Option<std::time::Duration>,
+    extensions: Vec<Arc<dyn Extension>>,
 }
 
-impl Transport {
-    /// Create STDIO transport configuration.
-    ///
-    /// This is the default transport that works with Claude Desktop
-    /// and other MCP clients that communicate via stdin/stdout.
+impl<S: McpServerCore> ServerBuilder<S> {
+    /// Start from `server` with no capabilities registered.
     #[must_use]
-    pub fn stdio() -> Self {
-        Self::Stdio
-    }
-
-    /// Create HTTP transport configuration.
-    ///
-    /// # Arguments
-    ///
-    /// * `addr` - Bind address (e.g., "0.0.0.0:8080" or "127.0.0.1:3000")
-    #[cfg(feature = "http")]
-    #[must_use]
-    pub fn http(addr: impl Into<String>) -> Self {
-        Self::Http { addr: addr.into() }
-    }
-
-    /// Create WebSocket transport configuration.
-    ///
-    /// # Arguments
-    ///
-    /// * `addr` - Bind address (e.g., "0.0.0.0:8080")
-    #[cfg(feature = "websocket")]
-    #[must_use]
-    pub fn websocket(addr: impl Into<String>) -> Self {
-        Self::WebSocket { addr: addr.into() }
-    }
-
-    /// Create TCP transport configuration.
-    ///
-    /// # Arguments
-    ///
-    /// * `addr` - Bind address (e.g., "0.0.0.0:9000")
-    #[cfg(feature = "tcp")]
-    #[must_use]
-    pub fn tcp(addr: impl Into<String>) -> Self {
-        Self::Tcp { addr: addr.into() }
-    }
-
-    /// Create Unix domain socket transport configuration.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - Socket path (e.g., "/tmp/mcp.sock")
-    #[cfg(all(feature = "unix", unix))]
-    #[must_use]
-    pub fn unix(path: impl Into<String>) -> Self {
-        Self::Unix { path: path.into() }
-    }
-}
-
-/// Server builder for configuring and running MCP servers.
-///
-/// This builder provides a fluent API for:
-/// - Selecting transport at runtime
-/// - Configuring rate limits and connection limits
-/// - Setting up graceful shutdown
-/// - Integrating with existing server infrastructure
-///
-/// # Example
-///
-/// ```rust,ignore
-/// use turbomcp::prelude::*;
-///
-/// MyServer.builder()
-///     .transport(Transport::http("0.0.0.0:8080"))
-///     .with_rate_limit(100, Duration::from_secs(1))
-///     .serve()
-///     .await?;
-/// ```
-#[derive(Debug)]
-pub struct ServerBuilder<H: McpHandler> {
-    handler: H,
-    transport: Transport,
-    config: ServerConfigBuilder,
-    graceful_shutdown: Option<Duration>,
-}
-
-impl<H: McpHandler> ServerBuilder<H> {
-    /// Create a new server builder wrapping the given handler.
-    pub fn new(handler: H) -> Self {
+    pub fn new(server: S) -> Self {
         Self {
-            handler,
-            transport: Transport::default(),
-            config: ServerConfig::builder(),
-            graceful_shutdown: None,
+            server,
+            router: MethodRouter::new(),
+            tasks: false,
+            session_idle_timeout: None,
+            extensions: Vec::new(),
         }
     }
 
-    /// Set the transport for this server.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// builder.transport(Transport::http("0.0.0.0:8080"))
-    /// ```
+    /// Start from a server and a pre-built router (what the `#[server]` macro
+    /// emits once it has registered every discovered capability).
     #[must_use]
-    pub fn transport(mut self, transport: Transport) -> Self {
-        self.transport = transport;
-        self
-    }
-
-    /// Configure rate limiting.
-    ///
-    /// # Arguments
-    ///
-    /// * `requests` - Maximum requests allowed
-    /// * `per` - Time window for the limit
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// // Allow 100 requests per second
-    /// builder.with_rate_limit(100, Duration::from_secs(1))
-    /// ```
-    #[must_use]
-    pub fn with_rate_limit(mut self, max_requests: u32, window: Duration) -> Self {
-        self.config = self.config.rate_limit(RateLimitConfig {
-            max_requests,
-            window,
-            per_client: true,
-        });
-        self
-    }
-
-    /// Allow a specific HTTP origin.
-    #[must_use]
-    pub fn with_allowed_origin(mut self, origin: impl Into<String>) -> Self {
-        self.config = self.config.allow_origin(origin);
-        self
-    }
-
-    /// Configure HTTP origin validation explicitly.
-    #[must_use]
-    pub fn with_origin_validation(mut self, config: OriginValidationConfig) -> Self {
-        self.config = self.config.origin_validation(config);
-        self
-    }
-
-    /// Control whether localhost origins are accepted for HTTP transports.
-    #[must_use]
-    pub fn allow_localhost_origins(mut self, allow: bool) -> Self {
-        self.config = self.config.allow_localhost_origins(allow);
-        self
-    }
-
-    /// Disable HTTP origin validation entirely.
-    #[must_use]
-    pub fn allow_any_origin(mut self, allow: bool) -> Self {
-        self.config = self.config.allow_any_origin(allow);
-        self
-    }
-
-    /// Configure maximum concurrent connections.
-    ///
-    /// This limit applies to TCP, HTTP, WebSocket, and Unix transports.
-    /// STDIO transport always has exactly one connection.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// builder.with_connection_limit(1000)
-    /// ```
-    #[must_use]
-    pub fn with_connection_limit(mut self, max: usize) -> Self {
-        self.config = self.config.connection_limits(ConnectionLimits {
-            max_tcp_connections: max,
-            max_websocket_connections: max,
-            max_http_concurrent: max,
-            max_unix_connections: max,
-        });
-        self
-    }
-
-    /// Configure graceful shutdown timeout.
-    ///
-    /// When the server receives a shutdown signal, it will wait up to
-    /// this duration for in-flight requests to complete.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// builder.with_graceful_shutdown(Duration::from_secs(30))
-    /// ```
-    #[must_use]
-    pub fn with_graceful_shutdown(mut self, timeout: Duration) -> Self {
-        self.graceful_shutdown = Some(timeout);
-        self
-    }
-
-    /// Configure protocol version negotiation.
-    ///
-    /// Use `ProtocolConfig::multi_version()` to accept clients requesting
-    /// older MCP specification versions (e.g. 2025-06-18) alongside the
-    /// latest version.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// use turbomcp::prelude::*;
-    ///
-    /// // Accept both 2025-06-18 and 2025-11-25 clients
-    /// MyServer.builder()
-    ///     .with_protocol(ProtocolConfig::multi_version())
-    ///     .serve()
-    ///     .await?;
-    /// ```
-    #[must_use]
-    pub fn with_protocol(mut self, protocol: ProtocolConfig) -> Self {
-        self.config = self.config.protocol(protocol);
-        self
-    }
-
-    /// Configure maximum message size.
-    ///
-    /// Messages exceeding this size will be rejected.
-    /// Default: 10MB.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// // Limit messages to 1MB
-    /// builder.with_max_message_size(1024 * 1024)
-    /// ```
-    #[must_use]
-    pub fn with_max_message_size(mut self, size: usize) -> Self {
-        self.config = self.config.max_message_size(size);
-        self
-    }
-
-    /// Apply a custom server configuration.
-    ///
-    /// This replaces any previously set configuration options.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// let config = ServerConfig::builder()
-    ///     .rate_limit(rate_config)
-    ///     .connection_limits(limits)
-    ///     .build();
-    ///
-    /// builder.with_config(config)
-    /// ```
-    #[must_use]
-    pub fn with_config(mut self, config: ServerConfig) -> Self {
-        let mut builder = ServerConfig::builder()
-            .protocol(config.protocol)
-            .connection_limits(config.connection_limits)
-            .required_capabilities(config.required_capabilities)
-            .max_message_size(config.max_message_size)
-            .origin_validation(config.origin_validation);
-
-        if let Some(rate_limit) = config.rate_limit {
-            builder = builder.rate_limit(rate_limit);
-        }
-
-        self.config = builder;
-        self
-    }
-
-    /// Run the server with the configured transport.
-    ///
-    /// This is the main entry point that starts the server and blocks
-    /// until shutdown.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// MyServer.builder()
-    ///     .transport(Transport::http("0.0.0.0:8080"))
-    ///     .serve()
-    ///     .await?;
-    /// ```
-    #[allow(unused_variables)]
-    pub async fn serve(self) -> McpResult<()> {
-        // Config is used by transport-specific features (http, websocket, tcp, unix)
-        // STDIO doesn't use config, so this may be unused if only stdio is enabled
-        let config = self.config.build();
-
-        match self.transport {
-            Transport::Stdio => {
-                #[cfg(feature = "stdio")]
-                {
-                    super::transport::stdio::run_with_config(&self.handler, &config).await
-                }
-                #[cfg(not(feature = "stdio"))]
-                {
-                    Err(turbomcp_core::error::McpError::internal(
-                        "STDIO transport not available. Enable the 'stdio' feature.",
-                    ))
-                }
-            }
-
-            #[cfg(feature = "http")]
-            Transport::Http { addr } => {
-                super::transport::http::run_with_shutdown(
-                    &self.handler,
-                    &addr,
-                    &config,
-                    self.graceful_shutdown,
-                )
-                .await
-            }
-
-            #[cfg(feature = "websocket")]
-            Transport::WebSocket { addr } => {
-                super::transport::websocket::run_with_config(&self.handler, &addr, &config).await
-            }
-
-            #[cfg(feature = "tcp")]
-            Transport::Tcp { addr } => {
-                super::transport::tcp::run_with_config(&self.handler, &addr, &config).await
-            }
-
-            #[cfg(all(feature = "unix", unix))]
-            Transport::Unix { path } => {
-                super::transport::unix::run_with_config(&self.handler, &path, &config).await
-            }
+    pub fn from_parts(server: S, router: MethodRouter<S>) -> Self {
+        Self {
+            server,
+            router,
+            tasks: false,
+            session_idle_timeout: None,
+            extensions: Vec::new(),
         }
     }
 
-    /// Get the underlying handler.
-    ///
-    /// Useful for testing or custom integrations.
+    /// Evict a legacy (`2025-11-25`) session not seen within `timeout`, tearing
+    /// down its subscription routes (see
+    /// [`VersionDispatcher::with_session_idle_timeout`]). Without it, sessions
+    /// are bounded only by the store's LRU capacity.
     #[must_use]
-    pub fn handler(&self) -> &H {
-        &self.handler
+    pub fn session_idle_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.session_idle_timeout = Some(timeout);
+        self
     }
 
-    /// Consume the builder and return the handler.
-    ///
-    /// Useful for custom integrations where you need ownership.
+    /// Enable core Tasks (`2025-11-25`): task-augmented `tools/call` plus
+    /// `tasks/list|get|cancel|result`. See
+    /// [`VersionDispatcher::with_task_support`]. Meaningful only alongside a
+    /// registered tools capability.
     #[must_use]
-    pub fn into_handler(self) -> H {
-        self.handler
+    pub fn with_tasks(mut self) -> Self {
+        self.tasks = true;
+        self
     }
 
-    /// Convert to an Axum router for BYO server integration.
-    ///
-    /// This allows you to merge MCP routes with your existing Axum application.
-    /// Rate limiting configured via `with_rate_limit()` is applied to all requests.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// use axum::Router;
-    /// use axum::routing::get;
-    ///
-    /// let mcp_router = MyServer.builder()
-    ///     .with_rate_limit(100, Duration::from_secs(1))
-    ///     .into_axum_router();
-    ///
-    /// let app = Router::new()
-    ///     .route("/health", get(|| async { "OK" }))
-    ///     .merge(mcp_router);
-    ///
-    /// let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
-    /// axum::serve(listener, app).await?;
-    /// ```
-    #[cfg(feature = "http")]
-    pub fn into_axum_router(self) -> axum::Router {
-        use std::sync::Arc;
-
-        let config = self.config.build();
-        let rate_limiter = config
-            .rate_limit
-            .as_ref()
-            .map(|cfg| Arc::new(crate::config::RateLimiter::new(cfg.clone())));
-
-        crate::transport::http::build_router(self.handler, rate_limiter, Some(config))
+    /// Enable the `logging` capability: handlers gain a live `ctx.log` when
+    /// the client opts in (`logging/setLevel` per session on `2025-11-25`;
+    /// per-request `_meta` `io.modelcontextprotocol/logLevel` on the draft,
+    /// where SEP-2577 deprecates the feature — prefer `stderr`/OpenTelemetry
+    /// for new draft-only servers). Without the opt-in, `ctx.log` drops
+    /// everything, per the logging spec's MUST NOT.
+    #[must_use]
+    pub fn with_logging(mut self) -> Self {
+        self.router = self.router.with_logging();
+        self
     }
 
-    /// Convert to a Tower service for custom server integration.
-    ///
-    /// This returns a service that can be used with any Tower-compatible
-    /// HTTP server (Hyper, Axum, Warp, etc.).
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// use hyper::server::conn::http1;
-    /// use hyper_util::rt::TokioIo;
-    ///
-    /// let service = MyServer.builder().into_service();
-    ///
-    /// let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
-    /// loop {
-    ///     let (stream, _) = listener.accept().await?;
-    ///     let service = service.clone();
-    ///     tokio::spawn(async move {
-    ///         http1::Builder::new()
-    ///             .serve_connection(TokioIo::new(stream), service)
-    ///             .await
-    ///     });
-    /// }
-    /// ```
-    #[cfg(feature = "http")]
-    pub fn into_service(
-        self,
-    ) -> impl tower::Service<
-        axum::http::Request<axum::body::Body>,
-        Response = axum::http::Response<axum::body::Body>,
-        Error = std::convert::Infallible,
-        Future = impl Future<
-            Output = Result<axum::http::Response<axum::body::Body>, std::convert::Infallible>,
-        > + Send,
-    > + Clone
-    + Send {
-        use tower::ServiceExt;
-        self.into_axum_router()
-            .into_service()
-            .map_err(|e| match e {})
+    /// Register a draft [`Extension`] (PLAN D10): advertised in
+    /// `server/discover` under `capabilities.extensions[id]` and owning its
+    /// declared methods on the modern (`DRAFT-2026-v1`) path. The reference
+    /// extension is the draft Tasks extension (`turbomcp-ext-tasks`).
+    #[must_use]
+    pub fn with_extension(mut self, extension: Arc<dyn Extension>) -> Self {
+        self.extensions.push(extension);
+        self
+    }
+
+    /// Register the `tools/*` capability (requires `S: WithTools`).
+    #[must_use]
+    pub fn with_tools(mut self) -> Self
+    where
+        S: WithTools,
+    {
+        self.router = self.router.with_tools();
+        self
+    }
+
+    /// Register the `resources/*` capability (requires `S: WithResources`).
+    #[must_use]
+    pub fn with_resources(mut self) -> Self
+    where
+        S: WithResources,
+    {
+        self.router = self.router.with_resources();
+        self
+    }
+
+    /// Register the `prompts/*` capability (requires `S: WithPrompts`).
+    #[must_use]
+    pub fn with_prompts(mut self) -> Self
+    where
+        S: WithPrompts,
+    {
+        self.router = self.router.with_prompts();
+        self
+    }
+
+    /// Register the `completion/complete` capability (requires `S: WithCompletions`).
+    #[must_use]
+    pub fn with_completions(mut self) -> Self
+    where
+        S: WithCompletions,
+    {
+        self.router = self.router.with_completions();
+        self
+    }
+
+    /// Finish: produce the `tower::Service<JsonRpcMessage>` for this server.
+    #[must_use]
+    pub fn build(self) -> VersionDispatcher<S> {
+        let mut dispatcher = VersionDispatcher::new(self.server, self.router);
+        if self.tasks {
+            dispatcher = dispatcher.with_task_support();
+        }
+        if let Some(timeout) = self.session_idle_timeout {
+            dispatcher = dispatcher.with_session_idle_timeout(timeout);
+        }
+        for extension in self.extensions {
+            dispatcher = dispatcher.with_extension(extension);
+        }
+        dispatcher
     }
 }
 
-/// Extension trait for creating server builders from handlers.
-///
-/// This trait provides the builder pattern for configurable server deployment.
-/// For simple cases, use `McpHandlerExt::run()` directly.
-///
-/// # Design Philosophy
-///
-/// - **Simple**: `handler.run()` → runs with STDIO (via `McpHandlerExt`)
-/// - **Configurable**: `handler.builder().transport(...).serve()` → full control
-///
-/// # Example
-///
-/// ```rust,ignore
-/// use turbomcp::prelude::*;
-///
-/// // Simple (no config needed)
-/// MyServer.run().await?;
-///
-/// // Configurable (builder pattern)
-/// MyServer.builder()
-///     .transport(Transport::http("0.0.0.0:8080"))
-///     .with_rate_limit(100, Duration::from_secs(1))
-///     .serve()
-///     .await?;
-///
-/// // BYO server (Axum integration)
-/// let mcp = MyServer.builder().into_axum_router();
-/// ```
-pub trait McpServerExt: McpHandler + Sized {
-    /// Create a server builder for this handler.
-    ///
-    /// The builder allows configuring transport, rate limits, connection
-    /// limits, and other server options before starting.
-    fn builder(self) -> ServerBuilder<Self> {
+/// Blanket entry point so any [`McpServerCore`] gets `into_server()`. The macro
+/// shadows this with an inherent method that pre-registers capabilities.
+pub trait IntoServerBuilder: McpServerCore + Sized {
+    /// Begin building a server (empty router; chain `with_*` to register).
+    fn into_server(self) -> ServerBuilder<Self> {
         ServerBuilder::new(self)
     }
 }
 
-/// Blanket implementation for all McpHandler types.
-impl<T: McpHandler> McpServerExt for T {}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::Value;
-    use turbomcp_core::context::RequestContext as CoreRequestContext;
-    use turbomcp_core::error::McpError;
-    use turbomcp_types::{
-        Prompt, PromptResult, Resource, ResourceResult, ServerInfo, Tool, ToolResult,
-    };
-
-    #[derive(Clone)]
-    struct TestHandler;
-
-    #[allow(clippy::manual_async_fn)]
-    impl McpHandler for TestHandler {
-        fn server_info(&self) -> ServerInfo {
-            ServerInfo::new("test", "1.0.0")
-        }
-
-        fn list_tools(&self) -> Vec<Tool> {
-            vec![Tool::new("test", "Test tool")]
-        }
-
-        fn list_resources(&self) -> Vec<Resource> {
-            vec![]
-        }
-
-        fn list_prompts(&self) -> Vec<Prompt> {
-            vec![]
-        }
-
-        fn call_tool<'a>(
-            &'a self,
-            _name: &'a str,
-            _args: Value,
-            _ctx: &'a CoreRequestContext,
-        ) -> impl std::future::Future<Output = McpResult<ToolResult>> + Send + 'a {
-            async { Ok(ToolResult::text("ok")) }
-        }
-
-        fn read_resource<'a>(
-            &'a self,
-            uri: &'a str,
-            _ctx: &'a CoreRequestContext,
-        ) -> impl std::future::Future<Output = McpResult<ResourceResult>> + Send + 'a {
-            let uri = uri.to_string();
-            async move { Err(McpError::resource_not_found(&uri)) }
-        }
-
-        fn get_prompt<'a>(
-            &'a self,
-            name: &'a str,
-            _args: Option<Value>,
-            _ctx: &'a CoreRequestContext,
-        ) -> impl std::future::Future<Output = McpResult<PromptResult>> + Send + 'a {
-            let name = name.to_string();
-            async move { Err(McpError::prompt_not_found(&name)) }
-        }
-    }
-
-    #[test]
-    fn test_transport_default_is_stdio() {
-        let transport = Transport::default();
-        assert!(matches!(transport, Transport::Stdio));
-    }
-
-    #[test]
-    fn test_builder_creation() {
-        let handler = TestHandler;
-        let builder = handler.builder();
-        assert!(matches!(builder.transport, Transport::Stdio));
-    }
-
-    #[test]
-    fn test_builder_transport_selection() {
-        let handler = TestHandler;
-
-        // Test STDIO
-        let builder = handler.clone().builder().transport(Transport::stdio());
-        assert!(matches!(builder.transport, Transport::Stdio));
-    }
-
-    #[cfg(feature = "http")]
-    #[test]
-    fn test_builder_http_transport() {
-        let handler = TestHandler;
-        let builder = handler.builder().transport(Transport::http("0.0.0.0:8080"));
-        assert!(matches!(builder.transport, Transport::Http { .. }));
-    }
-
-    #[test]
-    fn test_builder_rate_limit() {
-        let handler = TestHandler;
-        let builder = handler
-            .builder()
-            .with_rate_limit(100, Duration::from_secs(1));
-
-        let config = builder.config.build();
-        assert!(config.rate_limit.is_some());
-    }
-
-    #[test]
-    fn test_builder_connection_limit() {
-        let handler = TestHandler;
-        let builder = handler.builder().with_connection_limit(500);
-
-        let config = builder.config.build();
-        assert_eq!(config.connection_limits.max_tcp_connections, 500);
-        assert_eq!(config.connection_limits.max_websocket_connections, 500);
-        assert_eq!(config.connection_limits.max_http_concurrent, 500);
-        assert_eq!(config.connection_limits.max_unix_connections, 500);
-    }
-
-    #[test]
-    fn test_builder_graceful_shutdown() {
-        let handler = TestHandler;
-        let builder = handler
-            .builder()
-            .with_graceful_shutdown(Duration::from_secs(30));
-
-        assert_eq!(builder.graceful_shutdown, Some(Duration::from_secs(30)));
-    }
-
-    #[test]
-    fn test_builder_into_handler() {
-        let handler = TestHandler;
-        let builder = handler.builder();
-        let recovered = builder.into_handler();
-        assert_eq!(recovered.server_info().name, "test");
-    }
-}
+impl<S: McpServerCore> IntoServerBuilder for S {}

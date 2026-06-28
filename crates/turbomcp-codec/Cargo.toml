@@ -1,0 +1,26 @@
+[package]
+name = "turbomcp-codec"
+version = "4.0.0-alpha.1"
+edition = "2024"
+rust-version = "1.85"
+authors = ["Nicholas Paterno <nick@epistates.com>"]
+description = "TurboMCP v4 wire codec: bytes <-> JsonRpcMessage (serde_json / sonic-rs / msgpack)."
+license = "MIT"
+repository = "https://github.com/Epistates/turbomcp"
+homepage = "https://turbomcp.org"
+
+[features]
+# `serde_json` is always available as the portable baseline (incl. wasm32).
+default = ["simd"]
+# SIMD-accelerated JSON via sonic-rs; native x86_64/aarch64 only.
+simd = ["dep:sonic-rs"]
+
+[dependencies]
+turbomcp-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+bytes = { workspace = true }
+thiserror = { workspace = true }
+
+[target.'cfg(any(target_arch = "x86_64", target_arch = "aarch64"))'.dependencies]
+sonic-rs = { workspace = true, optional = true }

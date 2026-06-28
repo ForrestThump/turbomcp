@@ -1,0 +1,36 @@
+[package]
+name = "turbomcp-transport-http"
+version = "4.0.0-alpha.1"
+edition = "2024"
+rust-version = "1.85"
+authors = ["Nicholas Paterno <nick@epistates.com>"]
+description = "TurboMCP v4 Streamable HTTP transport (axum)."
+license = "MIT"
+repository = "https://github.com/Epistates/turbomcp"
+homepage = "https://turbomcp.org"
+
+[dependencies]
+turbomcp-core = { workspace = true }
+turbomcp-codec = { workspace = true }
+turbomcp-service = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+tokio = { workspace = true, features = ["rt", "net", "sync"] }
+uuid = { workspace = true, features = ["v4"] }
+bytes = { workspace = true }
+futures = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+turbomcp-protocol = { workspace = true }
+turbomcp-server = { workspace = true }
+turbomcp-auth = { workspace = true }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "macros", "time"] }
+tower = { workspace = true, features = ["util"] }
+http-body-util = "0.1"
+reqwest = { workspace = true }
+jsonwebtoken = { workspace = true }
+base64 = { workspace = true }

@@ -51,13 +51,13 @@ codegen:
   set -euo pipefail
   root="{{mcp_schema_root}}"
   echo "Generating v4 protocol types from ${root}"
-  cargo run -q -p turbomcp4-codegen -- \
+  cargo run -q -p turbomcp-codegen -- \
     "${root}/2025-11-25/schema.json" \
-    crates/turbomcp4-protocol/src/v2025_11_25/types.rs "MCP 2025-11-25"
-  cargo run -q -p turbomcp4-codegen -- \
+    crates/turbomcp-protocol/src/v2025_11_25/types.rs "MCP 2025-11-25"
+  cargo run -q -p turbomcp-codegen -- \
     "${root}/draft/schema.json" \
-    crates/turbomcp4-protocol/src/v2026_draft/types.rs "MCP DRAFT-2026-v1"
-  cargo fmt -p turbomcp4-protocol
+    crates/turbomcp-protocol/src/v2026_draft/types.rs "MCP DRAFT-2026-v1"
+  cargo fmt -p turbomcp-protocol
   echo "Done. Review the diff before committing."
 
 # =============================================================================

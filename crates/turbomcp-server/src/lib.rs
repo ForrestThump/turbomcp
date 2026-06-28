@@ -1,220 +1,567 @@
-//! # TurboMCP Server
+//! # turbomcp-server
 //!
-//! Production-ready MCP (Model Context Protocol) server implementation with
-//! zero-boilerplate development, transport-agnostic design, and WASM support.
+//! The server framework: the user-facing traits, the capability router, and the
+//! `tower`-shaped dispatcher that connects them to a transport.
 //!
-//! ## Features
+//! - [`McpServerCore`] + capability traits ([`WithTools`], …) — what a user
+//!   implements. Handlers speak `turbomcp_protocol::neutral` types, never wire
+//!   types, so a server is portable across protocol versions.
+//! - [`MethodRouter`] — registers the capabilities a server actually implements;
+//!   advertised capabilities are *derived* from it, so they can't drift.
+//! - [`VersionDispatcher`] — `Service<JsonRpcMessage>`: extracts the version,
+//!   routes to the typed handler, and serializes the response. All per-version
+//!   branching is concentrated here.
 //!
-//! - **Zero Boilerplate** - Use `#[server]` and `#[tool]` macros for instant setup
-//! - **Transport Agnostic** - STDIO, HTTP, WebSocket, TCP, Unix sockets
-//! - **Runtime Selection** - Choose transport at runtime without recompilation
-//! - **BYO Server** - Integrate with existing Axum/Tower infrastructure
-//! - **WASM Ready** - no_std compatible core for edge deployment
-//! - **Graceful Shutdown** - Clean termination with in-flight request handling
-//!
-//! ## Quick Start
-//!
-//! ```rust,ignore
-//! use turbomcp_server::prelude::*;
-//!
-//! #[derive(Clone)]
-//! struct Calculator;
-//!
-//! #[server(name = "calculator", version = "1.0.0")]
-//! impl Calculator {
-//!     /// Add two numbers together
-//!     #[tool]
-//!     async fn add(&self, a: i64, b: i64) -> i64 {
-//!         a + b
-//!     }
-//! }
-//!
-//! #[tokio::main]
-//! async fn main() {
-//!     // Simplest: uses STDIO by default
-//!     Calculator.serve().await.unwrap();
-//! }
-//! ```
-//!
-//! ## Runtime Transport Selection
-//!
-//! ```rust,ignore
-//! use turbomcp_server::prelude::*;
-//!
-//! #[tokio::main]
-//! async fn main() {
-//!     let transport = std::env::var("MCP_TRANSPORT").unwrap_or_default();
-//!
-//!     Calculator.builder()
-//!         .transport(match transport.as_str() {
-//!             "http" => Transport::http("0.0.0.0:8080"),
-//!             "ws" => Transport::websocket("0.0.0.0:8080"),
-//!             _ => Transport::stdio(),
-//!         })
-//!         .serve()
-//!         .await
-//!         .unwrap();
-//! }
-//! ```
-//!
-//! ## Bring Your Own Server (Axum Integration)
-//!
-//! ```rust,ignore
-//! use axum::Router;
-//! use turbomcp_server::prelude::*;
-//!
-//! #[tokio::main]
-//! async fn main() {
-//!     // Get MCP as an Axum router
-//!     let mcp = Calculator.builder().into_axum_router();
-//!
-//!     // Merge with your app
-//!     let app = Router::new()
-//!         .route("/health", get(|| async { "OK" }))
-//!         .merge(mcp);
-//!
-//!     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
-//!     axum::serve(listener, app).await?;
-//! }
-//! ```
+//! Both protocol paths are live: the modern `DRAFT-2026-v1` stateless path and
+//! the legacy `2025-11-25` stateful path (`initialize` handshake +
+//! [`SessionStore`]; see [`LegacySessionAdapter`] for byte-pipe transports).
+#![forbid(unsafe_code)]
+#![warn(missing_docs)]
 
-#![deny(missing_docs)]
-#![warn(missing_debug_implementations)]
-#![warn(clippy::all)]
-#![allow(
-    clippy::module_name_repetitions,
-    clippy::must_use_candidate,
-    clippy::return_self_not_must_use,
-    clippy::struct_excessive_bools,
-    clippy::default_trait_access
-)]
-// Note: missing_errors_doc and missing_panics_doc are now workspace-level warnings
-// to improve API documentation quality for enterprise adoption
-
-// Core modules
+mod adapter;
 mod builder;
-mod composite;
-mod config;
 mod context;
-mod handler;
-pub mod middleware;
+mod dispatcher;
+mod extension;
+mod inflight;
+mod logging;
+mod mrtr;
+mod progress;
+mod response;
 mod router;
-mod visibility;
+mod session;
+mod subscriptions;
+mod tasks;
+mod traits;
 
-/// Transport implementations for different protocols.
-pub mod transport;
-
-/// Progressive disclosure through component visibility control.
-pub use visibility::{
-    ComponentVisibilityRules, VisibilityConfig, VisibilityLayer, VisibilitySessionGuard,
+pub use adapter::LegacySessionAdapter;
+pub use builder::{IntoServerBuilder, ServerBuilder};
+pub use context::{
+    CallToolContext, CompleteContext, GetPromptContext, ListPromptsContext,
+    ListResourceTemplatesContext, ListResourcesContext, ListToolsContext, ReadResourceContext,
 };
-
-/// Server composition through handler mounting.
-pub use composite::CompositeHandler;
-
-/// Typed middleware for MCP request processing.
-pub use middleware::{McpMiddleware, MiddlewareStack, Next};
-
-// Public exports
-pub use builder::{McpServerExt, ServerBuilder, Transport};
-pub use config::{
-    CapabilityValidation, ClientCapabilities, ConfigValidationError, ConnectionCounter,
-    ConnectionGuard, ConnectionLimits, OriginValidationConfig, ProtocolConfig, ProtocolVersion,
-    RateLimitConfig, RateLimiter, RequiredCapabilities, SUPPORTED_PROTOCOL_VERSIONS, ServerConfig,
-    ServerConfigBuilder,
+pub use dispatcher::{DispatcherSessionTerminator, VersionDispatcher};
+pub use extension::{
+    CallAugmentRequest, CallRunner, Extension, ExtensionRequest, SubscribeOutcome,
 };
-pub use context::{RequestContext, TransportType};
-pub use handler::McpHandlerExt;
-pub use router::{
-    JsonRpcIncoming, JsonRpcOutgoing, apply_adapter_to_response, parse_request, route_request,
-    route_request_versioned, route_request_with_config, serialize_response,
-};
+pub use logging::LogSender;
+pub use mrtr::ClientHandle;
+pub use progress::ProgressReporter;
+pub use response::{IntoCallToolResult, IntoGetPromptResult, IntoReadResourceResult, Json};
+pub use router::MethodRouter;
+pub use session::{SessionState, SessionStore};
+pub use subscriptions::ServerNotifier;
+pub use traits::{McpServerCore, WithCompletions, WithPrompts, WithResources, WithTools};
 
-// Re-export McpHandler from core for unified architecture
-pub use turbomcp_core::handler::McpHandler;
-pub use turbomcp_core::marker::MaybeSend;
-
-/// Internal module for macro-generated code.
+/// Support items called by `#[server]`-generated code. Not part of the stable
+/// API — do not depend on it directly.
 #[doc(hidden)]
 pub mod __macro_support {
-    pub use schemars;
-    pub use serde_json;
-    pub use tokio;
-    pub use tracing;
-    pub use uuid;
+    use serde_json::Value;
 
-    pub use turbomcp_core;
-    pub use turbomcp_protocol;
-    pub use turbomcp_types;
+    /// Strip schemars bookkeeping (`$schema`, `title`) so a generated argument
+    /// schema reads as a clean MCP tool input schema.
+    #[must_use]
+    pub fn normalize_input_schema(mut v: Value) -> Value {
+        if let Some(obj) = v.as_object_mut() {
+            obj.remove("$schema");
+            obj.remove("title");
+        }
+        v
+    }
+
+    /// Mark a property as an MCP header parameter (SEP-2243). Transport-side
+    /// mirroring lands in Phase 4; here we annotate the input schema so the
+    /// information is present and snapshot-tested.
+    pub fn mark_mcp_header(schema: &mut Value, property: &str) {
+        if let Some(prop) = schema
+            .get_mut("properties")
+            .and_then(|p| p.get_mut(property))
+            .and_then(Value::as_object_mut)
+        {
+            prop.insert("x-mcp-header".into(), Value::Bool(true));
+        }
+    }
 }
 
-/// Prelude for easy imports.
-///
-/// This prelude provides everything needed to build MCP servers:
-///
-/// # Example
-///
-/// ```rust,ignore
-/// use turbomcp_server::prelude::*;
-///
-/// #[derive(Clone)]
-/// struct MyServer;
-///
-/// #[server(name = "my-server", version = "1.0.0")]
-/// impl MyServer {
-///     #[tool]
-///     async fn greet(&self, name: String) -> String {
-///         format!("Hello, {}!", name)
-///     }
-/// }
-///
-/// #[tokio::main]
-/// async fn main() {
-///     MyServer.serve().await.unwrap();
-/// }
-/// ```
-pub mod prelude {
-    // Core traits
-    pub use super::{
-        ComponentVisibilityRules, CompositeHandler, McpHandler, McpHandlerExt, McpMiddleware,
-        McpServerExt, MiddlewareStack, VisibilityConfig, VisibilityLayer, VisibilitySessionGuard,
-    };
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    // Builder and transport
-    pub use super::{ServerBuilder, Transport};
+    use serde_json::json;
+    use tower::{Service, ServiceExt};
+    use turbomcp_core::{Implementation, JsonRpcMessage, JsonRpcRequest, McpResult};
+    use turbomcp_protocol::neutral;
 
-    // Context types
-    pub use super::{RequestContext, TransportType};
+    #[derive(Clone)]
+    struct Calculator;
 
-    // Configuration types
-    pub use super::{
-        ConnectionLimits, OriginValidationConfig, ProtocolConfig, RateLimitConfig, RateLimiter,
-        RequiredCapabilities, ServerConfig, ServerConfigBuilder,
-    };
+    impl McpServerCore for Calculator {
+        fn server_info(&self) -> Implementation {
+            Implementation::new("calculator", "0.1.0")
+        }
+        fn instructions(&self) -> Option<String> {
+            Some("A demo calculator server.".into())
+        }
+    }
 
-    // Re-export error types from turbomcp-core (unified error handling)
-    pub use turbomcp_core::error::{McpError, McpResult};
+    impl WithTools for Calculator {
+        async fn list_tools(
+            &self,
+            _ctx: &ListToolsContext,
+            _params: neutral::ListParams,
+        ) -> McpResult<neutral::ListToolsResult> {
+            Ok(neutral::ListToolsResult::new(vec![neutral::Tool::new(
+                "add",
+                json!({"type": "object", "properties": {"a": {"type": "number"}, "b": {"type": "number"}}}),
+            )
+            .with_description("Add two numbers")]))
+        }
 
-    // Re-export types from turbomcp-types
-    pub use turbomcp_types::{
-        // Result conversion traits
-        IntoPromptResult,
-        IntoResourceResult,
-        IntoToolResult,
-        // Core types
-        ListTasksResult,
-        Message,
-        Prompt,
-        PromptArgument,
-        PromptResult,
-        Resource,
-        ResourceContents,
-        ResourceResult,
-        ResourceTemplate,
-        ServerInfo,
-        Task,
-        Tool,
-        ToolInputSchema,
-        ToolResult,
-    };
+        async fn call_tool(
+            &self,
+            _ctx: &CallToolContext,
+            params: neutral::CallToolParams,
+        ) -> McpResult<neutral::CallToolResult> {
+            if params.name != "add" {
+                return Ok(neutral::CallToolResult::error(format!(
+                    "unknown tool: {}",
+                    params.name
+                )));
+            }
+            let a = params
+                .arguments
+                .get("a")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            let b = params
+                .arguments
+                .get("b")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            Ok(neutral::CallToolResult::text(format!("{}", a + b)))
+        }
+    }
+
+    fn dispatcher() -> VersionDispatcher<Calculator> {
+        VersionDispatcher::new(Calculator, MethodRouter::new().with_tools())
+    }
+
+    /// Build draft `_meta` carrying the per-request protocol version.
+    fn draft_meta() -> serde_json::Value {
+        json!({ "io.modelcontextprotocol/protocolVersion": "DRAFT-2026-v1" })
+    }
+
+    async fn call(svc: &mut VersionDispatcher<Calculator>, req: JsonRpcRequest) -> JsonRpcMessage {
+        svc.ready()
+            .await
+            .unwrap()
+            .call(req.into())
+            .await
+            .unwrap()
+            .expect("request should produce a response")
+    }
+
+    #[tokio::test]
+    async fn discover_advertises_tools_and_versions() {
+        let mut svc = dispatcher();
+        let resp = call(&mut svc, JsonRpcRequest::new(1, "server/discover", None)).await;
+        let JsonRpcMessage::Response(r) = resp else {
+            panic!("expected response")
+        };
+        let result = r.result.expect("discover result");
+        assert_eq!(result["serverInfo"]["name"], "calculator");
+        assert_eq!(result["capabilities"]["tools"]["listChanged"], true);
+        assert_eq!(result["resultType"], "complete");
+        let versions = result["supportedVersions"].as_array().unwrap();
+        assert!(versions.iter().any(|v| v == "DRAFT-2026-v1"));
+        assert!(versions.iter().any(|v| v == "2025-11-25"));
+        assert_eq!(result["instructions"], "A demo calculator server.");
+    }
+
+    #[tokio::test]
+    async fn tools_list_returns_registered_tools() {
+        let mut svc = dispatcher();
+        let req = JsonRpcRequest::new(2, "tools/list", Some(json!({ "_meta": draft_meta() })));
+        let JsonRpcMessage::Response(r) = call(&mut svc, req).await else {
+            panic!()
+        };
+        let result = r.result.unwrap();
+        assert_eq!(result["tools"][0]["name"], "add");
+        assert_eq!(result["tools"][0]["description"], "Add two numbers");
+        assert_eq!(result["resultType"], "complete");
+    }
+
+    #[tokio::test]
+    async fn tools_call_invokes_handler() {
+        let mut svc = dispatcher();
+        let req = JsonRpcRequest::new(
+            3,
+            "tools/call",
+            Some(json!({ "name": "add", "arguments": {"a": 2, "b": 3}, "_meta": draft_meta() })),
+        );
+        let JsonRpcMessage::Response(r) = call(&mut svc, req).await else {
+            panic!()
+        };
+        let result = r.result.unwrap();
+        assert_eq!(result["content"][0]["text"], "5");
+        assert_eq!(result["isError"], false);
+    }
+
+    #[tokio::test]
+    async fn missing_version_yields_unsupported_with_list() {
+        let mut svc = dispatcher();
+        // tools/list without `_meta.protocolVersion`.
+        let req = JsonRpcRequest::new(4, "tools/list", Some(json!({})));
+        let JsonRpcMessage::Response(r) = call(&mut svc, req).await else {
+            panic!()
+        };
+        let err = r.error.expect("should be an error");
+        assert_eq!(err.code, -32004);
+    }
+
+    #[tokio::test]
+    async fn legacy_version_without_session_is_not_initialized() {
+        let mut svc = dispatcher();
+        let meta = json!({ "io.modelcontextprotocol/protocolVersion": "2025-11-25" });
+        let req = JsonRpcRequest::new(5, "tools/list", Some(json!({ "_meta": meta })));
+        let JsonRpcMessage::Response(r) = call(&mut svc, req).await else {
+            panic!()
+        };
+        let err = r.error.expect("legacy request without a session must fail");
+        assert_eq!(err.code, -32002);
+        assert!(err.message.contains("initialize"));
+    }
+
+    #[tokio::test]
+    async fn unknown_method_is_method_not_found() {
+        let mut svc = dispatcher();
+        let req = JsonRpcRequest::new(
+            6,
+            "tools/nonexistent",
+            Some(json!({ "_meta": draft_meta() })),
+        );
+        let JsonRpcMessage::Response(r) = call(&mut svc, req).await else {
+            panic!()
+        };
+        assert_eq!(r.error.unwrap().code, -32601);
+    }
+
+    #[tokio::test]
+    async fn notification_produces_no_response() {
+        let mut svc = dispatcher();
+        let msg: JsonRpcMessage =
+            turbomcp_core::JsonRpcNotification::new("notifications/initialized", None).into();
+        let out = svc.ready().await.unwrap().call(msg).await.unwrap();
+        assert!(out.is_none());
+    }
+
+    /// A server without `WithTools` must not advertise tools.
+    #[tokio::test]
+    async fn server_without_tools_omits_capability() {
+        #[derive(Clone)]
+        struct Bare;
+        impl McpServerCore for Bare {
+            fn server_info(&self) -> Implementation {
+                Implementation::new("bare", "0.0.0")
+            }
+        }
+        let mut svc = VersionDispatcher::new(Bare, MethodRouter::<Bare>::new());
+        // Reuse the dispatch path directly.
+        let resp = svc
+            .ready()
+            .await
+            .unwrap()
+            .call(JsonRpcRequest::new(1, "server/discover", None).into())
+            .await
+            .unwrap()
+            .unwrap();
+        let JsonRpcMessage::Response(r) = resp else {
+            panic!()
+        };
+        assert!(
+            r.result
+                .unwrap()
+                .get("capabilities")
+                .unwrap()
+                .get("tools")
+                .is_none()
+        );
+    }
+
+    fn _is_send<T: Send>() {}
+    #[test]
+    fn dispatcher_is_send() {
+        _is_send::<VersionDispatcher<Calculator>>();
+    }
+
+    #[tokio::test]
+    async fn builder_registers_capabilities() {
+        // `into_server()` (blanket) starts empty; `with_tools()` registers.
+        let mut svc = Calculator.into_server().with_tools().build();
+        let JsonRpcMessage::Response(r) = svc
+            .ready()
+            .await
+            .unwrap()
+            .call(JsonRpcRequest::new(1, "server/discover", None).into())
+            .await
+            .unwrap()
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(
+            r.result.unwrap()["capabilities"]["tools"]["listChanged"],
+            true
+        );
+    }
+
+    #[test]
+    fn builder_without_registration_has_no_capabilities() {
+        let dispatcher = ServerBuilder::new(Calculator).build();
+        _is_send::<VersionDispatcher<Calculator>>();
+        let _ = dispatcher; // built successfully with an empty router
+    }
+
+    // ---- resources / prompts / completions ----------------------------------
+
+    /// A server implementing every capability trait, used to prove discover
+    /// advertises each one and the dispatcher routes all method families.
+    #[derive(Clone)]
+    struct Everything;
+
+    impl McpServerCore for Everything {
+        fn server_info(&self) -> Implementation {
+            Implementation::new("everything", "0.1.0")
+        }
+    }
+
+    impl WithResources for Everything {
+        async fn list_resources(
+            &self,
+            _ctx: &ListResourcesContext,
+            _params: neutral::ListParams,
+        ) -> McpResult<neutral::ListResourcesResult> {
+            Ok(neutral::ListResourcesResult::new(vec![
+                neutral::Resource::new("file://readme", "readme").with_mime_type("text/plain"),
+            ]))
+        }
+
+        async fn read_resource(
+            &self,
+            _ctx: &ReadResourceContext,
+            params: neutral::ReadResourceParams,
+        ) -> McpResult<neutral::ReadResourceResult> {
+            Ok(neutral::ReadResourceResult::text(
+                params.uri,
+                "file contents",
+            ))
+        }
+    }
+
+    impl WithPrompts for Everything {
+        async fn list_prompts(
+            &self,
+            _ctx: &ListPromptsContext,
+            _params: neutral::ListParams,
+        ) -> McpResult<neutral::ListPromptsResult> {
+            Ok(neutral::ListPromptsResult::new(vec![
+                neutral::Prompt::new("greet")
+                    .with_argument(neutral::PromptArgument::new("name").required(true)),
+            ]))
+        }
+
+        async fn get_prompt(
+            &self,
+            _ctx: &GetPromptContext,
+            params: neutral::GetPromptParams,
+        ) -> McpResult<neutral::GetPromptResult> {
+            let name = params.arguments.get("name").cloned().unwrap_or_default();
+            Ok(neutral::GetPromptResult::new(vec![
+                neutral::PromptMessage::user_text(format!("Greet {name}")),
+            ]))
+        }
+    }
+
+    impl WithCompletions for Everything {
+        async fn complete(
+            &self,
+            _ctx: &CompleteContext,
+            params: neutral::CompleteParams,
+        ) -> McpResult<neutral::CompleteResult> {
+            // Echo the partial value back as the single suggestion.
+            Ok(neutral::CompleteResult::new(vec![params.argument.value]))
+        }
+    }
+
+    fn everything() -> VersionDispatcher<Everything> {
+        VersionDispatcher::new(
+            Everything,
+            MethodRouter::new()
+                .with_resources()
+                .with_prompts()
+                .with_completions(),
+        )
+    }
+
+    async fn call_everything(
+        svc: &mut VersionDispatcher<Everything>,
+        req: JsonRpcRequest,
+    ) -> serde_json::Value {
+        let JsonRpcMessage::Response(r) = svc
+            .ready()
+            .await
+            .unwrap()
+            .call(req.into())
+            .await
+            .unwrap()
+            .expect("response")
+        else {
+            panic!("expected response")
+        };
+        r.result.expect("result")
+    }
+
+    #[tokio::test]
+    async fn discover_advertises_all_capabilities() {
+        let mut svc = everything();
+        let result =
+            call_everything(&mut svc, JsonRpcRequest::new(1, "server/discover", None)).await;
+        let caps = &result["capabilities"];
+        assert_eq!(caps["resources"]["listChanged"], true);
+        assert_eq!(caps["resources"]["subscribe"], true);
+        assert_eq!(caps["prompts"]["listChanged"], true);
+        assert!(caps["completions"].is_object());
+        // No tools were registered → no tools capability.
+        assert!(caps.get("tools").is_none());
+    }
+
+    #[tokio::test]
+    async fn resources_list_read_and_templates_route() {
+        let mut svc = everything();
+        let meta = json!({ "_meta": draft_meta() });
+
+        let list = call_everything(
+            &mut svc,
+            JsonRpcRequest::new(2, "resources/list", Some(meta.clone())),
+        )
+        .await;
+        assert_eq!(list["resources"][0]["uri"], "file://readme");
+        assert_eq!(list["resources"][0]["mimeType"], "text/plain");
+
+        let read = call_everything(
+            &mut svc,
+            JsonRpcRequest::new(
+                3,
+                "resources/read",
+                Some(json!({ "uri": "file://readme", "_meta": draft_meta() })),
+            ),
+        )
+        .await;
+        assert_eq!(read["contents"][0]["uri"], "file://readme");
+        assert_eq!(read["contents"][0]["text"], "file contents");
+
+        // The default `list_resource_templates` answers with an empty list.
+        let templates = call_everything(
+            &mut svc,
+            JsonRpcRequest::new(4, "resources/templates/list", Some(meta)),
+        )
+        .await;
+        assert_eq!(templates["resourceTemplates"].as_array().unwrap().len(), 0);
+        assert_eq!(templates["resultType"], "complete");
+    }
+
+    #[tokio::test]
+    async fn prompts_list_and_get_route() {
+        let mut svc = everything();
+        let list = call_everything(
+            &mut svc,
+            JsonRpcRequest::new(5, "prompts/list", Some(json!({ "_meta": draft_meta() }))),
+        )
+        .await;
+        assert_eq!(list["prompts"][0]["name"], "greet");
+        assert_eq!(list["prompts"][0]["arguments"][0]["required"], true);
+
+        let got = call_everything(
+            &mut svc,
+            JsonRpcRequest::new(
+                6,
+                "prompts/get",
+                Some(
+                    json!({ "name": "greet", "arguments": {"name": "Ada"}, "_meta": draft_meta() }),
+                ),
+            ),
+        )
+        .await;
+        assert_eq!(got["messages"][0]["role"], "user");
+        assert_eq!(got["messages"][0]["content"]["text"], "Greet Ada");
+    }
+
+    #[tokio::test]
+    async fn completion_complete_routes_with_ref_union() {
+        let mut svc = everything();
+        let result = call_everything(
+            &mut svc,
+            JsonRpcRequest::new(
+                7,
+                "completion/complete",
+                Some(json!({
+                    "ref": { "type": "ref/prompt", "name": "greet" },
+                    "argument": { "name": "name", "value": "Ad" },
+                    "_meta": draft_meta(),
+                })),
+            ),
+        )
+        .await;
+        assert_eq!(result["completion"]["values"][0], "Ad");
+        assert_eq!(result["resultType"], "complete");
+    }
+
+    #[tokio::test]
+    async fn unregistered_capability_is_method_not_found() {
+        // `Everything` doesn't register tools; calling a tools method 404s.
+        let mut svc = everything();
+        let JsonRpcMessage::Response(r) = svc
+            .ready()
+            .await
+            .unwrap()
+            .call(
+                JsonRpcRequest::new(8, "tools/list", Some(json!({ "_meta": draft_meta() }))).into(),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(r.error.unwrap().code, -32601);
+    }
+
+    #[tokio::test]
+    async fn malformed_completion_ref_is_invalid_params() {
+        let mut svc = everything();
+        let JsonRpcMessage::Response(r) = svc
+            .ready()
+            .await
+            .unwrap()
+            .call(
+                JsonRpcRequest::new(
+                    9,
+                    "completion/complete",
+                    Some(json!({
+                        "ref": { "type": "ref/prompt" },
+                        "argument": { "name": "x", "value": "" },
+                        "_meta": draft_meta(),
+                    })),
+                )
+                .into(),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(r.error.unwrap().code, -32602);
+    }
 }

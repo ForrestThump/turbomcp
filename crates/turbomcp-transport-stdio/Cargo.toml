@@ -1,0 +1,23 @@
+[package]
+name = "turbomcp-transport-stdio"
+version = "4.0.0-alpha.1"
+edition = "2024"
+rust-version = "1.85"
+authors = ["Nicholas Paterno <nick@epistates.com>"]
+description = "TurboMCP v4 STDIO transport."
+license = "MIT"
+repository = "https://github.com/Epistates/turbomcp"
+homepage = "https://turbomcp.org"
+
+[dependencies]
+turbomcp-core = { workspace = true }
+turbomcp-codec = { workspace = true }
+turbomcp-service = { workspace = true }
+tokio = { workspace = true, features = ["io-std", "io-util"] }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+turbomcp-server = { workspace = true }
+turbomcp-protocol = { workspace = true }
+tokio = { workspace = true, features = ["io-std", "io-util", "macros", "rt"] }
+serde_json = { workspace = true }

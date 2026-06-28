@@ -1,158 +1,63 @@
-//! Pristine Architecture Example - Calculator Server
+//! # Calculator (v4)
 //!
-//! This example demonstrates the pristine architecture with zero-boilerplate macros.
+//! A handful of arithmetic tools on one `#[server]` — the "more than one tool"
+//! step up from `hello_world`. Shows infallible tools returning a bare scalar
+//! (`-> f64`, wrapped as a text content block) alongside a fallible one
+//! (`-> McpResult<f64>`, where the error becomes a `CallToolResult` with
+//! `isError: true` rather than a transport error).
 //!
-//! Features demonstrated:
-//! - `#[server]` macro generates `McpHandler` trait implementation
-//! - `#[tool]` attributes extract schemas from function signatures
-//! - Transport-agnostic design (same code works on WASM and native)
+//! Tools may return `String`/`&str`, any numeric or `bool` scalar, `()` (empty
+//! success), `Json<T>` (structured output), or a `neutral::CallToolResult` —
+//! each optionally wrapped in `McpResult<_>`.
 //!
-//! # Running
+//! Run with: `cargo run -p turbomcp --example calculator`
 //!
-//! ```bash
-//! cargo run --example calculator --features stdio
-//! ```
-//!
-//! # Testing with CLI
-//!
+//! Drive it from a shell:
 //! ```bash
 //! printf '%s\n' \
 //!   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","clientInfo":{"name":"cli","version":"1.0"},"capabilities":{}}}' \
 //!   '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
-//!   '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
-//!   '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"add","arguments":{"a":5,"b":3}}}' \
-//! | cargo run --example calculator --features stdio
+//!   '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"add","arguments":{"a":5,"b":3}}}' \
+//! | cargo run -p turbomcp --example calculator
 //! ```
 
 use turbomcp::prelude::*;
 
-/// A simple calculator server demonstrating pristine architecture.
 #[derive(Clone)]
 struct Calculator;
 
-#[server(
-    name = "calculator",
-    version = "1.0.0",
-    description = "A pristine calculator"
-)]
+#[server(name = "calculator", version = "1.0.0")]
 impl Calculator {
     /// Add two numbers together.
-    #[tool]
-    async fn add(&self, a: i64, b: i64) -> i64 {
+    #[tool(description = "Add two numbers")]
+    async fn add(&self, a: f64, b: f64) -> f64 {
         a + b
     }
 
-    /// Subtract b from a.
-    #[tool]
-    async fn subtract(&self, a: i64, b: i64) -> i64 {
+    /// Subtract `b` from `a`.
+    #[tool(description = "Subtract b from a")]
+    async fn subtract(&self, a: f64, b: f64) -> f64 {
         a - b
     }
 
     /// Multiply two numbers.
-    #[tool]
-    async fn multiply(&self, a: i64, b: i64) -> i64 {
+    #[tool(description = "Multiply two numbers")]
+    async fn multiply(&self, a: f64, b: f64) -> f64 {
         a * b
     }
 
-    /// Greet someone by name.
-    #[tool]
-    async fn greet(&self, name: String) -> String {
-        format!("Hello, {}!", name)
+    /// Divide `a` by `b` — fails on division by zero.
+    #[tool(description = "Divide a by b")]
+    async fn divide(&self, a: f64, b: f64) -> McpResult<f64> {
+        if b == 0.0 {
+            return Err(McpError::invalid_params("cannot divide by zero"));
+        }
+        Ok(a / b)
     }
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize tracing to stderr (MUST NOT write to stdout as it pollutes the MCP protocol)
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
-
-    tracing::info!("Starting Calculator Server...");
-
-    // Run the server on STDIO transport
-    // The #[server] macro generates the McpHandler implementation
-    // which provides run_stdio() and other feature-gated transport methods.
-    Calculator.run_stdio().await?;
-
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use turbomcp::RequestContext as CoreRequestContext;
-    use turbomcp_server::RequestContext as ServerRequestContext;
-
-    #[test]
-    fn test_server_info() {
-        let calc = Calculator;
-        let info = calc.server_info();
-        assert_eq!(info.name, "calculator");
-        assert_eq!(info.version, "1.0.0");
-    }
-
-    #[test]
-    fn test_list_tools() {
-        let calc = Calculator;
-        let tools = calc.list_tools();
-        assert_eq!(tools.len(), 4); // add, subtract, multiply, greet
-        assert!(tools.iter().any(|t| t.name == "add"));
-        assert!(tools.iter().any(|t| t.name == "greet"));
-    }
-
-    #[tokio::test]
-    async fn test_add() {
-        let calc = Calculator;
-        let ctx = CoreRequestContext::stdio();
-        let result = calc
-            .call_tool("add", serde_json::json!({"a": 10, "b": 20}), &ctx)
-            .await
-            .unwrap();
-        // The result should contain "30" as text
-        assert!(result.first_text().unwrap().contains("30"));
-    }
-
-    #[tokio::test]
-    async fn test_handle_request() {
-        let calc = Calculator;
-        let ctx = ServerRequestContext::new();
-
-        // Test initialize (MCP spec requires clientInfo)
-        let request = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2025-11-25",
-                "clientInfo": {
-                    "name": "test-client",
-                    "version": "1.0.0"
-                },
-                "capabilities": {}
-            }
-        });
-        let response = calc.handle_request(request, ctx.clone()).await.unwrap();
-        assert_eq!(response["result"]["serverInfo"]["name"], "calculator");
-        // Verify MCP-compliant capability structure
-        assert!(
-            response["result"]["capabilities"]["tools"]["listChanged"]
-                .as_bool()
-                .unwrap_or(false)
-        );
-
-        // Test tools/call
-        let request = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "tools/call",
-            "params": {
-                "name": "multiply",
-                "arguments": {"a": 6, "b": 7}
-            }
-        });
-        let response = calc.handle_request(request, ctx).await.unwrap();
-        assert!(response.get("error").is_none());
-    }
+async fn main() -> Result<(), turbomcp::ProtocolError> {
+    // Logs MUST go to stderr — stdout carries the MCP protocol framing.
+    Calculator.run_stdio().await
 }

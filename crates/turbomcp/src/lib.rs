@@ -1,400 +1,190 @@
-//! # TurboMCP - Model Context Protocol SDK
+//! # turbomcp
 //!
-//! Rust SDK for the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/)
-//! with zero-boilerplate macros, transport-agnostic design, and WASM support.
+//! The TurboMCP v4 SDK facade: a single crate that re-exports the layered
+//! workspace crates and the `#[server]` / `#[tool]` / `#[resource]` / `#[prompt]`
+//! macros, plus a [`prelude`] for the common imports.
 //!
-//! ## Features
-//!
-//! - **Zero Boilerplate** - `#[server]`, `#[tool]`, `#[resource]`, `#[prompt]` macros
-//! - **Transport Agnostic** - STDIO, HTTP, WebSocket, TCP, Unix sockets
-//! - **Runtime Selection** - Choose transport at runtime without recompilation
-//! - **BYO Server** - Integrate with existing Axum/Tower infrastructure
-//! - **WASM Ready** - no_std compatible core for edge deployment
-//! - **Type Safe** - Automatic JSON schema generation from Rust types
-//!
-//! ## Quick Start
-//!
-//! ```rust,ignore
+//! ```ignore
 //! use turbomcp::prelude::*;
 //!
 //! #[derive(Clone)]
-//! struct Calculator;
+//! struct Hello;
 //!
-//! #[server(name = "calculator", version = "1.0.0")]
-//! impl Calculator {
-//!     /// Add two numbers together
+//! #[server(name = "hello", version = "1.0.0")]
+//! impl Hello {
+//!     /// Say hello to someone.
 //!     #[tool]
-//!     async fn add(&self, a: i64, b: i64) -> i64 {
-//!         a + b
-//!     }
-//!
-//!     /// Multiply two numbers
-//!     #[tool]
-//!     async fn multiply(&self, a: i64, b: i64) -> i64 {
-//!         a * b
+//!     async fn hello(&self, name: String) -> McpResult<String> {
+//!         Ok(format!("Hello, {name}!"))
 //!     }
 //! }
-//!
-//! #[tokio::main]
-//! async fn main() {
-//!     Calculator.serve().await.unwrap();
-//! }
 //! ```
-//!
-//! ## Runtime Transport Selection
-//!
-//! ```rust,ignore
-//! use turbomcp::prelude::*;
-//!
-//! #[tokio::main]
-//! async fn main() {
-//!     let transport = std::env::var("MCP_TRANSPORT").unwrap_or_default();
-//!
-//!     Calculator.builder()
-//!         .transport(match transport.as_str() {
-//!             "http" => Transport::http("0.0.0.0:8080"),
-//!             "ws" => Transport::websocket("0.0.0.0:8080"),
-//!             "tcp" => Transport::tcp("0.0.0.0:9000"),
-//!             _ => Transport::stdio(),
-//!         })
-//!         .serve()
-//!         .await
-//!         .unwrap();
-//! }
-//! ```
-//!
-//! ## BYO Server (Axum Integration)
-//!
-//! ```rust,ignore
-//! use axum::{Router, routing::get};
-//! use turbomcp::prelude::*;
-//!
-//! #[tokio::main]
-//! async fn main() {
-//!     // Get MCP routes as an Axum router
-//!     let mcp = Calculator.builder().into_axum_router();
-//!
-//!     // Merge with your existing routes
-//!     let app = Router::new()
-//!         .route("/health", get(|| async { "OK" }))
-//!         .merge(mcp);
-//!
-//!     // Run with your own server
-//!     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap();
-//!     axum::serve(listener, app).await.unwrap();
-//! }
-//! ```
-//!
-//! ## Feature Flags
-//!
-//! Choose the right feature set for your use case:
-//!
-//! ```toml
-//! # Minimal (STDIO only, recommended for CLI tools)
-//! turbomcp = { version = "3.1.4", default-features = false, features = ["minimal"] }
-//!
-//! # Full (all transports)
-//! turbomcp = { version = "3.1.4", features = ["full"] }
-//! ```
-//!
-//! Available features:
-//! - `stdio` - Standard I/O transport (default, works with Claude Desktop)
-//! - `http` - Streamable HTTP transport
-//! - `websocket` - WebSocket bidirectional transport
-//! - `tcp` - Raw TCP socket transport
-//! - `unix` - Unix domain socket transport
+#![forbid(unsafe_code)]
 
-#![cfg_attr(docsrs, feature(doc_cfg))]
-#![deny(missing_docs)]
-#![warn(clippy::all)]
-#![allow(
-    clippy::module_name_repetitions,
-    clippy::must_use_candidate,
-    clippy::return_self_not_must_use,
-    clippy::struct_excessive_bools,
-    clippy::missing_panics_doc,
-    clippy::missing_errors_doc,
-    clippy::default_trait_access,
-    clippy::missing_const_for_fn,
-    clippy::use_self,
-    clippy::uninlined_format_args
-)]
+// ---- foundation -------------------------------------------------------------
 
-/// In-memory test client for ergonomic MCP server testing.
-pub mod testing;
-
-/// TurboMCP version from Cargo.toml
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-
-/// TurboMCP crate name
-pub const CRATE_NAME: &str = env!("CARGO_PKG_NAME");
-
-// ============================================================================
-// Core Re-exports
-// ============================================================================
-
-// Re-export macros
-pub use turbomcp_macros::{description, prompt, resource, server, tool};
-
-// Re-export core types
-pub use turbomcp_core::context::RequestContext;
-pub use turbomcp_core::error::{McpError, McpResult};
-pub use turbomcp_core::handler::McpHandler;
-
-// Re-export types
-pub use turbomcp_types::{
-    IntoPromptResult, IntoResourceResult, IntoToolResult, Message, Prompt, PromptArgument,
-    PromptResult, Resource, ResourceContents, ResourceLink, ResourceResult, Role, SamplingContent,
-    SamplingContentBlock, ServerInfo, Tool, ToolInputSchema, ToolResult,
+pub use turbomcp_core::{
+    Implementation, JsonRpcMessage, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, LogLevel,
+    McpError, McpResult, ProtocolVersion, RequestContext, RequestId,
 };
 
-// Re-export server builder and transport
+/// Version-stable, handler-facing types (the surface user handlers speak).
+pub use turbomcp_protocol::neutral;
 
-/// Extension trait providing transport-specific run methods (`run_stdio`, `run_http`, etc.)
-pub use turbomcp_server::McpHandlerExt;
+// ---- service seam + codec ---------------------------------------------------
 
-/// Extension trait for MCP server operations
-pub use turbomcp_server::McpServerExt;
+pub use turbomcp_codec::{Codec, CodecError, DefaultCodec, SerdeJsonCodec};
+pub use turbomcp_service::{
+    CancellationToken, McpService, ProtocolError, ServeConfig, Transport, serve, serve_with,
+};
 
-/// Builder for configuring and launching MCP servers with transports
-pub use turbomcp_server::ServerBuilder;
+// ---- server -----------------------------------------------------------------
 
-/// Protocol version negotiation configuration
+pub use turbomcp_server::{
+    CallToolContext, ClientHandle, CompleteContext, GetPromptContext, IntoCallToolResult,
+    IntoGetPromptResult, IntoReadResourceResult, IntoServerBuilder, Json, LegacySessionAdapter,
+    ListPromptsContext, ListResourceTemplatesContext, ListResourcesContext, ListToolsContext,
+    LogSender, McpServerCore, MethodRouter, ProgressReporter, ReadResourceContext, ServerBuilder,
+    ServerNotifier, SessionState, SessionStore, VersionDispatcher, WithCompletions, WithPrompts,
+    WithResources, WithTools,
+};
+
+/// Re-export of [`schemars`] for deriving `JsonSchema` on `#[tool]` argument
+/// structs and [`Json`] structured-output types, so downstream crates don't pin
+/// a separate `schemars` version. Use `#[derive(turbomcp::schemars::JsonSchema)]`.
+pub use schemars;
+
+// ---- transports -------------------------------------------------------------
+
+pub use turbomcp_transport_stdio::{serve_stdio, serve_stdio_with, stdio};
+
+/// Streamable HTTP transport (axum 0.8). Enable with the `http` feature.
 ///
-/// Use `ProtocolConfig::multi_version()` to accept older MCP clients.
-pub use turbomcp_server::ProtocolConfig;
+/// The one-liner is [`ServeHttp::run_http`](http::ServeHttp::run_http) on a
+/// builder — it builds the dispatcher, wires session termination (`DELETE`)
+/// automatically, and serves:
+///
+/// ```ignore
+/// use turbomcp::prelude::*;
+/// use turbomcp::http::{HttpConfig, ServeHttp};
+///
+/// MyServer.into_server().run_http("127.0.0.1:8080".parse()?, HttpConfig::new()).await?;
+/// ```
+///
+/// For full control (e.g. wrapping the dispatcher in RPC middleware like the
+/// telemetry [`TraceContextLayer`](crate::telemetry::TraceContextLayer)), build
+/// the service yourself and call [`serve_http`](http::serve_http):
+///
+/// ```ignore
+/// use tower::Layer;
+/// let service = TraceContextLayer::new().layer(MyServer.into_server().build());
+/// serve_http(addr, service, HttpConfig::new()).await?;
+/// ```
+#[cfg(feature = "http")]
+pub mod http {
+    use std::net::SocketAddr;
+    use std::sync::Arc;
 
-/// Configuration for MCP server behavior, timeouts, and protocol versions
-pub use turbomcp_server::ServerConfig;
+    pub use turbomcp_service::SessionTerminator;
+    pub use turbomcp_transport_http::{HttpConfig, HttpError, router, serve_http};
 
-/// Builder for constructing `ServerConfig` with type-safe defaults
-pub use turbomcp_server::ServerConfigBuilder;
+    use turbomcp_server::{McpServerCore, ServerBuilder};
 
-/// Transport configuration enum for runtime transport selection
-pub use turbomcp_server::Transport;
+    /// One-call HTTP serving for a [`ServerBuilder`] (the value
+    /// `MyServer.into_server()` produces).
+    pub trait ServeHttp {
+        /// Build this server's dispatcher and serve it over Streamable HTTP on
+        /// `addr` until `config`'s shutdown token fires.
+        ///
+        /// Session termination (`DELETE`) is wired automatically from the built
+        /// dispatcher, so the endpoint honors client-initiated termination by
+        /// default. To compose RPC middleware first, build the dispatcher
+        /// yourself and call [`serve_http`] instead.
+        fn run_http(
+            self,
+            addr: SocketAddr,
+            config: HttpConfig,
+        ) -> impl std::future::Future<Output = Result<(), HttpError>> + Send;
+    }
 
-/// Exact-name visibility rules for tools, resources, and prompts
-pub use turbomcp_server::ComponentVisibilityRules;
+    impl<S> ServeHttp for ServerBuilder<S>
+    where
+        S: McpServerCore + Clone + Send + Sync + 'static,
+    {
+        async fn run_http(self, addr: SocketAddr, config: HttpConfig) -> Result<(), HttpError> {
+            let dispatcher = self.build();
+            let config = config.with_session_terminator(Arc::new(dispatcher.session_terminator()));
+            serve_http(addr, dispatcher, config).await
+        }
+    }
+}
 
-/// Runtime visibility configuration for reducing the MCP component surface
-pub use turbomcp_server::VisibilityConfig;
-
-/// Handler wrapper for progressive disclosure and AI-friendly tool filtering
-pub use turbomcp_server::VisibilityLayer;
-
-/// RAII cleanup guard for session-specific visibility overrides
-pub use turbomcp_server::VisibilitySessionGuard;
-
-// Re-export protocol types for advanced usage
-
-/// Request payload for tool invocation
-pub use turbomcp_protocol::CallToolRequest;
-
-/// Response payload for tool execution results
-pub use turbomcp_protocol::CallToolResult;
-
-/// Client capability declaration during initialization
-pub use turbomcp_protocol::ClientCapabilities;
-
-/// Image content type for multimodal responses
-pub use turbomcp_protocol::Image;
-
-/// Initial handshake request from client to server
-pub use turbomcp_protocol::InitializeRequest;
-
-/// Initial handshake response with server capabilities
-pub use turbomcp_protocol::InitializeResult;
-
-/// Trait for converting errors into tool error responses
-pub use turbomcp_protocol::IntoToolError;
-
-/// Trait for converting values into tool responses
-pub use turbomcp_protocol::IntoToolResponse;
-
-/// JSON content wrapper for structured data responses
-pub use turbomcp_protocol::Json;
-
-/// JSON-RPC 2.0 error object
-pub use turbomcp_protocol::JsonRpcError;
-
-/// JSON-RPC 2.0 notification (no response expected)
-pub use turbomcp_protocol::JsonRpcNotification;
-
-/// JSON-RPC 2.0 request message
-pub use turbomcp_protocol::JsonRpcRequest;
-
-/// JSON-RPC 2.0 response message
-pub use turbomcp_protocol::JsonRpcResponse;
-
-/// Unique identifier for correlating requests and responses
-pub use turbomcp_protocol::MessageId;
-
-/// Server capability declaration during initialization
-pub use turbomcp_protocol::ServerCapabilities;
-
-/// Text content type for string responses
-pub use turbomcp_protocol::Text;
-
-/// Tool execution error with code and message
-pub use turbomcp_protocol::ToolError;
-
-// ============================================================================
-// Optional Re-exports
-// ============================================================================
-
-/// Authentication and OAuth support
+/// OAuth 2.1 resource-server auth: bearer-token validation + RFC 9728 metadata.
+/// Enable with the `auth` feature, then protect an HTTP endpoint with
+/// [`HttpConfig::with_authenticator`](http::HttpConfig::with_authenticator).
 #[cfg(feature = "auth")]
 pub use turbomcp_auth as auth;
 
-/// DPoP (RFC 9449) support
-#[cfg(feature = "dpop")]
-pub use turbomcp_dpop as dpop;
+/// The HTTP authentication seam (implemented by [`auth::ResourceServer`]).
+#[cfg(feature = "http")]
+pub use turbomcp_service::{AuthDecision, HttpAuthenticator};
 
-/// OpenTelemetry integration and observability
+/// The HTTP rate-limiting seam + the in-process `governor`-backed default.
+/// Apply with [`HttpConfig::with_rate_limiter`](http::HttpConfig::with_rate_limiter).
+#[cfg(feature = "http")]
+pub use turbomcp_service::{GovernorRateLimiter, RateKey, RateLimiter};
+
+/// OpenTelemetry observability: the [`TraceContextLayer`](telemetry::TraceContextLayer)
+/// (W3C trace continuation over `_meta` + PII-safe identity spans) and an
+/// optional OTLP export pipeline. Enable with the `telemetry` feature.
 #[cfg(feature = "telemetry")]
 pub use turbomcp_telemetry as telemetry;
 
-/// Client library for full-stack development
-#[cfg(feature = "client-integration")]
-pub use turbomcp_client;
+/// The MCP client: [`client::ClientBuilder`] runs the handshake + version
+/// negotiation, then [`client::Client`] speaks the typed [`neutral`] API.
+/// Enable with the `client` feature.
+#[cfg(feature = "client")]
+pub use turbomcp_client as client;
 
-// ============================================================================
-// Internal Macro Support
-// ============================================================================
+/// The draft Tasks extension (`io.modelcontextprotocol/tasks`, SEP-2663):
+/// register [`ext_tasks::TasksExtension`] with `ServerBuilder::with_extension`
+/// to answer `tools/call` with an async task handle. Enable with the
+/// `ext-tasks` feature.
+#[cfg(feature = "ext-tasks")]
+pub use turbomcp_ext_tasks as ext_tasks;
 
-/// Internal module for macro-generated code.
-///
-/// **WARNING: This module is not part of the public API.**
-///
-/// These re-exports are used by procedural macros to generate code that
-/// references dependencies without requiring users to add them to their
-/// Cargo.toml.
+// ---- macros -----------------------------------------------------------------
+
+pub use turbomcp_macros::{mcp_header, prompt, resource, server, tool};
+
+/// Support items referenced by `#[server]`-generated code. **Not** a stable API
+/// — do not depend on it directly; it exists only so generated code has a single
+/// rooted path (`::turbomcp::__macros::…`) for its dependencies.
 #[doc(hidden)]
-pub mod __macro_support {
-    #[cfg(feature = "http")]
-    pub use axum;
-
+pub mod __macros {
     pub use schemars;
+    pub use serde;
     pub use serde_json;
-    pub use tokio;
-    pub use tower;
-    pub use tracing;
-    pub use uuid;
 
-    pub use turbomcp_core;
-    pub use turbomcp_protocol;
-    pub use turbomcp_server;
-    pub use turbomcp_transport;
-    pub use turbomcp_types;
+    pub use turbomcp_core::{McpError, McpResult};
+    pub use turbomcp_protocol::neutral;
+    pub use turbomcp_server::__macro_support::{mark_mcp_header, normalize_input_schema};
 }
 
-// ============================================================================
-// Prelude
-// ============================================================================
-
-/// Convenient prelude for TurboMCP applications.
-///
-/// Import everything you need with a single use statement:
-///
-/// ```rust,ignore
-/// use turbomcp::prelude::*;
-///
-/// #[derive(Clone)]
-/// struct MyServer;
-///
-/// #[server(name = "my-server", version = "1.0.0")]
-/// impl MyServer {
-///     #[tool("My tool")]
-///     async fn my_tool(&self) -> McpResult<String> {
-///         Ok("Hello, world!".to_string())
-///     }
-/// }
-/// ```
+/// The common imports for building a server.
 pub mod prelude {
-    // Macros
-    pub use super::{description, prompt, resource, server, tool};
-
-    // Version info
-    pub use super::{CRATE_NAME, VERSION};
-
-    // Core traits and types
-    pub use super::{
-        ComponentVisibilityRules, McpError, McpHandler, McpHandlerExt, McpResult, McpServerExt,
-        ProtocolConfig, ServerBuilder, ServerConfig, ServerConfigBuilder, Transport,
-        VisibilityConfig, VisibilityLayer, VisibilitySessionGuard,
+    pub use crate::neutral;
+    pub use turbomcp_core::{Implementation, LogLevel, McpError, McpResult, RequestContext};
+    pub use turbomcp_server::{
+        CallToolContext, CompleteContext, GetPromptContext, IntoServerBuilder, Json,
+        ListPromptsContext, ListResourceTemplatesContext, ListResourcesContext, ListToolsContext,
+        McpServerCore, ServerBuilder, WithCompletions, WithPrompts, WithResources, WithTools,
     };
+    pub use turbomcp_transport_stdio::serve_stdio;
 
-    // Result types for handlers
-    pub use super::{
-        IntoPromptResult, IntoResourceResult, IntoToolResult, PromptResult, ResourceResult,
-        ToolResult,
-    };
-
-    // Common protocol types
-    pub use super::{
-        CallToolRequest, CallToolResult, Message, Prompt, PromptArgument, RequestContext, Resource,
-        ResourceContents, Role, ServerInfo, Tool, ToolInputSchema,
-    };
-
-    // Unified response types
-    pub use super::{Image, IntoToolError, IntoToolResponse, Json, Text, ToolError};
-
-    // Common external types
-    pub use serde::{Deserialize, Serialize};
-    pub use serde_json;
-
-    // ============================================================================
-    // Transport Re-exports
-    // ============================================================================
-
-    /// Streamable HTTP server configuration
+    /// The HTTP one-liner `builder.run_http(addr, config)` (feature `http`).
     #[cfg(feature = "http")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "http")))]
-    pub use turbomcp_transport::streamable_http::{
-        StreamableHttpConfig, StreamableHttpConfigBuilder,
-    };
+    pub use crate::http::ServeHttp;
 
-    /// Streamable HTTP client transport
-    #[cfg(feature = "http")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "http")))]
-    pub use turbomcp_transport::streamable_http_client::{
-        RetryPolicy, StreamableHttpClientConfig, StreamableHttpClientTransport,
-    };
-
-    /// WebSocket bidirectional transport
-    #[cfg(feature = "websocket")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "websocket")))]
-    pub use turbomcp_transport::websocket_bidirectional::{
-        WebSocketBidirectionalConfig, WebSocketBidirectionalTransport,
-    };
-
-    /// TCP transport
-    #[cfg(feature = "tcp")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "tcp")))]
-    pub use turbomcp_transport::tcp::{TcpTransport, TcpTransportBuilder};
-
-    /// Unix domain socket transport
-    #[cfg(all(unix, feature = "unix"))]
-    #[cfg_attr(docsrs, doc(cfg(all(unix, feature = "unix"))))]
-    pub use turbomcp_transport::unix::{UnixTransport, UnixTransportBuilder};
-
-    /// Telemetry and observability helpers
-    #[cfg(feature = "telemetry")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "telemetry")))]
-    pub use turbomcp_telemetry::{TelemetryConfig, TelemetryConfigBuilder, TelemetryGuard};
-
-    /// Client types for full-stack development.
-    ///
-    /// `turbomcp_client::ClientCapabilities` is re-exported under the alias
-    /// `ClientCapsConfig` to avoid name-clashing with
-    /// `turbomcp_protocol::ClientCapabilities` (also re-exported at the
-    /// crate root). Users of the prelude get `ClientCapsConfig` for the
-    /// builder-side config and `ClientCapabilities` for the protocol-level
-    /// type.
-    #[cfg(feature = "client-integration")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "client-integration")))]
-    pub use turbomcp_client::{Client, ClientBuilder, ClientCapabilities as ClientCapsConfig};
-
-    // Testing utilities
-    pub use crate::testing::{McpTestClient, McpToolResultAssertions, ToolResultAssertions};
+    pub use turbomcp_macros::{mcp_header, prompt, resource, server, tool};
 }

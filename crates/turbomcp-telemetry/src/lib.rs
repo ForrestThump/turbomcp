@@ -1,148 +1,96 @@
-//! `OpenTelemetry` integration and observability for `TurboMCP` SDK
+//! # turbomcp-telemetry
 //!
-//! This crate provides comprehensive telemetry capabilities for MCP servers and clients:
+//! OpenTelemetry observability for TurboMCP v4: a transport-agnostic
+//! [`TraceContextLayer`] that continues the caller's W3C distributed trace
+//! (propagated over MCP `_meta`, SEP-414) and records **PII-safe** identity
+//! attributes on each request span, plus an optional turnkey OTLP export
+//! pipeline (feature `otlp`).
 //!
-//! - **Distributed Tracing**: OpenTelemetry traces with MCP-specific span attributes
-//! - **Metrics Collection**: Request counts, latencies, error rates with Prometheus export
-//! - **Structured Logging**: JSON-formatted logs correlated with traces
-//! - **Tower Middleware**: Automatic instrumentation for MCP request handling
+//! ## Compose the layer
 //!
-//! # Quick Start
+//! [`TraceContextLayer`] is a [`tower::Layer`] over `Service<JsonRpcMessage>`,
+//! so it wraps a dispatcher like any shared RPC middleware and works identically
+//! under stdio, HTTP, and WS:
 //!
-//! ```rust,ignore
-//! use turbomcp_telemetry::{TelemetryConfig, TelemetryGuard};
+//! ```ignore
+//! use tower::Layer;
+//! use turbomcp_telemetry::TraceContextLayer;
 //!
-//! #[tokio::main]
-//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     // Initialize telemetry with OTLP export
-//!     let config = TelemetryConfig::builder()
-//!         .service_name("my-mcp-server")
-//!         .otlp_endpoint("http://localhost:4317")
-//!         .build();
-//!
-//!     let _guard = config.init()?;
-//!
-//!     // Your MCP server code here...
-//!     Ok(())
-//! }
+//! let traced = TraceContextLayer::new().layer(dispatcher);
+//! // serve `traced` over any transport.
 //! ```
 //!
-//! # Feature Flags
+//! ## Redaction
 //!
-//! - `opentelemetry` - Full OpenTelemetry integration with OTLP export
-//! - `prometheus` - Standalone Prometheus metrics (without OpenTelemetry)
-//! - `tower` - Tower middleware for automatic request instrumentation
-//! - `full` - All features enabled
+//! By default a span records the caller's subject as a stable, non-reversible
+//! hash ([`RedactedSubject`](turbomcp_core::RedactedSubject)) and the claim
+//! *keys* only — never claim values — so emails/org-ids in a JWT never reach
+//! telemetry. Opt into raw subjects with [`SpanPolicy::unredacted`].
 //!
-//! # Architecture
+//! ## Export
 //!
-//! ```text
-//! ┌─────────────────────────────────────────────────────────────┐
-//! │                    TurboMCP Application                      │
-//! ├─────────────────────────────────────────────────────────────┤
-//! │  TelemetryLayer (Tower Middleware)                          │
-//! │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐ │
-//! │  │   Tracing   │  │   Metrics   │  │  Context Propagation │ │
-//! │  └─────────────┘  └─────────────┘  └─────────────────────┘ │
-//! ├─────────────────────────────────────────────────────────────┤
-//! │                    Export Layer                              │
-//! │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐ │
-//! │  │    OTLP     │  │ Prometheus  │  │       Stdout        │ │
-//! │  └─────────────┘  └─────────────┘  └─────────────────────┘ │
-//! └─────────────────────────────────────────────────────────────┘
-//! ```
+//! With the `otlp` feature, [`init_otlp`] builds an OTLP/gRPC exporter and
+//! installs a `tracing` subscriber that exports the layer's spans. Without it,
+//! the spans flow to whatever `tracing` subscriber the host installs.
+#![forbid(unsafe_code)]
+#![warn(missing_docs)]
 
-#![cfg_attr(docsrs, feature(doc_cfg))]
-// Allow missing error/panic docs - telemetry errors are self-documenting through TelemetryError type
-#![allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
+mod layer;
+mod propagation;
 
-mod config;
-mod error;
-mod init;
+pub use layer::{TraceContext, TraceContextLayer};
+pub use propagation::{extract as extract_context, inject as inject_context};
 
-pub mod attributes;
+#[cfg(feature = "otlp")]
+mod otlp;
+#[cfg(feature = "otlp")]
+pub use otlp::{OtlpConfig, TelemetryGuard, init_otlp};
 
-#[cfg(feature = "tower")]
-#[cfg_attr(docsrs, doc(cfg(feature = "tower")))]
-pub mod tower;
-
-#[cfg(feature = "prometheus")]
-#[cfg_attr(docsrs, doc(cfg(feature = "prometheus")))]
-pub mod metrics;
-
-// Re-exports
-pub use config::{TelemetryConfig, TelemetryConfigBuilder};
-pub use error::{TelemetryError, TelemetryResult};
-pub use init::TelemetryGuard;
-
-// Re-export tracing macros for convenience
-pub use tracing::{Instrument, instrument};
-pub use tracing::{debug, error, info, trace, warn};
-pub use tracing::{debug_span, error_span, info_span, trace_span, warn_span};
-
-/// MCP span attribute keys following OpenTelemetry semantic conventions
-pub mod span_attributes {
-    /// MCP method name (e.g., "tools/call", "resources/read")
-    pub const MCP_METHOD: &str = "mcp.method";
-    /// Tool name for tools/call requests
-    pub const MCP_TOOL_NAME: &str = "mcp.tool.name";
-    /// Resource URI for resources/read requests
-    pub const MCP_RESOURCE_URI: &str = "mcp.resource.uri";
-    /// Prompt name for prompts/get requests
-    pub const MCP_PROMPT_NAME: &str = "mcp.prompt.name";
-    /// JSON-RPC request ID
-    pub const MCP_REQUEST_ID: &str = "mcp.request.id";
-    /// MCP session ID
-    pub const MCP_SESSION_ID: &str = "mcp.session.id";
-    /// Client implementation name
-    pub const MCP_CLIENT_NAME: &str = "mcp.client.name";
-    /// Client implementation version
-    pub const MCP_CLIENT_VERSION: &str = "mcp.client.version";
-    /// Server implementation name
-    pub const MCP_SERVER_NAME: &str = "mcp.server.name";
-    /// Server implementation version
-    pub const MCP_SERVER_VERSION: &str = "mcp.server.version";
-    /// Transport type (stdio, http, websocket, tcp, unix)
-    pub const MCP_TRANSPORT: &str = "mcp.transport";
-    /// Protocol version
-    pub const MCP_PROTOCOL_VERSION: &str = "mcp.protocol.version";
-    /// Tenant ID for multi-tenant deployments
-    pub const MCP_TENANT_ID: &str = "mcp.tenant.id";
-    /// User ID from authentication
-    pub const MCP_USER_ID: &str = "mcp.user.id";
-    /// Request duration in milliseconds
-    pub const MCP_DURATION_MS: &str = "mcp.duration_ms";
-    /// Response status (success, error)
-    pub const MCP_STATUS: &str = "mcp.status";
-    /// Error code if request failed
-    pub const MCP_ERROR_CODE: &str = "mcp.error.code";
-    /// Error message if request failed
-    pub const MCP_ERROR_MESSAGE: &str = "mcp.error.message";
+/// How [`TraceContextLayer`] records the caller's identity on a span.
+///
+/// The default is fully redacted (hashed subject, claim keys only) — PII never
+/// reaches telemetry unless you opt out.
+#[derive(Debug, Clone, Copy)]
+pub struct SpanPolicy {
+    /// Record the subject as a stable hash rather than the raw value (default
+    /// `true`).
+    pub redact_subject: bool,
+    /// Record the set of claim *keys* (never values) on the span (default
+    /// `true`).
+    pub record_claim_keys: bool,
 }
 
-/// Prelude module for convenient imports
-pub mod prelude {
-    pub use super::config::{TelemetryConfig, TelemetryConfigBuilder};
-    pub use super::error::{TelemetryError, TelemetryResult};
-    pub use super::init::TelemetryGuard;
-    pub use super::span_attributes;
-    pub use tracing::{Instrument, debug, error, info, instrument, trace, warn};
-
-    #[cfg(feature = "tower")]
-    pub use super::tower::{TelemetryLayer, TelemetryLayerConfig};
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_span_attributes_defined() {
-        // Verify all span attributes are properly defined
-        assert_eq!(span_attributes::MCP_METHOD, "mcp.method");
-        assert_eq!(span_attributes::MCP_TOOL_NAME, "mcp.tool.name");
-        assert_eq!(span_attributes::MCP_RESOURCE_URI, "mcp.resource.uri");
-        assert_eq!(span_attributes::MCP_SESSION_ID, "mcp.session.id");
-        assert_eq!(span_attributes::MCP_TRANSPORT, "mcp.transport");
+impl Default for SpanPolicy {
+    fn default() -> Self {
+        Self {
+            redact_subject: true,
+            record_claim_keys: true,
+        }
     }
+}
+
+impl SpanPolicy {
+    /// Record the raw subject (no hashing). Use only where the subject is not
+    /// considered PII in your telemetry backend. Claim values are still never
+    /// recorded.
+    #[must_use]
+    pub fn unredacted() -> Self {
+        Self {
+            redact_subject: false,
+            record_claim_keys: true,
+        }
+    }
+}
+
+/// Errors from installing the OTLP pipeline (feature `otlp`).
+#[cfg(feature = "otlp")]
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum TelemetryError {
+    /// The OTLP exporter could not be built.
+    #[error("otlp exporter build failed: {0}")]
+    Exporter(String),
+    /// A global `tracing` subscriber was already installed.
+    #[error("subscriber init failed: {0}")]
+    Subscriber(String),
 }

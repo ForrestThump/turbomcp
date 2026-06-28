@@ -1,71 +1,31 @@
 [package]
 name = "turbomcp-core"
-version = "3.1.5"
+version = "4.0.0-alpha.1"
 edition = "2024"
+rust-version = "1.85"
 authors = ["Nicholas Paterno <nick@epistates.com>"]
-description = "Core MCP types and primitives - no_std compatible for WASM targets"
+description = "TurboMCP v4 foundation: ProtocolVersion, JsonRpcMessage, RequestContext, Identity, McpError. no_std + alloc."
 license = "MIT"
 repository = "https://github.com/Epistates/turbomcp"
 homepage = "https://turbomcp.org"
-keywords = ["mcp", "protocol", "types", "no_std", "wasm"]
-categories = ["no-std", "encoding", "parser-implementations"]
-readme = "README.md"
-rust-version = "1.89.0"
+keywords = ["mcp", "protocol", "no_std", "wasm"]
+categories = ["no-std", "encoding"]
 
 [dependencies]
-# Types (single source of truth)
-turbomcp-types = { workspace = true }
-
-# Serialization (no_std compatible with alloc)
-serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
-serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
-
-# no_std compatible HashMap
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
 hashbrown = { version = "0.17", features = ["serde"] }
-
-# Zero-copy serialization (optional)
-rkyv = { version = ">=0.8.13", default-features = false, optional = true, features = [
-    "alloc",
-    "bytecheck",
-    "hashbrown-0_15",
-    "smallvec-1",
-] }
-rancor = { version = "0.1", default-features = false, optional = true, features = ["alloc"] }
-
-# Optional std features (for rich-errors)
-chrono = { version = "0.4", default-features = false, features = ["serde", "clock", "std"], optional = true }
-# UUID v4 for RequestContext::new() request-id generation (std-only; WASM builds
-# skip the UUID path and keep the empty default). Small dep, worth the ergonomics.
-uuid = { version = "1.23", default-features = false, features = ["serde", "v4", "std"], optional = true }
-
-# Base64 for Basic auth parsing (optional, std only)
-base64 = { workspace = true, optional = true }
-
-# Tokio-util for CancellationToken integration (optional, std only). Enabling
-# this provides a blanket `impl Cancellable for tokio_util::sync::CancellationToken`
-# so the server can plug tokio-based cancellation into the unified context.
+# std-only: CancellationToken integration lives behind the `std` feature.
 tokio-util = { workspace = true, optional = true }
 
 [dev-dependencies]
-serde_json = { workspace = true, features = ["std"] }
-criterion = { workspace = true, features = ["html_reports"] }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-
-[[bench]]
-name = "rkyv_zero_copy_benchmark"
-harness = false
-required-features = ["zero-copy"]
+serde_json = { version = "1", features = ["std"] }
 
 [features]
 default = ["std"]
-std = ["serde/std", "serde_json/std", "rkyv?/std", "base64", "uuid", "tokio-util"]
-# Enable rich error context with UUID tracking and timestamps
-rich-errors = ["std", "uuid", "chrono"]
-# WASM-specific optimizations
-wasm = []
-# Zero-copy serialization with rkyv
-zero-copy = ["rkyv", "rancor"]
+std = ["serde/std", "serde_json/std", "dep:tokio-util"]
+# Construct RequestContext in downstream unit tests (F-SC-4 / round-3).
+test-util = []
 
 [package.metadata.docs.rs]
 all-features = true
-rustdoc-args = ["--cfg", "docsrs"]

@@ -1,5 +1,0 @@
-error: expected `impl`
- --> tests/compile_fail/server_on_struct.rs:6:1
-  |
-6 | struct NotAnImpl;
-  | ^^^^^^

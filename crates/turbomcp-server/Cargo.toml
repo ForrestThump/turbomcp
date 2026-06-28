@@ -1,82 +1,31 @@
 [package]
 name = "turbomcp-server"
-version = "3.1.5"
+version = "4.0.0-alpha.1"
 edition = "2024"
+rust-version = "1.85"
 authors = ["Nicholas Paterno <nick@epistates.com>"]
-description = "Production-ready MCP server with zero-boilerplate macros and transport-agnostic design"
+description = "TurboMCP v4 server: McpServerCore + capability traits, MethodRouter, ServerBuilder."
 license = "MIT"
 repository = "https://github.com/Epistates/turbomcp"
 homepage = "https://turbomcp.org"
-keywords = ["mcp", "server", "protocol", "llm", "ai"]
-categories = ["development-tools", "web-programming", "asynchronous"]
-readme = "README.md"
-rust-version = "1.89.0"
 
 [dependencies]
-# Core v3 dependencies
-turbomcp-core = { workspace = true }
-turbomcp-types = { workspace = true }
+turbomcp-core = { workspace = true, features = ["std"] }
 turbomcp-protocol = { workspace = true }
-turbomcp-transport = { workspace = true, optional = true }
-turbomcp-macros = { workspace = true }
-
-# Async runtime
-tokio = { workspace = true }
-tokio-util = { workspace = true }
-futures = "0.3"
-async-trait = "0.1"
-
-# Serialization
+turbomcp-service = { workspace = true }
+tower = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-
-# Logging
 tracing = { workspace = true }
-
-# Utilities
-thiserror = { workspace = true }
-bytes = { workspace = true }
-parking_lot = { workspace = true }
-uuid = { workspace = true }
-dashmap = "6.1"
-
-# HTTP dependencies (optional - for http/websocket features)
-axum = { workspace = true, optional = true }
-tower = { workspace = true, optional = true }
-tower-http = { workspace = true, optional = true }
-http = { version = "1.4", optional = true }
-async-stream = { version = "0.3", optional = true }
-
-# Schema generation
-schemars = { version = "1.2", features = ["chrono04", "uuid1"] }
+uuid = { workspace = true, features = ["v4"] }
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+time = { workspace = true, features = ["std", "formatting"] }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+base64 = { workspace = true }
+rand = { workspace = true }
 
 [dev-dependencies]
-criterion = { workspace = true, features = ["async_tokio"] }
-proptest = "1.11"
-reqwest = { workspace = true }
-
-[features]
-default = ["stdio"]
-
-# Transport features (progressive enhancement)
-stdio = ["dep:turbomcp-transport", "turbomcp-transport/stdio"]
-http = [
-    "dep:turbomcp-transport",
-    "turbomcp-transport/http",
-    "dep:axum",
-    "dep:tower",
-    "dep:tower-http",
-    "dep:http",
-    "dep:async-stream",
-]
-websocket = ["dep:turbomcp-transport", "turbomcp-transport/websocket", "http"]
-tcp = ["dep:turbomcp-transport", "turbomcp-transport/tcp"]
-unix = ["dep:turbomcp-transport", "turbomcp-transport/unix"]
-channel = ["dep:turbomcp-transport"]
-
-# Feature bundles
-all-transports = ["stdio", "http", "websocket", "tcp", "unix", "channel"]
-full = ["all-transports"]
-
-# Experimental features
-experimental-tasks = ["turbomcp-protocol/experimental-tasks"]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }

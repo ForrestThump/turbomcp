@@ -1,132 +1,25 @@
 [package]
 name = "turbomcp-protocol"
-version = "3.1.5"
+version = "4.0.0-alpha.1"
 edition = "2024"
+rust-version = "1.85"
 authors = ["Nicholas Paterno <nick@epistates.com>"]
-description = "Complete MCP protocol implementation with types, traits, context management, and message handling"
+description = "TurboMCP v4 protocol: per-version typed wire modules + VersionDispatcher. no_std-portable types."
 license = "MIT"
 repository = "https://github.com/Epistates/turbomcp"
 homepage = "https://turbomcp.org"
-keywords = ["mcp", "protocol", "jsonrpc", "llm", "ai"]
-categories = ["development-tools", "encoding", "parser-implementations"]
-readme = "README.md"
-rust-version = "1.89.0"
+
+[lib]
+# The generated per-version `types` modules carry the spec's prose docs
+# verbatim; rustdoc misreads their indented/backticked text as Rust doctests.
+# These are @generated and reviewed on regen — run real tests, not doc prose.
+doctest = false
 
 [dependencies]
-# v3.0: Core types with rich error features (UUID, timestamps)
-turbomcp-core = { workspace = true, features = ["rich-errors"] }
-# Canonical MCP type definitions (sampling, elicitation, schemas, etc.)
-turbomcp-types = { workspace = true }
-# v3.0: Wire codec abstraction for JSON-RPC encoding/decoding
-turbomcp-wire = { workspace = true, optional = true }
-
-# Core async - explicit non-workspace entry to scope this lower-layer crate to
-# rt/time/sync/macros only (Cargo forbids default-features=false when inheriting
-# from a workspace dep that doesn't itself set default-features=false).
-tokio = { version = "1.52", default-features = false, features = ["rt", "time", "sync", "macros"] }
-tokio-util = { workspace = true }
-futures = { workspace = true }
-pin-project-lite = { workspace = true }
-
-# Serialization
-serde = { workspace = true }
-serde_json = { workspace = true }
-bytes = { workspace = true }
-msgpacker = { workspace = true, optional = true, features = ["derive"] }
-ciborium = "0.2"
-flate2 = "1.1" # For gzip compression
-
-# Error handling
-thiserror = { workspace = true }
-miette = { workspace = true, optional = true }
-
-# URL encoding/decoding for security validation
-percent-encoding = { workspace = true }
-
-# Observability
-tracing = { workspace = true }
-tracing-opentelemetry = { workspace = true, optional = true }
-metrics = { workspace = true, optional = true }
-
-# Performance
-smallvec = { workspace = true }
-compact_str = { workspace = true }
-arc-swap = { workspace = true }
-
-# SIMD support
-simd-json = { workspace = true, optional = true }
-sonic-rs = { workspace = true, optional = true }
-simdutf8 = { version = "0.1", optional = true }
-
-# Time
-chrono = { workspace = true }
-uuid = { workspace = true }
-
-# Concurrency
-parking_lot = { workspace = true }
-crossbeam = { workspace = true }
-dashmap = { workspace = true }
-
-# Random number generation for jitter
-rand = "0.10"
-
-# Memory-mapped files (optional, requires unsafe feature)
-memmap2 = { version = "0.9.10", optional = true }
-
-# Zero-copy serialization (optional)
-rkyv_crate = { package = "rkyv", version = ">=0.8.13", default-features = false, optional = true, features = ["alloc", "bytecheck"] }
-rancor_crate = { package = "rancor", version = "0.1", default-features = false, optional = true, features = ["alloc"] }
-
-# Validation
-regex = "1.12"
-
-# URL parsing (for icons and URL elicitation - core protocol feature)
-url = "2.5"
-
-[dev-dependencies]
-criterion = { workspace = true }
-tokio-test = { workspace = true }
-pretty_assertions = { workspace = true }
-proptest = "1.11"
+turbomcp-core = { workspace = true, default-features = false }
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
 
 [features]
-default = ["std", "simd"]
-std = []
-simd = ["simd-json", "sonic-rs", "simdutf8"]
-zero-copy = ["bytes/serde"]
-messagepack = ["msgpacker"]
-tracing = ["dep:tracing-opentelemetry"]
-metrics = ["dep:metrics"]
-wasm = []
-fancy-errors = ["miette"]
-mmap = ["memmap2"]  # Enable memory-mapped file support
-lock-free = []  # Enable lock-free data structures (requires unsafe)
-
-# Zero-copy serialization with rkyv (requires turbomcp-core/zero-copy)
-rkyv = ["turbomcp-core/zero-copy", "rkyv_crate", "rancor_crate"]
-# Wire codec integration (enables turbomcp-wire codec abstraction)
-wire = ["dep:turbomcp-wire"]
-# Wire codec with SIMD acceleration
-wire-simd = ["wire", "turbomcp-wire/simd"]
-# Wire codec with MessagePack support
-wire-msgpack = ["wire", "turbomcp-wire/msgpack"]
-
-# =============================================================================
-# MCP 2025-11-25 Specification Notes
-# =============================================================================
-#
-# The following are CORE protocol features (always available, no feature flag):
-# - Icons: Optional metadata on Tool/Resource/Prompt (SEP-973)
-# - URL elicitation: Mode of elicitation for sensitive data (SEP-1036)
-# - Sampling tools: Tool calling in createMessage (SEP-1577)
-# - Enum improvements: Schema refinements for ElicitResult (SEP-1330)
-#
-# These are capability-negotiated at runtime, not compile-time gated.
-# Types are always available for serialization/deserialization.
-#
-# =============================================================================
-# Experimental Features (design may evolve in future protocol versions)
-# =============================================================================
-#
-# Tasks API (SEP-1686) - marked experimental in MCP 2025-11-25 spec
-experimental-tasks = []
+default = ["std"]
+std = ["turbomcp-core/std", "serde/std", "serde_json/std"]

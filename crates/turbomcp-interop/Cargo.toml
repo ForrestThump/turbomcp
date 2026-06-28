@@ -1,0 +1,33 @@
+[package]
+name = "turbomcp-interop"
+version = "4.0.0-alpha.1"
+edition = "2024"
+rust-version = "1.85"
+description = "Cross-SDK interop smoke tests: turbomcp ↔ rmcp (the official Rust MCP SDK)."
+license = "MIT"
+publish = false
+
+# NOTE: this crate is `exclude`d from the parent workspace (see the root
+# Cargo.toml) so the heavy `rmcp` dependency tree stays out of the main
+# lockfile/gate. Run it directly: `cd crates/turbomcp-interop && cargo test`.
+
+[dependencies]
+
+[dev-dependencies]
+turbomcp = { path = "../turbomcp", features = ["client", "http"] }
+turbomcp-service = { path = "../turbomcp-service" }
+turbomcp-transport-stdio = { path = "../turbomcp-transport-stdio" }
+turbomcp-core = { path = "../turbomcp-core", features = ["std"] }
+# The official Rust MCP SDK, from crates.io — interop is tested against the real
+# released SDK, not a local checkout. rmcp's LATEST is 2025-11-25, which is
+# turbomcp's legacy path; interop runs there.
+rmcp = { version = "1.7", features = ["client", "server", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "sync"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
+
+[[bench]]
+name = "sdk_comparison"
+harness = false

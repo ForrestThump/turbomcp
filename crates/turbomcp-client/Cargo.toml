@@ -1,55 +1,35 @@
 [package]
 name = "turbomcp-client"
-
-version = "3.1.5"
-
+version = "4.0.0-alpha.1"
 edition = "2024"
+rust-version = "1.85"
 authors = ["Nicholas Paterno <nick@epistates.com>"]
-description = "MCP client with full protocol support, bidirectional communication, and plugin middleware"
+description = "TurboMCP v4 client: ClientBuilder, ConnectMode probe, MRTR loop, cache layer."
 license = "MIT"
 repository = "https://github.com/Epistates/turbomcp"
 homepage = "https://turbomcp.org"
-keywords = ["mcp", "client", "connection", "recovery", "async"]
-categories = ["development-tools", "network-programming", "asynchronous"]
-readme = "README.md"
-rust-version = "1.89.0"
-
-[dependencies]
-turbomcp-protocol = { workspace = true }
-turbomcp-transport = { workspace = true, default-features = false }
-serde = { workspace = true, features = ["derive"] }
-serde_json = { workspace = true }
-# LLM backend integration
-reqwest = { workspace = true }
-thiserror = { workspace = true }
-tokio = { workspace = true }
-tracing = { workspace = true }
-uuid = { workspace = true }
-# Plugin system dependencies (legacy)
-chrono = { workspace = true, features = ["serde"] }
-# LLM integration dependencies
-futures = { workspace = true }
-
-# Tower middleware (v3.0 - always enabled)
-tower = { workspace = true }
-tower-service = "0.3"
-tower-layer = "0.3"
-futures-util = "0.3"
-parking_lot = "0.12"
-
-[dev-dependencies]
-bytes = { workspace = true }
-tracing-subscriber = { workspace = true }
 
 [features]
-default = ["stdio"]
+# The Streamable HTTP client transport (reqwest + SSE). Off by default; stdio
+# needs no extra deps.
+http = ["dep:reqwest", "dep:eventsource-stream", "dep:futures"]
 
-# Transport features (pass-through to turbomcp-transport)
-stdio = ["turbomcp-transport/stdio"]
-http = ["turbomcp-transport/http"]
-websocket = ["turbomcp-transport/websocket"]
-tcp = ["turbomcp-transport/tcp"]
-unix = ["turbomcp-transport/unix"]
+[dependencies]
+turbomcp-core = { workspace = true, features = ["std"] }
+turbomcp-protocol = { workspace = true }
+turbomcp-codec = { workspace = true }
+turbomcp-service = { workspace = true }
+turbomcp-transport-stdio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync", "time", "process", "io-util", "macros"] }
+reqwest = { workspace = true, optional = true }
+eventsource-stream = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
 
-# Experimental features (pass-through to turbomcp-protocol)
-experimental-tasks = ["turbomcp-protocol/experimental-tasks"]
+[dev-dependencies]
+turbomcp-server = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util"] }

@@ -1,39 +1,117 @@
-//! Server-side context re-exports.
+//! Per-RPC context types.
 //!
-//! `turbomcp-server` used to carry its own `RequestContext` and `McpSession`
-//! trait (with a `to_core_context()` conversion back to `turbomcp-core`'s
-//! weaker type). v3.2 collapses both into the single canonical type defined
-//! in `turbomcp-core`, so `#[tool]` handlers and internal dispatch see the
-//! same context — the one that carries the session handle and exposes
-//! `sample()` / `elicit_form()` / `elicit_url()` / `notify_client()`.
+//! Each handler method receives a *typed* context that wraps the shared
+//! [`RequestContext`] and conditionally exposes capabilities only valid for that
+//! method. The load-bearing example (PLAN §4.4.1): `tools/call` may return an
+//! `InputRequiredResult` (MRTR), so its context carries a [`ClientHandle`];
+//! `tools/list` may not, so its context never will — calling `ctx.client` from
+//! a `list_tools` handler is a *type error*, not a runtime check.
 //!
-//! The `Cancellable` blanket impl for `tokio_util::sync::CancellationToken`
-//! lives in `turbomcp-core` (gated on the `std` feature) so the orphan rule
-//! doesn't force us into a newtype wrapper here.
+//! The MRTR-capable contexts ([`CallToolContext`], [`ReadResourceContext`],
+//! [`GetPromptContext`]) are exactly the three RPCs SEP-2322 allows
+//! `InputRequiredResult` on; the `*list*` and `complete` contexts stay plain
+//! by design. Each is `#[non_exhaustive]`, so promotions are non-breaking.
 
-pub use turbomcp_core::context::{RequestContext, TransportType};
-#[allow(unused_imports)]
-pub use turbomcp_core::session::{Cancellable, McpSession, SessionFuture};
+use crate::logging::LogSender;
+use crate::mrtr::ClientHandle;
+use crate::progress::ProgressReporter;
+use turbomcp_core::RequestContext;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::Arc;
-    use tokio_util::sync::CancellationToken;
+/// Define a per-RPC context that wraps only the shared [`RequestContext`].
+macro_rules! plain_context {
+    ($(#[$attr:meta])* $name:ident, $what:literal) => {
+        #[doc = concat!("Context for `", $what, "`.")]
+        ///
+        /// Wraps the shared per-request metadata. (Not MRTR-capable, so no
+        /// `ClientHandle` — by design, per SEP-2322.)
+        $(#[$attr])*
+        #[derive(Debug, Clone)]
+        #[non_exhaustive]
+        pub struct $name {
+            /// Shared per-request metadata.
+            pub base: RequestContext,
+        }
 
-    #[test]
-    fn cancellation_token_adapts_to_cancellable() {
-        let token = CancellationToken::new();
-        let ctx = RequestContext::new()
-            .with_cancellation_token(Arc::new(token.clone()) as Arc<dyn Cancellable>);
-        assert!(!ctx.is_cancelled());
-        token.cancel();
-        assert!(ctx.is_cancelled());
-    }
-
-    #[test]
-    fn new_generates_uuid_request_id() {
-        let ctx = RequestContext::new();
-        assert!(!ctx.request_id().is_empty());
-    }
+        impl $name {
+            /// Wrap a [`RequestContext`].
+            #[must_use]
+            pub fn new(base: RequestContext) -> Self {
+                Self { base }
+            }
+        }
+    };
 }
+
+/// Define a per-RPC context for a work-doing method: the plain shape plus the
+/// [`ClientHandle`] (MRTR-capable per SEP-2322) and the [`ProgressReporter`].
+/// Handlers calling `ctx.client.elicit(…)` are re-executed from the top on
+/// each round trip — see [`ClientHandle`].
+macro_rules! mrtr_context {
+    ($(#[$attr:meta])* $name:ident, $what:literal) => {
+        #[doc = concat!("Context for `", $what, "` (MRTR-capable, SEP-2322).")]
+        ///
+        /// Wraps the shared per-request metadata plus the client-interaction
+        /// handle and the request's progress reporter.
+        $(#[$attr])*
+        #[derive(Debug, Clone)]
+        #[non_exhaustive]
+        pub struct $name {
+            /// Shared per-request metadata.
+            pub base: RequestContext,
+            /// The handler's channel to the client (elicitation, sampling,
+            /// roots). MRTR on the draft; inline bidi on `2025-11-25`.
+            pub client: ClientHandle,
+            /// Progress reporting for this request; inert unless the request
+            /// carried a `_meta.progressToken`.
+            pub progress: ProgressReporter,
+            /// Structured log messages to the client; inert unless the server
+            /// enabled `logging` and the client opted in.
+            pub log: LogSender,
+        }
+
+        impl $name {
+            /// Wrap a [`RequestContext`] (with no client channel, progress
+            /// token, or log opt-in attached — the dispatcher attaches them
+            /// internally).
+            #[must_use]
+            pub fn new(base: RequestContext) -> Self {
+                Self {
+                    base,
+                    client: ClientHandle::unavailable("no client channel attached"),
+                    progress: ProgressReporter::disabled(),
+                    log: LogSender::disabled(),
+                }
+            }
+
+            /// Attach the request's client-interaction handle.
+            #[must_use]
+            pub(crate) fn with_client(mut self, client: ClientHandle) -> Self {
+                self.client = client;
+                self
+            }
+
+            /// Attach the request's progress reporter.
+            #[must_use]
+            pub(crate) fn with_progress(mut self, progress: ProgressReporter) -> Self {
+                self.progress = progress;
+                self
+            }
+
+            /// Attach the request's log sender.
+            #[must_use]
+            pub(crate) fn with_log(mut self, log: LogSender) -> Self {
+                self.log = log;
+                self
+            }
+        }
+    };
+}
+
+plain_context!(ListToolsContext, "tools/list");
+mrtr_context!(CallToolContext, "tools/call");
+plain_context!(ListResourcesContext, "resources/list");
+plain_context!(ListResourceTemplatesContext, "resources/templates/list");
+mrtr_context!(ReadResourceContext, "resources/read");
+plain_context!(ListPromptsContext, "prompts/list");
+mrtr_context!(GetPromptContext, "prompts/get");
+plain_context!(CompleteContext, "completion/complete");

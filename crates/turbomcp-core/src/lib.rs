@@ -1,326 +1,44 @@
-//! # TurboMCP Core
+//! # turbomcp-core
 //!
-//! Core MCP types and primitives - `no_std` compatible for WASM targets.
+//! Foundation layer for TurboMCP v4: the cross-version-stable types every other
+//! crate builds on. `no_std + alloc` (compiles on `wasm32`), with `std`-gated
+//! ergonomics (awaitable cancellation, std error integration).
 //!
-//! This crate provides the foundational types for the Model Context Protocol (MCP)
-//! that can be used in `no_std` environments including WebAssembly.
+//! ## What lives here
 //!
-//! ## Features
+//! - [`ProtocolVersion`] — the single version representation (wire string
+//!   `"2025-11-25"` … `"DRAFT-2026-v1"`).
+//! - [`JsonRpcMessage`] and its envelope ([`JsonRpcRequest`],
+//!   [`JsonRpcResponse`], [`JsonRpcNotification`], [`JsonRpcError`],
+//!   [`RequestId`]). No batches.
+//! - [`McpError`] / [`McpResult`] — the unified error type and its JSON-RPC ↔
+//!   HTTP mapping.
+//! - [`Identity`] — who made the request (redaction-aware `Debug`).
+//! - [`RequestContext`] — read-only request metadata + [`Extensions`] type-map.
+//! - [`CancellationToken`] — always-present per-request cancellation.
+//! - [`meta`] — `_meta` well-known keys and propagation policy.
 //!
-//! - `std` (default): Enable standard library support, including richer error types
-//! - `rich-errors`: Enable UUID-based error tracking (requires `std`)
-//! - `wasm`: Enable WASM-specific optimizations
-//! - `zero-copy`: Enable rkyv zero-copy serialization for internal message passing
-//!
-//! ## Unified Handler Trait
-//!
-//! The [`McpHandler`] trait is the core abstraction for MCP servers. It works on
-//! both native and WASM targets through platform-adaptive bounds:
-//!
-//! ```rust,ignore
-//! use turbomcp_core::{McpHandler, RequestContext};
-//! use turbomcp_types::*;
-//!
-//! #[derive(Clone)]
-//! struct MyServer;
-//!
-//! impl McpHandler for MyServer {
-//!     fn server_info(&self) -> ServerInfo {
-//!         ServerInfo::new("my-server", "1.0.0")
-//!     }
-//!     // ... other methods
-//! }
-//! ```
-//!
-//! ## Platform-Adaptive Bounds
-//!
-//! The [`MaybeSend`] and [`MaybeSync`] marker traits enable unified code:
-//! - **Native**: Requires `Send + Sync` for multi-threaded executors
-//! - **WASM**: No thread safety requirements (single-threaded)
-//!
-//! ## no_std Usage
-//!
-//! ```toml
-//! [dependencies]
-//! turbomcp-core = { version = "3.0", default-features = false }
-//! ```
-//!
-//! ## Module Organization
-//!
-//! - [`auth`]: Authentication traits and types (portable across native/WASM)
-//! - [`handler`]: Unified MCP handler trait
-//! - [`context`]: Request context types
-//! - [`marker`]: Platform-adaptive marker traits
-//! - [`error`]: Error types and handling
-//! - [`jsonrpc`]: JSON-RPC 2.0 types
-//!
-//! MCP protocol types (tools, resources, prompts, capabilities, etc.) live in
-//! [`turbomcp_types`] and are re-exported from this crate's root.
-//!
-//! ## Example
-//!
-//! ```rust
-//! use turbomcp_core::{Tool, ToolInputSchema};
-//! use turbomcp_core::error::{McpError, ErrorKind};
-//!
-//! // Create a tool definition
-//! let tool = Tool {
-//!     name: "calculator".into(),
-//!     description: Some("Performs calculations".into()),
-//!     input_schema: ToolInputSchema::default(),
-//!     ..Default::default()
-//! };
-//! ```
-
+//! Per-version *semantic* wire types (`CallToolRequest`, …) are codegenned into
+//! `turbomcp-protocol`, not here.
 #![cfg_attr(not(feature = "std"), no_std)]
-#![warn(
-    missing_docs,
-    missing_debug_implementations,
-    rust_2018_idioms,
-    unreachable_pub
-)]
-#![cfg_attr(docsrs, feature(doc_cfg))]
+#![forbid(unsafe_code)]
+#![warn(missing_docs)]
 
 extern crate alloc;
 
-// Core modules - unified v3 architecture
-pub mod auth;
-pub mod context;
-pub mod error;
-pub mod handler;
-pub mod jsonrpc;
-pub mod marker;
-pub mod response;
-pub mod router;
-pub mod security;
-pub mod session;
+mod cancellation;
+mod context;
+mod error;
+mod identity;
+mod jsonrpc;
+pub mod meta;
+mod protocol_version;
 
-/// Zero-copy message types using rkyv serialization.
-///
-/// This module is only available when the `zero-copy` feature is enabled.
-/// It provides internal message types optimized for zero-copy deserialization.
-#[cfg(feature = "zero-copy")]
-#[cfg_attr(docsrs, doc(cfg(feature = "zero-copy")))]
-pub mod rkyv_types;
-
-// Re-export commonly used types at crate root
-pub use error::{ErrorKind, McpError, McpResult};
+pub use cancellation::CancellationToken;
+pub use context::{Extensions, Implementation, LogLevel, RequestContext, TraceContext};
+pub use error::{McpError, McpResult};
+pub use identity::{Claims, Identity, IdentityClaims, RedactedSubject};
 pub use jsonrpc::{
-    // Strict typed API
-    JSONRPC_VERSION,
-    JsonRpcError,
-    JsonRpcErrorCode,
-    // Wire format types for routers/transports
-    JsonRpcIncoming,
-    JsonRpcNotification,
-    JsonRpcOutgoing,
-    JsonRpcRequest,
-    JsonRpcResponse,
-    JsonRpcVersion,
-    RequestId,
-    ResponseId,
+    JsonRpcError, JsonRpcMessage, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, RequestId,
 };
-pub use response::{Image, IntoToolError, IntoToolResponse, Json, Text, ToolError};
-pub use security::{
-    DANGEROUS_URI_SCHEMES, DEFAULT_MAX_STRING_LENGTH, DEFAULT_MAX_URI_LENGTH, InputLimits,
-    InputValidationError, check_uri_scheme_safety, sanitize_error_message,
-};
-
-// Re-export unified v3 architecture types
-pub use auth::{
-    AuthError, Authenticator, Credential, CredentialExtractor, HeaderExtractor, JwtAlgorithm,
-    JwtConfig, Principal, StandardClaims,
-};
-pub use context::{RequestContext, TransportType};
-pub use handler::McpHandler;
-pub use marker::{MaybeSend, MaybeSync};
-pub use session::{Cancellable, McpSession, SessionFuture};
-
-// Re-export types from turbomcp-types for convenience
-pub use turbomcp_types::{
-    // Content types
-    Annotations,
-    AudioContent,
-    Content,
-    EmbeddedResource,
-    // Definition types
-    Icon,
-    ImageContent,
-    // Traits
-    IntoPromptResult,
-    IntoResourceResult,
-    IntoToolResult,
-    Message,
-    Prompt,
-    PromptArgument,
-    // Result types
-    PromptResult,
-    Resource,
-    ResourceAnnotations,
-    ResourceContents,
-    ResourceResult,
-    ResourceTemplate,
-    Role,
-    ServerInfo,
-    TextContent,
-    Tool,
-    ToolAnnotations,
-    ToolInputSchema,
-    ToolResult,
-};
-
-/// MCP Protocol version supported by this SDK (latest official spec).
-///
-/// This is the canonical version string. For typed usage, see
-/// [`turbomcp_types::ProtocolVersion::LATEST`].
-pub const PROTOCOL_VERSION: &str = "2025-11-25";
-
-/// Supported protocol version strings.
-///
-/// For typed usage, see [`turbomcp_types::ProtocolVersion::STABLE`].
-pub const SUPPORTED_VERSIONS: &[&str] = &["2025-06-18", "2025-11-25"];
-
-/// Maximum message size in bytes (1MB)
-pub const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
-
-/// Default timeout for operations in milliseconds
-pub const DEFAULT_TIMEOUT_MS: u64 = 30_000;
-
-/// SDK version
-pub const SDK_VERSION: &str = env!("CARGO_PKG_VERSION");
-
-/// SDK name
-pub const SDK_NAME: &str = "turbomcp";
-
-/// Protocol feature constants
-pub mod features {
-    /// Tool calling capability
-    pub const TOOLS: &str = "tools";
-    /// Prompt capability
-    pub const PROMPTS: &str = "prompts";
-    /// Resource capability
-    pub const RESOURCES: &str = "resources";
-    /// Logging capability
-    pub const LOGGING: &str = "logging";
-    /// Progress notifications
-    pub const PROGRESS: &str = "progress";
-    /// Sampling capability
-    pub const SAMPLING: &str = "sampling";
-    /// Roots capability
-    pub const ROOTS: &str = "roots";
-}
-
-/// Protocol method names (single source of truth)
-pub mod methods {
-    // Initialization
-    /// Initialize handshake method
-    pub const INITIALIZE: &str = "initialize";
-    /// Initialized notification method
-    pub const INITIALIZED: &str = "notifications/initialized";
-
-    // Tools
-    /// List available tools method
-    pub const LIST_TOOLS: &str = "tools/list";
-    /// Call a specific tool method
-    pub const CALL_TOOL: &str = "tools/call";
-
-    // Prompts
-    /// List available prompts method
-    pub const LIST_PROMPTS: &str = "prompts/list";
-    /// Get a specific prompt method
-    pub const GET_PROMPT: &str = "prompts/get";
-
-    // Resources
-    /// List available resources method
-    pub const LIST_RESOURCES: &str = "resources/list";
-    /// List available resource templates method
-    pub const LIST_RESOURCE_TEMPLATES: &str = "resources/templates/list";
-    /// Read a specific resource method
-    pub const READ_RESOURCE: &str = "resources/read";
-    /// Subscribe to resource updates method
-    pub const SUBSCRIBE: &str = "resources/subscribe";
-    /// Unsubscribe from resource updates method
-    pub const UNSUBSCRIBE: &str = "resources/unsubscribe";
-    /// Resource updated notification
-    pub const RESOURCE_UPDATED: &str = "notifications/resources/updated";
-    /// Resource list changed notification
-    pub const RESOURCE_LIST_CHANGED: &str = "notifications/resources/list_changed";
-
-    // Logging
-    /// Set logging level method
-    pub const SET_LEVEL: &str = "logging/setLevel";
-    /// Log message notification
-    pub const LOG_MESSAGE: &str = "notifications/message";
-
-    // Progress
-    /// Progress update notification
-    pub const PROGRESS: &str = "notifications/progress";
-
-    // Sampling
-    /// Create sampling message method
-    pub const CREATE_MESSAGE: &str = "sampling/createMessage";
-
-    // Roots
-    /// List directory roots method
-    pub const LIST_ROOTS: &str = "roots/list";
-    /// Roots list changed notification
-    pub const ROOTS_LIST_CHANGED: &str = "notifications/roots/list_changed";
-}
-
-/// Protocol error codes (JSON-RPC standard + MCP extensions)
-pub mod error_codes {
-    /// Parse error (-32700)
-    pub const PARSE_ERROR: i32 = -32700;
-    /// Invalid request (-32600)
-    pub const INVALID_REQUEST: i32 = -32600;
-    /// Method not found (-32601)
-    pub const METHOD_NOT_FOUND: i32 = -32601;
-    /// Invalid params (-32602)
-    pub const INVALID_PARAMS: i32 = -32602;
-    /// Internal error (-32603)
-    pub const INTERNAL_ERROR: i32 = -32603;
-    /// URL elicitation required (-32042)
-    pub const URL_ELICITATION_REQUIRED: i32 = -32042;
-    /// Tool not found (-32001)
-    pub const TOOL_NOT_FOUND: i32 = -32001;
-    /// Tool execution error (-32002)
-    pub const TOOL_EXECUTION_ERROR: i32 = -32002;
-    /// Prompt not found (-32003)
-    pub const PROMPT_NOT_FOUND: i32 = -32003;
-    /// Resource not found (-32004)
-    pub const RESOURCE_NOT_FOUND: i32 = -32004;
-    /// Resource access denied (-32005)
-    pub const RESOURCE_ACCESS_DENIED: i32 = -32005;
-    /// Capability not supported (-32006)
-    pub const CAPABILITY_NOT_SUPPORTED: i32 = -32006;
-    /// Protocol version mismatch (-32007)
-    pub const PROTOCOL_VERSION_MISMATCH: i32 = -32007;
-    /// Authentication required (-32008)
-    pub const AUTHENTICATION_REQUIRED: i32 = -32008;
-    /// Rate limited (-32009)
-    pub const RATE_LIMITED: i32 = -32009;
-    /// Server overloaded (-32010)
-    pub const SERVER_OVERLOADED: i32 = -32010;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_version_constants() {
-        assert_eq!(PROTOCOL_VERSION, "2025-11-25");
-        assert!(SUPPORTED_VERSIONS.contains(&PROTOCOL_VERSION));
-        // Latest version is last in the list (oldest to newest)
-        assert_eq!(
-            SUPPORTED_VERSIONS[SUPPORTED_VERSIONS.len() - 1],
-            PROTOCOL_VERSION
-        );
-    }
-
-    #[test]
-    fn test_size_constants() {
-        assert_eq!(MAX_MESSAGE_SIZE, 1024 * 1024);
-        assert_eq!(DEFAULT_TIMEOUT_MS, 30_000);
-    }
-}
+pub use protocol_version::ProtocolVersion;
