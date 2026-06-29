@@ -63,7 +63,7 @@ fn draft_params(extra: Value) -> Value {
     let mut obj = extra.as_object().cloned().unwrap_or_default();
     obj.insert(
         "_meta".into(),
-        json!({ "io.modelcontextprotocol/protocolVersion": "DRAFT-2026-v1" }),
+        json!({ "io.modelcontextprotocol/protocolVersion": "2026-07-28" }),
     );
     Value::Object(obj)
 }

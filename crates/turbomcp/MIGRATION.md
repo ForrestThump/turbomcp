@@ -49,7 +49,7 @@ struct Stats { count: u64 }
 
 (On the `2025-11-25` wire `structuredContent` must be an object, so a `Json<T>`
 serializing to a scalar/array is carried in the text mirror only there; the
-`DRAFT-2026-v1` wire accepts any JSON value.)
+`2026-07-28` wire accepts any JSON value.)
 
 ## Error constructors
 
@@ -95,7 +95,7 @@ to keep in sync — it cannot drift from the implementation.
 
 ## Two protocol versions, neutral handlers
 
-One server answers both `2025-11-25` and the `DRAFT-2026-v1` draft. Handlers
+One server answers both `2025-11-25` and the `2026-07-28` draft. Handlers
 speak version-neutral types (`turbomcp::neutral`); the version-specific wire
 shapes are conversions applied at the edges, not changes to your signatures.
 Most servers never touch the wire types directly.
@@ -121,7 +121,7 @@ needs rethinking rather than a mechanical port:
 v3 surfaced Tasks one way. In v4 they split by protocol version:
 
 - `2025-11-25`: Tasks are **core** — enable with `ServerBuilder::with_task_support()`.
-- `DRAFT-2026-v1`: Tasks are an **extension** (`io.modelcontextprotocol/tasks`,
+- `2026-07-28`: Tasks are an **extension** (`io.modelcontextprotocol/tasks`,
   SEP-2663) — enable the `ext-tasks` feature and register
   `TasksExtension` with `ServerBuilder::with_extension(...)`. The draft is
   session-less and server-directed (`resultType: "task"`, `tasks/get|update|cancel`,

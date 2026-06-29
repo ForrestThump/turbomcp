@@ -4,7 +4,7 @@
 //! `ctx.client.elicit(…)`. The same handler works on **both protocol
 //! versions** without changes:
 //!
-//! - `DRAFT-2026-v1` (MRTR, SEP-2322): the first call answers
+//! - `2026-07-28` (MRTR, SEP-2322): the first call answers
 //!   `InputRequiredResult`; the client gathers the user's answer and retries
 //!   the call with `inputResponses`, re-running the handler from the top —
 //!   keep elicit keys stable and pre-elicit work idempotent.

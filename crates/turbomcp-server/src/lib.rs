@@ -12,7 +12,7 @@
 //!   routes to the typed handler, and serializes the response. All per-version
 //!   branching is concentrated here.
 //!
-//! Both protocol paths are live: the modern `DRAFT-2026-v1` stateless path and
+//! Both protocol paths are live: the modern `2026-07-28` stateless path and
 //! the legacy `2025-11-25` stateful path (`initialize` handshake +
 //! [`SessionStore`]; see [`LegacySessionAdapter`] for byte-pipe transports).
 #![forbid(unsafe_code)]
@@ -149,7 +149,7 @@ mod tests {
 
     /// Build draft `_meta` carrying the per-request protocol version.
     fn draft_meta() -> serde_json::Value {
-        json!({ "io.modelcontextprotocol/protocolVersion": "DRAFT-2026-v1" })
+        json!({ "io.modelcontextprotocol/protocolVersion": "2026-07-28" })
     }
 
     async fn call(svc: &mut VersionDispatcher<Calculator>, req: JsonRpcRequest) -> JsonRpcMessage {
@@ -174,7 +174,7 @@ mod tests {
         assert_eq!(result["capabilities"]["tools"]["listChanged"], true);
         assert_eq!(result["resultType"], "complete");
         let versions = result["supportedVersions"].as_array().unwrap();
-        assert!(versions.iter().any(|v| v == "DRAFT-2026-v1"));
+        assert!(versions.iter().any(|v| v == "2026-07-28"));
         assert!(versions.iter().any(|v| v == "2025-11-25"));
         assert_eq!(result["instructions"], "A demo calculator server.");
     }

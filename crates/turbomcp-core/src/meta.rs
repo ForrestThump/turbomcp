@@ -217,10 +217,10 @@ mod tests {
     #[test]
     fn extracts_draft_version() {
         let mut meta = Map::new();
-        meta.insert(keys::PROTOCOL_VERSION.into(), json!("DRAFT-2026-v1"));
+        meta.insert(keys::PROTOCOL_VERSION.into(), json!("2026-07-28"));
         assert_eq!(
             extract_protocol_version(&meta),
-            Some(ProtocolVersion::Draft2026V1)
+            Some(ProtocolVersion::Draft)
         );
     }
 

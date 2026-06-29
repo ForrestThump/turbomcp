@@ -6,7 +6,7 @@
 //! the `io.modelcontextprotocol/tasks` capability gets a `CreateTaskResult`
 //! (`resultType: "task"`) immediately and polls `tasks/get` for the outcome; a
 //! client that doesn't runs the tool synchronously. (Run with
-//! `--features ext-tasks`; speak the modern `DRAFT-2026-v1` path.)
+//! `--features ext-tasks`; speak the modern `2026-07-28` path.)
 //!
 //! ```text
 //! cargo run -p turbomcp --example tasks --features ext-tasks

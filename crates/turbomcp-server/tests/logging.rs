@@ -101,7 +101,7 @@ async fn run(frames: Vec<Value>, logging: bool) -> Vec<Value> {
 }
 
 fn draft_call(id: u64, meta_extra: Value) -> Value {
-    let mut meta = json!({ "io.modelcontextprotocol/protocolVersion": "DRAFT-2026-v1" });
+    let mut meta = json!({ "io.modelcontextprotocol/protocolVersion": "2026-07-28" });
     if let (Some(m), Some(extra)) = (meta.as_object_mut(), meta_extra.as_object()) {
         for (k, v) in extra {
             m.insert(k.clone(), v.clone());
@@ -254,7 +254,7 @@ async fn legacy_set_level_rejections() {
             "jsonrpc": "2.0", "id": 1, "method": "logging/setLevel",
             "params": {
                 "level": "info",
-                "_meta": { "io.modelcontextprotocol/protocolVersion": "DRAFT-2026-v1" },
+                "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28" },
             }
         })],
         true,

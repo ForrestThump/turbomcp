@@ -1,6 +1,6 @@
 //! TurboMCP v4 Tasks extension — `io.modelcontextprotocol/tasks` (SEP-2663).
 //!
-//! The draft (`DRAFT-2026-v1`) moves Tasks out of the core protocol into an
+//! The draft (`2026-07-28`) moves Tasks out of the core protocol into an
 //! **official extension**: a server may answer a `tools/call` with an
 //! asynchronous *task handle* ([`CreateTaskResult`](wire::CreateTaskResult),
 //! `resultType: "task"`) instead of a final result, and the client polls

@@ -816,7 +816,7 @@ impl CompleteParams {
     }
 }
 
-// ---- neutral → DRAFT-2026-v1 wire conversions --------------------------------
+// ---- neutral → 2026-07-28 wire conversions --------------------------------
 
 impl From<Content> for draft::ContentBlock {
     fn from(c: Content) -> Self {

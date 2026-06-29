@@ -1,6 +1,6 @@
 //! Draft Tasks extension wire types (SEP-2663).
 //!
-//! The core `DRAFT-2026-v1` schema defines none of these — the extension owns
+//! The core `2026-07-28` schema defines none of these — the extension owns
 //! its wire types (PLAN §12). They are deliberately serde-(de)serializable on
 //! both ends: the server serializes them into responses/notifications, and a
 //! client deserializes them while polling. Field renames follow the spec's

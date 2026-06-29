@@ -28,7 +28,7 @@ impl Geo {
 }
 
 fn draft_meta() -> serde_json::Value {
-    json!({ "io.modelcontextprotocol/protocolVersion": "DRAFT-2026-v1" })
+    json!({ "io.modelcontextprotocol/protocolVersion": "2026-07-28" })
 }
 
 async fn call(req: JsonRpcRequest) -> serde_json::Value {

@@ -58,7 +58,7 @@ impl WithTools for Calculator {
     }
 }
 
-const DRAFT_META: &str = r#"{"io.modelcontextprotocol/protocolVersion":"DRAFT-2026-v1"}"#;
+const DRAFT_META: &str = r#"{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}"#;
 
 fn app(config: HttpConfig) -> axum::Router {
     let dispatcher = VersionDispatcher::new(Calculator, MethodRouter::new().with_tools());

@@ -53,7 +53,7 @@ impl WithTools for Calculator {
     }
 }
 
-const DRAFT_META: &str = r#"{"io.modelcontextprotocol/protocolVersion":"DRAFT-2026-v1"}"#;
+const DRAFT_META: &str = r#"{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}"#;
 
 #[tokio::test]
 async fn server_handles_discover_list_and_call_over_stdio_framing() {

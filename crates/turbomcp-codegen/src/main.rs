@@ -5,7 +5,7 @@
 //! ```
 //!
 //! Applies the [`normalize`] `allOf`-flattening pre-pass (AUDIT_FINDINGS.md F14)
-//! so both the `2025-11-25` and `DRAFT-2026-v1` schemas generate compiling Rust.
+//! so both the `2025-11-25` and `2026-07-28` schemas generate compiling Rust.
 //! Output is checked in and reviewed on each spec update; this binary is not in
 //! the user dependency graph.
 #![forbid(unsafe_code)]

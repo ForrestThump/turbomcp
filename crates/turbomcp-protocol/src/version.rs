@@ -1,6 +1,6 @@
 //! Per-request protocol-version extraction (the modern, stateless path).
 //!
-//! In `DRAFT-2026-v1` the version travels in each request's
+//! In `2026-07-28` the version travels in each request's
 //! `params._meta["io.modelcontextprotocol/protocolVersion"]` rather than being
 //! negotiated once at `initialize`. This module reads that field; the
 //! `VersionDispatcher` (in `turbomcp-server`) turns the result into a routing
@@ -31,11 +31,11 @@ mod tests {
     fn reads_draft_version_from_meta() {
         let params = json!({
             "name": "echo",
-            "_meta": { "io.modelcontextprotocol/protocolVersion": "DRAFT-2026-v1" }
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28" }
         });
         assert_eq!(
             request_protocol_version(Some(&params)),
-            Some(ProtocolVersion::Draft2026V1)
+            Some(ProtocolVersion::Draft)
         );
     }
 

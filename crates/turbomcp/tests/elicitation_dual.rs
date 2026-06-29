@@ -46,7 +46,7 @@ impl Deleter {
 
 fn draft_meta() -> Value {
     json!({
-        "io.modelcontextprotocol/protocolVersion": "DRAFT-2026-v1",
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
         "io.modelcontextprotocol/clientCapabilities": { "elicitation": {} },
     })
 }

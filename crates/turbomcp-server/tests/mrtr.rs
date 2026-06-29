@@ -134,7 +134,7 @@ fn dispatcher() -> VersionDispatcher<Asker> {
 /// Draft `_meta` declaring the elicitation capability.
 fn meta() -> Value {
     json!({
-        "io.modelcontextprotocol/protocolVersion": "DRAFT-2026-v1",
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
         "io.modelcontextprotocol/clientInfo": { "name": "mrtr-client", "version": "1" },
         "io.modelcontextprotocol/clientCapabilities": { "elicitation": {} },
     })
@@ -324,7 +324,7 @@ async fn undeclared_elicitation_capability_is_an_error_not_input_required() {
     let mut svc = dispatcher();
     // Same request, but the client declares NO capabilities.
     let bare_meta = json!({
-        "io.modelcontextprotocol/protocolVersion": "DRAFT-2026-v1",
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
         "io.modelcontextprotocol/clientCapabilities": {},
     });
     let out = call(

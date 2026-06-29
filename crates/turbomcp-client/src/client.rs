@@ -51,7 +51,7 @@ pub enum ConnectMode {
     /// fall back to the legacy `initialize` handshake. The default.
     #[default]
     Auto,
-    /// Force the modern, stateless `DRAFT-2026-v1` path (`server/discover`).
+    /// Force the modern, stateless `2026-07-28` path (`server/discover`).
     Modern,
     /// Force the legacy `2025-11-25` path (`initialize` + `notifications/initialized`).
     Legacy,
@@ -523,7 +523,7 @@ impl Client {
         method: &str,
         mut params: Map<String, Value>,
     ) -> ClientResult<Value> {
-        if self.version == ProtocolVersion::Draft2026V1 {
+        if self.version == ProtocolVersion::Draft {
             // Merge the version envelope into any existing `_meta` (e.g. the
             // `#[mcp_header]` mirror signal) rather than clobbering it.
             let meta = params
@@ -545,7 +545,7 @@ impl Client {
         D: DeserializeOwned + Into<N>,
         L: DeserializeOwned + Into<N>,
     {
-        if self.version == ProtocolVersion::Draft2026V1 {
+        if self.version == ProtocolVersion::Draft {
             serde_json::from_value::<D>(value)
                 .map(Into::into)
                 .map_err(|e| ClientError::Decode(e.to_string()))

@@ -56,7 +56,7 @@ async fn server_merges_header_param_supplied_only_via_header() {
             "params": {
                 "name": "locate",
                 "arguments": { "city": "SF" },
-                "_meta": { "io.modelcontextprotocol/protocolVersion": "DRAFT-2026-v1" }
+                "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28" }
             }
         }))
         .send()

@@ -7,7 +7,7 @@
 //! ## What lives here
 //!
 //! - [`ProtocolVersion`] — the single version representation (wire string
-//!   `"2025-11-25"` … `"DRAFT-2026-v1"`).
+//!   `"2025-11-25"` … `"2026-07-28"`).
 //! - [`JsonRpcMessage`] and its envelope ([`JsonRpcRequest`],
 //!   [`JsonRpcResponse`], [`JsonRpcNotification`], [`JsonRpcError`],
 //!   [`RequestId`]). No batches.

@@ -2,13 +2,18 @@
 //!
 //! Ground truth (verified against `reference/modelcontextprotocol/schema/`):
 //! the published versions are `2024-11-05`, `2025-03-26`, `2025-06-18`,
-//! `2025-11-25`, and the in-development draft whose wire string is
-//! **`DRAFT-2026-v1`** (`schema/draft/schema.ts:LATEST_PROTOCOL_VERSION`).
+//! `2025-11-25`, and the in-development draft. Upstream's
+//! `schema/draft/schema.ts` now pins `LATEST_PROTOCOL_VERSION = "2026-07-28"`,
+//! so that is the wire string real draft-tracking peers negotiate — even though
+//! the schema *content* still lives in `schema/draft/` until the dated directory
+//! freezes (scheduled ~2026-07-28).
 //!
-//! The earlier plan hardcoded a fabricated `2026-07-28` date; that string
-//! appears nowhere in the spec and would route every real draft client into
-//! [`ProtocolVersion::Unknown`]. The variant is [`ProtocolVersion::Draft2026V1`]
-//! and its wire value is provisional — bump it at spec freeze.
+//! The draft is modeled as a *channel* — [`ProtocolVersion::Draft`], not a dated
+//! variant — because the spec's release date can still slip. We keep a stable
+//! name and map only its wire string to the spec's current
+//! `LATEST_PROTOCOL_VERSION`. At freeze we add the dated `V2026_07_28` variant,
+//! repoint [`ProtocolVersion::LATEST`], and deprecate [`ProtocolVersion::Draft`]
+//! in favor of it.
 
 use alloc::string::{String, ToString};
 
@@ -16,7 +21,7 @@ use alloc::string::{String, ToString};
 ///
 /// `#[non_exhaustive]` so new versions can be added without a major bump.
 /// Serializes to / deserializes from the wire string (e.g. `"2025-11-25"`,
-/// `"DRAFT-2026-v1"`); unrecognized strings round-trip through
+/// `"2026-07-28"`); unrecognized strings round-trip through
 /// [`ProtocolVersion::Unknown`] rather than failing to parse.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(from = "String", into = "String")]
@@ -30,20 +35,23 @@ pub enum ProtocolVersion {
     V2025_06_18,
     /// `2025-11-25` — current stable; stateful, core Tasks, `initialize`/`ping`.
     V2025_11_25,
-    /// `DRAFT-2026-v1` — in-development stateless model (`server/discover`,
-    /// `subscriptions/listen`, MRTR). **Provisional wire string.**
-    Draft2026V1,
+    /// The in-development **draft** channel — stateless model (`server/discover`,
+    /// `subscriptions/listen`, MRTR). Its wire string tracks the draft's
+    /// `LATEST_PROTOCOL_VERSION` (currently `"2026-07-28"`); the variant is named
+    /// for the channel rather than the date so it survives a slip, and will be
+    /// deprecated in favor of a dated variant once the spec freezes.
+    Draft,
     /// Any version string this build does not recognize.
     Unknown(String),
 }
 
 impl ProtocolVersion {
     /// The latest version this build targets.
-    pub const LATEST: Self = Self::Draft2026V1;
+    pub const LATEST: Self = Self::Draft;
 
     /// Versions v4 actively supports as first-class (others may still be
     /// negotiated/named, but are not first-class dispatch targets).
-    pub const SUPPORTED: &'static [Self] = &[Self::V2025_11_25, Self::Draft2026V1];
+    pub const SUPPORTED: &'static [Self] = &[Self::V2025_11_25, Self::Draft];
 
     /// The wire string for this version.
     #[must_use]
@@ -53,7 +61,7 @@ impl ProtocolVersion {
             Self::V2025_03_26 => "2025-03-26",
             Self::V2025_06_18 => "2025-06-18",
             Self::V2025_11_25 => "2025-11-25",
-            Self::Draft2026V1 => "DRAFT-2026-v1",
+            Self::Draft => "2026-07-28",
             Self::Unknown(s) => s,
         }
     }
@@ -67,7 +75,7 @@ impl ProtocolVersion {
             "2025-03-26" => Self::V2025_03_26,
             "2025-06-18" => Self::V2025_06_18,
             "2025-11-25" => Self::V2025_11_25,
-            "DRAFT-2026-v1" => Self::Draft2026V1,
+            "2026-07-28" => Self::Draft,
             other => Self::Unknown(other.to_string()),
         }
     }
@@ -94,7 +102,7 @@ impl From<String> for ProtocolVersion {
             "2025-03-26" => Self::V2025_03_26,
             "2025-06-18" => Self::V2025_06_18,
             "2025-11-25" => Self::V2025_11_25,
-            "DRAFT-2026-v1" => Self::Draft2026V1,
+            "2026-07-28" => Self::Draft,
             _ => Self::Unknown(s),
         }
     }
@@ -118,7 +126,7 @@ mod tests {
     fn roundtrip_known_versions() {
         for v in [
             ProtocolVersion::V2025_11_25,
-            ProtocolVersion::Draft2026V1,
+            ProtocolVersion::Draft,
             ProtocolVersion::V2025_06_18,
         ] {
             let s = serde_json::to_string(&v).unwrap();
@@ -129,10 +137,10 @@ mod tests {
 
     #[test]
     fn draft_wire_string_is_correct() {
-        assert_eq!(ProtocolVersion::Draft2026V1.as_str(), "DRAFT-2026-v1");
+        assert_eq!(ProtocolVersion::Draft.as_str(), "2026-07-28");
         assert_eq!(
-            serde_json::to_string(&ProtocolVersion::Draft2026V1).unwrap(),
-            "\"DRAFT-2026-v1\""
+            serde_json::to_string(&ProtocolVersion::Draft).unwrap(),
+            "\"2026-07-28\""
         );
     }
 
@@ -146,7 +154,7 @@ mod tests {
     #[test]
     fn supported_set() {
         assert!(ProtocolVersion::V2025_11_25.is_supported());
-        assert!(ProtocolVersion::Draft2026V1.is_supported());
+        assert!(ProtocolVersion::Draft.is_supported());
         assert!(!ProtocolVersion::V2024_11_05.is_supported());
     }
 }

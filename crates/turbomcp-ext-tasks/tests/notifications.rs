@@ -61,7 +61,7 @@ fn meta(conn: &str, declare: bool) -> Value {
     let mut m = serde_json::Map::new();
     m.insert(
         "io.modelcontextprotocol/protocolVersion".into(),
-        json!("DRAFT-2026-v1"),
+        json!("2026-07-28"),
     );
     m.insert("io.turbomcp.internal/connectionId".into(), json!(conn));
     if declare {

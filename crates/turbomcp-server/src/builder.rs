@@ -92,7 +92,7 @@ impl<S: McpServerCore> ServerBuilder<S> {
 
     /// Register a draft [`Extension`] (PLAN D10): advertised in
     /// `server/discover` under `capabilities.extensions[id]` and owning its
-    /// declared methods on the modern (`DRAFT-2026-v1`) path. The reference
+    /// declared methods on the modern (`2026-07-28`) path. The reference
     /// extension is the draft Tasks extension (`turbomcp-ext-tasks`).
     #[must_use]
     pub fn with_extension(mut self, extension: Arc<dyn Extension>) -> Self {

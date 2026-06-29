@@ -79,7 +79,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
             ///
             /// Dual-stack by default: the connection is wrapped in a
             /// [`LegacySessionAdapter`](::turbomcp::LegacySessionAdapter), so
-            /// both stateless `DRAFT-2026-v1` clients and stateful
+            /// both stateless `2026-07-28` clients and stateful
             /// `2025-11-25` (`initialize`-handshake) clients are served.
             pub async fn run_stdio(self) -> ::core::result::Result<(), ::turbomcp::ProtocolError> {
                 ::turbomcp::serve_stdio(::turbomcp::LegacySessionAdapter::new(

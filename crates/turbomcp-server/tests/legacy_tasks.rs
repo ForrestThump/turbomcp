@@ -335,7 +335,7 @@ async fn tasks_methods_absent_on_the_modern_path() {
             1,
             "tasks/list",
             Some(json!({
-                "_meta": { "io.modelcontextprotocol/protocolVersion": "DRAFT-2026-v1" }
+                "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28" }
             })),
         ),
     )

@@ -38,7 +38,7 @@ pub trait IntoCallToolResult {
 ///
 /// Note: on the `2025-11-25` wire, `structuredContent` must be a JSON object, so
 /// a `Json<T>` whose `T` serializes to a non-object (a scalar or array) carries
-/// its value only in the text mirror there; the `DRAFT-2026-v1` wire accepts any
+/// its value only in the text mirror there; the `2026-07-28` wire accepts any
 /// JSON value.
 #[derive(Clone, Copy, Debug)]
 pub struct Json<T>(pub T);

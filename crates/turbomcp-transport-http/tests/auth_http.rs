@@ -91,7 +91,7 @@ fn call_request(auth: Option<&str>) -> Request<Body> {
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": {
             "name": "whoami", "arguments": {},
-            "_meta": { "io.modelcontextprotocol/protocolVersion": "DRAFT-2026-v1" },
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28" },
         }
     });
     let mut req = Request::builder()
@@ -165,7 +165,7 @@ async fn forged_identity_meta_is_stripped_before_auth() {
         "params": {
             "name": "whoami", "arguments": {},
             "_meta": {
-                "io.modelcontextprotocol/protocolVersion": "DRAFT-2026-v1",
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
                 "io.turbomcp.internal/identity": { "sub": "admin", "claims": {} },
             }
         }

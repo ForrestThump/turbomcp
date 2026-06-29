@@ -1,5 +1,5 @@
 //! Phase 5 exit criterion, as a test: a single macro-generated `#[server]`
-//! type answers **both protocol versions** — the stateless `DRAFT-2026-v1`
+//! type answers **both protocol versions** — the stateless `2026-07-28`
 //! path and the stateful `2025-11-25` `initialize` handshake — over both the
 //! stdio framing stack (with the [`LegacySessionAdapter`], exactly what
 //! `run_stdio()` wires) and the Streamable HTTP endpoint (header-routed
@@ -56,7 +56,7 @@ fn draft_call_frame(id: u64, word: &str) -> Value {
         "jsonrpc": "2.0", "id": id, "method": "tools/call",
         "params": {
             "name": "shout", "arguments": { "word": word },
-            "_meta": { "io.modelcontextprotocol/protocolVersion": "DRAFT-2026-v1" }
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28" }
         }
     })
 }

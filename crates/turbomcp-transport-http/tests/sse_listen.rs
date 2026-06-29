@@ -56,7 +56,7 @@ fn listen_request(id: i64, notifications: Value) -> Request<Body> {
     let body = json!({
         "jsonrpc": "2.0", "id": id, "method": "subscriptions/listen",
         "params": {
-            "_meta": { "io.modelcontextprotocol/protocolVersion": "DRAFT-2026-v1" },
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28" },
             "notifications": notifications,
         }
     });
@@ -166,7 +166,7 @@ async fn malformed_listen_filter_answers_json_error() {
     let (app, _notifier) = app(HttpConfig::new());
     let body = json!({
         "jsonrpc": "2.0", "id": 1, "method": "subscriptions/listen",
-        "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "DRAFT-2026-v1" } }
+        "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28" } }
     });
     let req = Request::builder()
         .method("POST")

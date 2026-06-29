@@ -6,7 +6,7 @@
 
 /// Request method names.
 pub mod request {
-    /// `server/discover` — stateless capability discovery (`DRAFT-2026-v1`).
+    /// `server/discover` — stateless capability discovery (`2026-07-28`).
     pub const DISCOVER: &str = "server/discover";
     /// `initialize` — stateful handshake (`2025-11-25` and earlier).
     pub const INITIALIZE: &str = "initialize";
@@ -38,7 +38,7 @@ pub mod request {
     /// reaches a terminal status (core in `2025-11-25`).
     pub const TASKS_RESULT: &str = "tasks/result";
     /// `subscriptions/listen` — open a long-lived notification stream
-    /// (`DRAFT-2026-v1`; replaces `resources/subscribe` and the HTTP GET
+    /// (`2026-07-28`; replaces `resources/subscribe` and the HTTP GET
     /// stream). The request gets no JSON-RPC response — the stream's first
     /// message is `notifications/subscriptions/acknowledged`.
     pub const SUBSCRIPTIONS_LISTEN: &str = "subscriptions/listen";

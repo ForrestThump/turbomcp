@@ -37,7 +37,7 @@
 //!
 //! ## Dual-stack request routing (PLAN §11)
 //!
-//! Modern `DRAFT-2026-v1` requests are stateless (version inside the body's
+//! Modern `2026-07-28` requests are stateless (version inside the body's
 //! `_meta`) and pass through untouched. The legacy `2025-11-25` stateful path
 //! is routed from HTTP headers, asserted toward the dispatcher via internal
 //! `_meta` keys (inbound bodies are sanitized first so clients can't forge

@@ -68,7 +68,7 @@ async fn call_with_meta(meta: Value) -> String {
 #[tokio::test]
 async fn draft_request_propagates_trace_context_to_handler() {
     let seen = call_with_meta(json!({
-        "io.modelcontextprotocol/protocolVersion": "DRAFT-2026-v1",
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
         "traceparent": TRACEPARENT,
         "tracestate": "vendor=abc",
     }))
@@ -79,7 +79,7 @@ async fn draft_request_propagates_trace_context_to_handler() {
 #[tokio::test]
 async fn request_without_traceparent_has_no_trace_context() {
     let seen = call_with_meta(json!({
-        "io.modelcontextprotocol/protocolVersion": "DRAFT-2026-v1",
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
     }))
     .await;
     assert_eq!(seen, "none");

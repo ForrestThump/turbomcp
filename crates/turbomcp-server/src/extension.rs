@@ -4,7 +4,7 @@
 //! `tasks/get`/`tasks/update`/`tasks/cancel`), advertises itself in
 //! `server/discover` under `capabilities.extensions[id]`, and is dispatched by
 //! the [`VersionDispatcher`](crate::VersionDispatcher) on the modern
-//! (`DRAFT-2026-v1`) path once the client has declared the extension in its
+//! (`2026-07-28`) path once the client has declared the extension in its
 //! per-request capabilities.
 //!
 //! Extensions are **draft-only**: the legacy `2025-11-25` path serves its

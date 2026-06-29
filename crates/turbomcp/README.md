@@ -15,7 +15,7 @@ zero-boilerplate surface and strict spec compliance as a feature.
   the advertised capabilities are *derived* from which markers are present — they
   can't drift from the implementation.
 - **Two protocol versions, one handler.** The same server answers both
-  `2025-11-25` and the `DRAFT-2026-v1` draft. Your handlers speak
+  `2025-11-25` and the `2026-07-28` draft. Your handlers speak
   version-neutral types; the version-specific wire shapes are conversions, not
   signature changes.
 - **Transports behind one builder.** stdio (default) and Streamable HTTP

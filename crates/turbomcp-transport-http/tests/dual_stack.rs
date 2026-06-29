@@ -1,5 +1,5 @@
 //! Dual-stack HTTP routing (PLAN §11): the same endpoint serves stateless
-//! `DRAFT-2026-v1` bodies and the stateful `2025-11-25` header-based session
+//! `2026-07-28` bodies and the stateful `2025-11-25` header-based session
 //! flow — minting `Mcp-Session-Id` at `initialize`, 404 on unknown sessions,
 //! 400 on bad version headers, and sanitization of forged internal `_meta`.
 
@@ -199,10 +199,10 @@ async fn modern_stateless_requests_pass_through_unchanged() {
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": {
             "name": "add", "arguments": { "a": 20, "b": 22 },
-            "_meta": { "io.modelcontextprotocol/protocolVersion": "DRAFT-2026-v1" }
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28" }
         }
     });
-    for headers in [vec![], vec![("mcp-protocol-version", "DRAFT-2026-v1")]] {
+    for headers in [vec![], vec![("mcp-protocol-version", "2026-07-28")]] {
         let resp = app().oneshot(post(call.clone(), &headers)).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let v = body_json(resp).await;
@@ -253,7 +253,7 @@ async fn posted_cancellation_is_accepted_but_inert() {
         "params": {
             "requestId": 1,
             "_meta": {
-                "io.modelcontextprotocol/protocolVersion": "DRAFT-2026-v1",
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
                 "io.turbomcp.internal/connectionId": "conn-1",
             }
         }

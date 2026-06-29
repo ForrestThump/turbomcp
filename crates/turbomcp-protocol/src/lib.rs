@@ -7,7 +7,7 @@
 //!
 //! - [`v2025_11_25`] — stateful model: `initialize`, `ping`, `resources/subscribe`,
 //!   and **core Tasks** (`tasks/get|list|cancel|result`).
-//! - [`v2026_draft`] — `DRAFT-2026-v1`: stateless `server/discover`,
+//! - [`v2026_draft`] — `2026-07-28`: stateless `server/discover`,
 //!   `subscriptions/listen`, MRTR (`InputRequiredResult`); Tasks moves to the
 //!   `extensions` mechanism.
 //!

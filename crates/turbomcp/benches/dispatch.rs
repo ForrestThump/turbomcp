@@ -40,7 +40,7 @@ fn tools_call() -> JsonRpcRequest {
         Some(json!({
             "name": "add",
             "arguments": { "a": 2.0, "b": 40.0 },
-            "_meta": { "io.modelcontextprotocol/protocolVersion": "DRAFT-2026-v1" },
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28" },
         })),
     )
 }

@@ -294,7 +294,7 @@ mod tests {
                 "arguments": { "city": "SF", "region": "us-west", "n": 3 },
                 "_meta": {
                     crate::client::HEADER_PARAMS_META_KEY: ["region", "n"],
-                    "io.modelcontextprotocol/protocolVersion": "DRAFT-2026-v1",
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
                 },
             })),
         ));
@@ -322,7 +322,7 @@ mod tests {
         );
         assert_eq!(
             params["_meta"]["io.modelcontextprotocol/protocolVersion"],
-            "DRAFT-2026-v1"
+            "2026-07-28"
         );
         assert_eq!(params["arguments"]["region"], "us-west");
     }

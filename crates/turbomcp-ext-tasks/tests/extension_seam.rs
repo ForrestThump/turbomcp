@@ -54,7 +54,7 @@ fn draft_meta(declare_tasks: bool) -> Value {
     let mut meta = serde_json::Map::new();
     meta.insert(
         "io.modelcontextprotocol/protocolVersion".into(),
-        json!("DRAFT-2026-v1"),
+        json!("2026-07-28"),
     );
     if declare_tasks {
         meta.insert(

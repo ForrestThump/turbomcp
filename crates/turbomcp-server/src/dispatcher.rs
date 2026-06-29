@@ -8,7 +8,7 @@
 //! middleware) and below it (typed handlers) are version-agnostic.
 //!
 //! Per-version status (Phase 5): both paths are live. The modern
-//! `DRAFT-2026-v1` path is stateless (version in each request's `_meta`); the
+//! `2026-07-28` path is stateless (version in each request's `_meta`); the
 //! legacy `2025-11-25` path is stateful — `initialize` negotiates a version and
 //! mints a session (via the transport-supplied internal session id, see
 //! [`turbomcp_core::meta::internal`]), and later requests are dispatched with
@@ -188,7 +188,7 @@ impl<S: McpServerCore> VersionDispatcher<S> {
 
     /// Register a draft [`Extension`] (PLAN D10): it is advertised in
     /// `server/discover` under `capabilities.extensions[id]` and owns its
-    /// declared methods on the modern (`DRAFT-2026-v1`) path. Extensions are
+    /// declared methods on the modern (`2026-07-28`) path. Extensions are
     /// draft-only — the legacy `2025-11-25` path serves its built-in
     /// equivalents (core Tasks via [`with_task_support`](Self::with_task_support)).
     #[must_use]
@@ -623,7 +623,7 @@ trait WireFamily {
     type Complete: Serialize + From<neutral::CompleteResult>;
 }
 
-/// `DRAFT-2026-v1` (modern, stateless).
+/// `2026-07-28` (modern, stateless).
 struct DraftWire;
 
 impl WireFamily for DraftWire {

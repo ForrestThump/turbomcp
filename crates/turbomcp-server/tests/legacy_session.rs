@@ -210,7 +210,7 @@ async fn modern_requests_keep_working_through_the_adapter_after_initialize() {
     // A draft request states its version per-message; the adapter must leave
     // it alone and the dispatcher must answer on the draft wire.
     let params = json!({
-        "_meta": { "io.modelcontextprotocol/protocolVersion": "DRAFT-2026-v1" }
+        "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28" }
     });
     let list = call_result(&mut svc, JsonRpcRequest::new(2, "tools/list", Some(params))).await;
     assert_eq!(list["resultType"], "complete", "draft wire envelope");
