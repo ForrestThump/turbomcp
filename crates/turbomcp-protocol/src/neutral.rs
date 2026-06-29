@@ -20,8 +20,8 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use serde_json::{Map, Value};
 
+use crate::draft::types as draft;
 use crate::v2025_11_25::types as legacy;
-use crate::v2026_draft::types as draft;
 
 /// Canonical draft `resultType` wire strings.
 ///

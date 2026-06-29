@@ -7,7 +7,7 @@
 //!
 //! - [`v2025_11_25`] — stateful model: `initialize`, `ping`, `resources/subscribe`,
 //!   and **core Tasks** (`tasks/get|list|cancel|result`).
-//! - [`v2026_draft`] — `2026-07-28`: stateless `server/discover`,
+//! - [`draft`] — `2026-07-28`: stateless `server/discover`,
 //!   `subscriptions/listen`, MRTR (`InputRequiredResult`); Tasks moves to the
 //!   `extensions` mechanism.
 //!
@@ -25,8 +25,8 @@ extern crate alloc;
 
 use turbomcp_core as _;
 
+pub mod draft;
 pub mod methods;
 pub mod neutral;
 pub mod v2025_11_25;
-pub mod v2026_draft;
 pub mod version;

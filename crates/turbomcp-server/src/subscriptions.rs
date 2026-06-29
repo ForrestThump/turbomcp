@@ -27,8 +27,8 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use turbomcp_core::{JsonRpcMessage, JsonRpcNotification, RequestId, meta};
+use turbomcp_protocol::draft::types as draft;
 use turbomcp_protocol::methods;
-use turbomcp_protocol::v2026_draft::types as draft;
 use turbomcp_service::outbound;
 
 /// How long a `*_list_changed` burst is allowed to accumulate before the one

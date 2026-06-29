@@ -33,8 +33,8 @@ use turbomcp_core::{
     CancellationToken, Implementation, JsonRpcError, JsonRpcMessage, JsonRpcNotification,
     JsonRpcRequest, JsonRpcResponse, McpError, ProtocolVersion, RequestContext, RequestId, meta,
 };
+use turbomcp_protocol::draft::types as draft;
 use turbomcp_protocol::v2025_11_25::types as legacy;
-use turbomcp_protocol::v2026_draft::types as draft;
 use turbomcp_protocol::{methods, neutral, version};
 use turbomcp_service::{ProtocolError, mcp_to_jsonrpc_error};
 

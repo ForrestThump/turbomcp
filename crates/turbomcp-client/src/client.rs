@@ -24,10 +24,10 @@ use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
 use turbomcp_core::meta::keys;
 use turbomcp_core::{Implementation, ProtocolVersion};
+use turbomcp_protocol::draft::types as draft;
 use turbomcp_protocol::methods::{notification, request};
 use turbomcp_protocol::neutral;
 use turbomcp_protocol::v2025_11_25::types as legacy;
-use turbomcp_protocol::v2026_draft::types as draft;
 use turbomcp_service::Transport;
 
 use crate::connection::Connection;
