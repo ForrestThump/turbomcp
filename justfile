@@ -155,19 +155,16 @@ build-all-features:
 [group: 'test']
 test:
   echo "Running comprehensive test suite..."
-  echo "Step 1/5: Running unit and integration tests..."
-  cargo test --workspace --lib --exclude turbomcp-transport
-  cargo test -p turbomcp --tests -- --test-threads=1
-  cargo test --workspace --tests --exclude turbomcp --exclude turbomcp-transport
-  cargo test -p turbomcp-transport --lib --tests --features stdio,tcp
-  echo "Step 2/5: Running clippy linter on all crates and binaries..."
+  echo "Step 1/5: Running unit, integration, and doc tests (all features)..."
+  cargo test --workspace --all-features
+  echo "Step 2/5: Running clippy on all crates, targets, and examples..."
   cargo clippy {{workspace_flags}} --all-targets --all-features -- -D warnings
-  echo "Step 3/5: Running clippy linter on all examples..."
-  cargo clippy --examples --all-features -- -D warnings
+  echo "Step 3/5: Verifying the no-default-features facade still lints..."
+  cargo clippy -p turbomcp -- -D warnings
   echo "Step 4/5: Checking formatting on all code..."
   cargo fmt --all -- --check
-  echo "Step 5/5: Verifying all examples compile..."
-  cargo check --examples --all-features
+  echo "Step 5/5: Verifying wasm portability (no_std core + protocol)..."
+  cargo build -p turbomcp-core -p turbomcp-protocol --target wasm32-unknown-unknown
   echo "All tests, linting, and formatting checks passed!"
 
 # Run tests only (no linting/formatting)
@@ -530,20 +527,6 @@ clean-deps:
   cargo clean
   cargo update
   @echo "Dependencies updated"
-
-# Install TurboMCP CLI tools locally
-[group: 'util']
-install-cli:
-  @echo "Installing TurboMCP CLI..."
-  cargo install --path crates/turbomcp-cli
-  @echo "TurboMCP CLI installed"
-
-# Uninstall TurboMCP CLI tools
-[group: 'util']
-uninstall-cli:
-  @echo "Uninstalling TurboMCP CLI..."
-  cargo uninstall turbomcp-cli
-  @echo "TurboMCP CLI uninstalled"
 
 # =============================================================================
 # Statistics and Analysis

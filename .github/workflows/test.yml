@@ -133,18 +133,11 @@ jobs:
         key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
         restore-keys: ${{ runner.os }}-cargo-wasm-
 
-    - name: Build & test WASM
-      run: |
-        cargo build -p turbomcp-wasm --target wasm32-unknown-unknown --profile wasm-release
-        cargo test -p turbomcp-wasm --lib
-
-    - name: Check binary size
-      run: |
-        SIZE=$(stat -c%s target/wasm32-unknown-unknown/wasm-release/turbomcp_wasm.wasm 2>/dev/null || stat -f%z target/wasm32-unknown-unknown/wasm-release/turbomcp_wasm.wasm)
-        echo "WASM binary size: ${SIZE} bytes ($(numfmt --to=iec ${SIZE}))"
-        if [ $SIZE -gt 2097152 ]; then
-          echo "::warning::WASM binary exceeds 2MB"
-        fi
+    # The no_std foundation crates must stay wasm32-portable. They build as
+    # libraries (no .wasm artifact / no test runner on this target), so this is a
+    # compile-only portability guard — the same one `just test` runs locally.
+    - name: Build no_std foundation for wasm32
+      run: cargo build -p turbomcp-core -p turbomcp-protocol --target wasm32-unknown-unknown
 
   coverage:
     name: Coverage

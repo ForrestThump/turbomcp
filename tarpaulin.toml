@@ -37,13 +37,18 @@ exclude-files = [
 # Include only our crates
 include = [
     "turbomcp/*",
-    "turbomcp-macros/*", 
+    "turbomcp-macros/*",
     "turbomcp-core/*",
+    "turbomcp-codec/*",
     "turbomcp-protocol/*",
-    "turbomcp-transport/*",
+    "turbomcp-service/*",
     "turbomcp-server/*",
     "turbomcp-client/*",
-    "turbomcp-cli/*"
+    "turbomcp-auth/*",
+    "turbomcp-telemetry/*",
+    "turbomcp-ext-tasks/*",
+    "turbomcp-transport-stdio/*",
+    "turbomcp-transport-http/*"
 ]
 
 [engine]
