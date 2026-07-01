@@ -25,27 +25,6 @@ members = [
 exclude = ["crates/turbomcp-interop"]
 resolver = "2"
 
-[workspace.lints.rust]
-# Declare expected cfgs from feature-gated code in the #[server] macro
-# (transport, authentication, etc.)
-#
-# When the #[server] macro generates code without explicit transport specification,
-# it conditionally generates methods for all transports. This workspace-level
-# declaration tells the compiler "yes, these cfg conditions are expected and valid".
-#
-# Users who explicitly specify transports via the macro:
-#   #[server(name = "my-server", transports = ["stdio", "http"])]
-# will only generate cfg guards for their specified transports.
-unexpected_cfgs = { level = "warn", check-cfg = [
-    'cfg(http)',
-    'cfg(websocket)',
-    'cfg(tcp)',
-    'cfg(unix)',
-    'cfg(auth)',
-    'cfg(dpop)',
-    'cfg(docsrs)',
-] }
-
 [workspace.lints.clippy]
 # Quality enforcement - warn on missing documentation for error conditions
 # This helps users understand what can go wrong when calling fallible functions
