@@ -245,6 +245,9 @@ struct Inner {
     state_in: Option<Value>,
     /// Handler-stored outbound state (signed at result assembly).
     state_out: Mutex<Option<Value>>,
+    /// When set, reusing an elicit `key` with a different request shape in one
+    /// execution is a hard error instead of a warning (opt-in idempotency lint).
+    strict_keys: bool,
 }
 
 /// A handler's channel to the client, present only on the MRTR-capable
@@ -277,6 +280,7 @@ impl ClientHandle {
                 collected: Mutex::new(BTreeMap::new()),
                 state_in: None,
                 state_out: Mutex::new(None),
+                strict_keys: false,
             }),
         }
     }
@@ -286,6 +290,7 @@ impl ClientHandle {
         client_capabilities: Option<Value>,
         responses: BTreeMap<String, Value>,
         state_in: Option<Value>,
+        strict_keys: bool,
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
@@ -295,6 +300,7 @@ impl ClientHandle {
                 collected: Mutex::new(BTreeMap::new()),
                 state_in,
                 state_out: Mutex::new(None),
+                strict_keys,
             }),
         }
     }
@@ -318,6 +324,7 @@ impl ClientHandle {
                 collected: Mutex::new(BTreeMap::new()),
                 state_in: None,
                 state_out: Mutex::new(None),
+                strict_keys: false,
             }),
         }
     }
@@ -335,6 +342,23 @@ impl ClientHandle {
     ) -> McpResult<neutral::ElicitOutcome> {
         let raw = self
             .obtain(key, "elicitation", elicit_request_value(&params))
+            .await?;
+        parse_elicit_outcome(&raw)
+    }
+
+    /// Ask the user to visit a URL (URL-mode elicitation, draft `mode: "url"`).
+    ///
+    /// The client presents `params.message` and directs the user to `params.url`
+    /// (e.g. an OAuth consent page); the returned [`ElicitOutcome`] carries the
+    /// user's [`ElicitAction`](neutral::ElicitAction) with no form content. Uses
+    /// the same `key` retry semantics as [`elicit`](Self::elicit).
+    pub async fn elicit_url(
+        &self,
+        key: &str,
+        params: neutral::ElicitUrlParams,
+    ) -> McpResult<neutral::ElicitOutcome> {
+        let raw = self
+            .obtain(key, "elicitation", elicit_url_request_value(&params))
             .await?;
         parse_elicit_outcome(&raw)
     }
@@ -366,7 +390,7 @@ impl ClientHandle {
         }
         for (key, params) in &requests {
             if !self.inner.responses.contains_key(*key) {
-                self.record(key, elicit_request_value(params));
+                self.record(key, elicit_request_value(params))?;
             }
         }
         Err(McpError::InputRequired)
@@ -456,7 +480,7 @@ impl ClientHandle {
                 if let Some(raw) = self.inner.responses.get(key) {
                     return Ok(raw.clone());
                 }
-                self.record(key, request);
+                self.record(key, request)?;
                 Err(McpError::InputRequired)
             }
             HandleMode::Bidi {
@@ -469,9 +493,10 @@ impl ClientHandle {
         }
     }
 
-    /// Record an input request under `key`, warning on unstable keys
-    /// (PLAN §4.5.2 item 4: same key, different request shape across calls).
-    fn record(&self, key: &str, request: Value) {
+    /// Record an input request under `key`. Reusing a key with a different
+    /// request shape in one execution is a warning by default, or a hard error
+    /// when strict keys are enabled (PLAN §4.5.2 item 4).
+    fn record(&self, key: &str, request: Value) -> McpResult<()> {
         let mut collected = self
             .inner
             .collected
@@ -480,9 +505,15 @@ impl ClientHandle {
         if let Some(previous) = collected.get(key)
             && previous != &request
         {
+            if self.inner.strict_keys {
+                return Err(McpError::invalid_params(format!(
+                    "elicit key `{key}` re-used with a different request shape"
+                )));
+            }
             tracing::warn!(key, "elicit key re-used with a different request shape");
         }
         collected.insert(key.to_owned(), request);
+        Ok(())
     }
 
     /// The recorded input requests (dispatcher: `InputRequiredResult` assembly).
@@ -559,6 +590,19 @@ fn elicit_request_value(params: &neutral::ElicitParams) -> Value {
             "mode": "form",
             "message": params.message,
             "requestedSchema": params.requested_schema,
+        },
+    })
+}
+
+/// The wire `InputRequest` object for a URL-mode elicitation.
+fn elicit_url_request_value(params: &neutral::ElicitUrlParams) -> Value {
+    json!({
+        "method": "elicitation/create",
+        "params": {
+            "mode": "url",
+            "message": params.message,
+            "elicitationId": params.elicitation_id,
+            "url": params.url,
         },
     })
 }
@@ -654,12 +698,86 @@ mod tests {
 
     #[tokio::test]
     async fn elicit_without_declared_capability_is_an_error_not_an_abort() {
-        let handle = ClientHandle::mrtr(Some(json!({})), BTreeMap::new(), None);
+        let handle = ClientHandle::mrtr(Some(json!({})), BTreeMap::new(), None, false);
         let err = handle
             .elicit("k", neutral::ElicitParams::new("?", json!({})))
             .await
             .expect_err("must not send undeclared input requests");
         assert!(matches!(err, McpError::InvalidParams(_)));
         assert!(handle.collected().is_empty(), "nothing may be recorded");
+    }
+
+    #[tokio::test]
+    async fn elicit_url_records_url_mode_request() {
+        let handle = ClientHandle::mrtr(
+            Some(json!({ "elicitation": {} })),
+            BTreeMap::new(),
+            None,
+            false,
+        );
+        let err = handle
+            .elicit_url(
+                "k",
+                neutral::ElicitUrlParams::new("Sign in", "eid-1", "https://auth.example/go"),
+            )
+            .await
+            .expect_err("no cached response → abort");
+        assert!(matches!(err, McpError::InputRequired));
+        let collected = handle.collected();
+        let params = &collected["k"]["params"];
+        assert_eq!(params["mode"], "url");
+        assert_eq!(params["url"], "https://auth.example/go");
+        assert_eq!(params["elicitationId"], "eid-1");
+    }
+
+    #[tokio::test]
+    async fn strict_keys_reject_shape_conflict() {
+        let handle = ClientHandle::mrtr(
+            Some(json!({ "elicitation": {} })),
+            BTreeMap::new(),
+            None,
+            true,
+        );
+        // First records under `k` and aborts (InputRequired).
+        let _ = handle
+            .elicit(
+                "k",
+                neutral::ElicitParams::new("A", json!({ "type": "object" })),
+            )
+            .await;
+        // Same key, different request shape → strict error (not a warning).
+        let err = handle
+            .elicit(
+                "k",
+                neutral::ElicitParams::new("B", json!({ "type": "object", "extra": true })),
+            )
+            .await
+            .expect_err("strict keys reject a shape conflict");
+        assert!(matches!(err, McpError::InvalidParams(_)));
+    }
+
+    #[tokio::test]
+    async fn non_strict_keys_only_warn_on_conflict() {
+        let handle = ClientHandle::mrtr(
+            Some(json!({ "elicitation": {} })),
+            BTreeMap::new(),
+            None,
+            false,
+        );
+        let _ = handle
+            .elicit(
+                "k",
+                neutral::ElicitParams::new("A", json!({ "type": "object" })),
+            )
+            .await;
+        // A conflicting reshape aborts with InputRequired (warn), not InvalidParams.
+        let err = handle
+            .elicit(
+                "k",
+                neutral::ElicitParams::new("B", json!({ "type": "object", "extra": true })),
+            )
+            .await
+            .expect_err("still aborts");
+        assert!(matches!(err, McpError::InputRequired));
     }
 }

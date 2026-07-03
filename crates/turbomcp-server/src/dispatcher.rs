@@ -82,6 +82,8 @@ struct Shared {
     /// advertisement and modern-path method routing. One `Arc` to keep the
     /// per-request `Shared` clone cheap.
     extensions: Arc<Vec<Arc<dyn Extension>>>,
+    /// Opt-in: treat an elicit key reused with a different shape as an error.
+    strict_elicitation_keys: bool,
 }
 
 impl Shared {
@@ -150,6 +152,7 @@ impl<S: McpServerCore> VersionDispatcher<S> {
                 signer: Arc::new(StateSigner::new()),
                 pending: Arc::new(PendingRequests::default()),
                 extensions: Arc::new(Vec::new()),
+                strict_elicitation_keys: false,
             },
         }
     }
@@ -171,6 +174,15 @@ impl<S: McpServerCore> VersionDispatcher<S> {
         DispatcherSessionTerminator {
             shared: self.shared.clone(),
         }
+    }
+
+    /// Opt in to strict elicitation keys: reusing an `elicit` key with a
+    /// different request shape within one handler execution becomes an error
+    /// (an idempotency lint) instead of a warning.
+    #[must_use]
+    pub fn strict_elicitation_keys(mut self) -> Self {
+        self.shared.strict_elicitation_keys = true;
+        self
     }
 
     /// Enable core Tasks (`2025-11-25`): task-augmented `tools/call` plus
@@ -676,7 +688,13 @@ async fn dispatch_capability<S: McpServerCore, W: WireFamily>(
                 Ok(p) => p,
                 Err(e) => return error_response(id, &e),
             };
-            let handle = match mrtr_handle::<W>(req, &ctx, signer, pending) {
+            let handle = match mrtr_handle::<W>(
+                req,
+                &ctx,
+                signer,
+                pending,
+                shared.strict_elicitation_keys,
+            ) {
                 Ok(h) => h,
                 Err(e) => return error_response(id, &e),
             };
@@ -709,7 +727,13 @@ async fn dispatch_capability<S: McpServerCore, W: WireFamily>(
                 Ok(p) => p,
                 Err(e) => return error_response(id, &e),
             };
-            let handle = match mrtr_handle::<W>(req, &ctx, signer, pending) {
+            let handle = match mrtr_handle::<W>(
+                req,
+                &ctx,
+                signer,
+                pending,
+                shared.strict_elicitation_keys,
+            ) {
                 Ok(h) => h,
                 Err(e) => return error_response(id, &e),
             };
@@ -735,7 +759,13 @@ async fn dispatch_capability<S: McpServerCore, W: WireFamily>(
                 Ok(p) => p,
                 Err(e) => return error_response(id, &e),
             };
-            let handle = match mrtr_handle::<W>(req, &ctx, signer, pending) {
+            let handle = match mrtr_handle::<W>(
+                req,
+                &ctx,
+                signer,
+                pending,
+                shared.strict_elicitation_keys,
+            ) {
                 Ok(h) => h,
                 Err(e) => return error_response(id, &e),
             };
@@ -855,6 +885,7 @@ fn mrtr_handle<W: WireFamily>(
     ctx: &RequestContext,
     signer: &StateSigner,
     pending: &Arc<PendingRequests>,
+    strict_keys: bool,
 ) -> Result<ClientHandle, McpError> {
     if !W::MRTR {
         // The legacy session gate ran before dispatch, so the session id is
@@ -882,6 +913,7 @@ fn mrtr_handle<W: WireFamily>(
         ctx.client_capabilities.clone(),
         fields.input_responses.unwrap_or_default(),
         state_in,
+        strict_keys,
     ))
 }
 

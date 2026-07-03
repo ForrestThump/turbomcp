@@ -725,7 +725,7 @@ impl GetPromptParams {
 ///
 /// On the draft this is packaged into an `InputRequiredResult` (MRTR,
 /// SEP-2322); on `2025-11-25` it goes out as an inline `elicitation/create`
-/// request. URL-mode elicitation is not yet modeled.
+/// request. For URL-mode (out-of-band) elicitation see [`ElicitUrlParams`].
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct ElicitParams {
@@ -742,6 +742,36 @@ impl ElicitParams {
         Self {
             message: message.into(),
             requested_schema,
+        }
+    }
+}
+
+/// A URL-mode elicitation (draft `mode: "url"`): the client shows `message` and
+/// directs the user to `url` (e.g. an OAuth consent page); the response carries
+/// an [`ElicitAction`] but no form content. `elicitation_id` is a server-unique
+/// opaque identifier the client echoes / uses for any out-of-band completion.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct ElicitUrlParams {
+    /// The message explaining why the interaction is needed.
+    pub message: String,
+    /// A server-unique opaque id for this elicitation.
+    pub elicitation_id: String,
+    /// The URL the user should navigate to.
+    pub url: String,
+}
+
+impl ElicitUrlParams {
+    /// A URL-mode elicitation showing `message` and directing the user to `url`.
+    pub fn new(
+        message: impl Into<String>,
+        elicitation_id: impl Into<String>,
+        url: impl Into<String>,
+    ) -> Self {
+        Self {
+            message: message.into(),
+            elicitation_id: elicitation_id.into(),
+            url: url.into(),
         }
     }
 }

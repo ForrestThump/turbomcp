@@ -28,6 +28,7 @@ pub struct ServerBuilder<S> {
     server: S,
     router: MethodRouter<S>,
     tasks: bool,
+    strict_elicitation_keys: bool,
     session_idle_timeout: Option<std::time::Duration>,
     extensions: Vec<Arc<dyn Extension>>,
 }
@@ -40,6 +41,7 @@ impl<S: McpServerCore> ServerBuilder<S> {
             server,
             router: MethodRouter::new(),
             tasks: false,
+            strict_elicitation_keys: false,
             session_idle_timeout: None,
             extensions: Vec::new(),
         }
@@ -53,6 +55,7 @@ impl<S: McpServerCore> ServerBuilder<S> {
             server,
             router,
             tasks: false,
+            strict_elicitation_keys: false,
             session_idle_timeout: None,
             extensions: Vec::new(),
         }
@@ -75,6 +78,15 @@ impl<S: McpServerCore> ServerBuilder<S> {
     #[must_use]
     pub fn with_tasks(mut self) -> Self {
         self.tasks = true;
+        self
+    }
+
+    /// Opt in to strict elicitation keys: reusing an `elicit` key with a
+    /// different request shape in one handler execution is an error, not a
+    /// warning. See [`VersionDispatcher::strict_elicitation_keys`].
+    #[must_use]
+    pub fn strict_elicitation_keys(mut self) -> Self {
+        self.strict_elicitation_keys = true;
         self
     }
 
@@ -146,6 +158,9 @@ impl<S: McpServerCore> ServerBuilder<S> {
         let mut dispatcher = VersionDispatcher::new(self.server, self.router);
         if self.tasks {
             dispatcher = dispatcher.with_task_support();
+        }
+        if self.strict_elicitation_keys {
+            dispatcher = dispatcher.strict_elicitation_keys();
         }
         if let Some(timeout) = self.session_idle_timeout {
             dispatcher = dispatcher.with_session_idle_timeout(timeout);
