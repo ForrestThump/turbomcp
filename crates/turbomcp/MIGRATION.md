@@ -121,7 +121,10 @@ needs rethinking rather than a mechanical port:
 
 v3 surfaced Tasks one way. In v4 they split by protocol version:
 
-- `2025-11-25`: Tasks are **core** — enable with `ServerBuilder::with_task_support()`.
+- `2025-11-25`: Tasks are **core** — enable with `ServerBuilder::with_tasks()`.
+  Mark individual tools taskable with `#[tool(task)]` (advertised per-tool as
+  `taskSupport: optional`; unmarked tools become `forbidden`). If no tool is
+  marked, every tool defaults to `optional`.
 - `2026-07-28`: Tasks are an **extension** (`io.modelcontextprotocol/tasks`,
   SEP-2663) — enable the `ext-tasks` feature and register
   `TasksExtension` with `ServerBuilder::with_extension(...)`. The draft is

@@ -16,11 +16,11 @@
 
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
-use syn::parse::Parser;
+use syn::parse::{Parse, ParseStream, Parser};
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 use syn::{
-    Attribute, Expr, ExprLit, FnArg, Ident, ImplItem, ImplItemFn, ItemImpl, Lit, Meta,
+    Attribute, Expr, ExprLit, FnArg, Ident, ImplItem, ImplItemFn, ItemImpl, Lit, LitStr, Meta,
     MetaNameValue, Pat, Token, Type, parse2,
 };
 
@@ -43,7 +43,11 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
             continue;
         };
         match kind {
-            Marker::Tool(desc) => tools.push(Handler::parse(f, desc, HandlerKind::Tool)?),
+            Marker::Tool { desc, task } => {
+                let mut h = Handler::parse(f, desc, HandlerKind::Tool)?;
+                h.task = task;
+                tools.push(h);
+            }
             Marker::Prompt(desc) => prompts.push(Handler::parse(f, desc, HandlerKind::Prompt)?),
             Marker::Resource { uri, desc } => {
                 resources.push(Handler::parse(f, desc, HandlerKind::Resource { uri })?);
@@ -170,10 +174,66 @@ impl ServerArgs {
 }
 
 enum Marker {
-    Tool(Option<String>),
+    Tool { desc: Option<String>, task: bool },
     Prompt(Option<String>),
     Resource { uri: String, desc: Option<String> },
     Completion,
+}
+
+/// One argument inside `#[tool(...)]`: a bare description string, `description =
+/// "…"`, or the `task` flag (opt the tool into `2025-11-25` task support).
+enum ToolArg {
+    Desc(String),
+    Task,
+}
+
+impl Parse for ToolArg {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        if input.peek(LitStr) {
+            let s: LitStr = input.parse()?;
+            return Ok(ToolArg::Desc(s.value()));
+        }
+        let meta: Meta = input.parse()?;
+        if meta.path().is_ident("task") {
+            Ok(ToolArg::Task)
+        } else if meta.path().is_ident("description") {
+            match meta {
+                Meta::NameValue(nv) => lit_str(&nv.value)
+                    .map(ToolArg::Desc)
+                    .ok_or_else(|| syn::Error::new(nv.value.span(), "expected a string literal")),
+                _ => Err(syn::Error::new(
+                    meta.span(),
+                    "expected `description = \"…\"`",
+                )),
+            }
+        } else {
+            Err(syn::Error::new(
+                meta.span(),
+                "expected `description = \"…\"` or `task`",
+            ))
+        }
+    }
+}
+
+/// Parse `#[tool]`, `#[tool("…")]`, `#[tool(description = "…")]`, `#[tool(task)]`,
+/// and their combinations, into `(description, task)`.
+fn parse_tool_args(attr: &Attribute) -> syn::Result<(Option<String>, bool)> {
+    match &attr.meta {
+        Meta::Path(_) => Ok((None, false)),
+        Meta::NameValue(nv) => Ok((lit_str(&nv.value), false)),
+        Meta::List(_) => {
+            let args = attr.parse_args_with(Punctuated::<ToolArg, Token![,]>::parse_terminated)?;
+            let mut desc = None;
+            let mut task = false;
+            for a in args {
+                match a {
+                    ToolArg::Desc(s) => desc = Some(s),
+                    ToolArg::Task => task = true,
+                }
+            }
+            Ok((desc, task))
+        }
+    }
 }
 
 /// Find and remove a `#[tool]` / `#[prompt]` / `#[resource(...)]` / `#[completion]`
@@ -192,7 +252,11 @@ fn take_marker(attrs: &mut Vec<Attribute>) -> syn::Result<Option<Marker>> {
     let attr = attrs.remove(pos);
     let doc = doc_comment(attrs);
     if attr.path().is_ident("tool") {
-        Ok(Some(Marker::Tool(marker_description(&attr)?.or(doc))))
+        let (desc, task) = parse_tool_args(&attr)?;
+        Ok(Some(Marker::Tool {
+            desc: desc.or(doc),
+            task,
+        }))
     } else if attr.path().is_ident("prompt") {
         Ok(Some(Marker::Prompt(marker_description(&attr)?.or(doc))))
     } else if attr.path().is_ident("completion") {
@@ -265,6 +329,8 @@ struct Handler {
     /// The declared return type (`None` for `-> ()`), used to detect a
     /// `Json<T>` result and generate the tool's `outputSchema`.
     ret_ty: Option<Type>,
+    /// `#[tool(task)]`: opt this tool into `2025-11-25` task support. Tools only.
+    task: bool,
 }
 
 impl Handler {
@@ -328,6 +394,7 @@ impl Handler {
             args,
             slots,
             ret_ty,
+            task: false,
         })
     }
 
@@ -463,6 +530,10 @@ fn gen_tool_list_entry(t: &Handler) -> TokenStream {
             )
         ))
     });
+    // `#[tool(task)]` advertises per-tool `2025-11-25` task support (Optional).
+    let task_support = t
+        .task
+        .then(|| quote!(.with_task_support(::turbomcp::neutral::TaskSupport::Optional)));
     quote! {
         {
             let mut __schema = ::turbomcp::__macros::normalize_input_schema(
@@ -473,7 +544,7 @@ fn gen_tool_list_entry(t: &Handler) -> TokenStream {
                 ))
             );
             #(#header_marks)*
-            ::turbomcp::neutral::Tool::new(#name, __schema) #desc #output_schema
+            ::turbomcp::neutral::Tool::new(#name, __schema) #desc #output_schema #task_support
         }
     }
 }

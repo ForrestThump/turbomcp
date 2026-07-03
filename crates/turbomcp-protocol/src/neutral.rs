@@ -82,6 +82,19 @@ impl Content {
 }
 
 /// A tool descriptor.
+/// Whether a tool supports being run as an asynchronous task (`2025-11-25` core
+/// Tasks). Mirrors the wire `execution.taskSupport`; the draft models Tasks as a
+/// server-directed extension instead, so this rides only the legacy wire.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TaskSupport {
+    /// The tool must not be run as a task.
+    Forbidden,
+    /// The tool may be run as a task at the client's request.
+    Optional,
+    /// The tool is always run as a task.
+    Required,
+}
+
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Tool {
@@ -97,6 +110,9 @@ pub struct Tool {
     /// Optional JSON Schema object describing the tool's structured result
     /// (`structuredContent`). Generated from a `Json<T>` return type.
     pub output_schema: Option<Value>,
+    /// Per-tool `2025-11-25` task support (`#[tool(task)]`). `None` leaves it to
+    /// the server's global Tasks policy; the draft wire ignores it.
+    pub task_support: Option<TaskSupport>,
 }
 
 impl Tool {
@@ -108,6 +124,7 @@ impl Tool {
             description: None,
             input_schema,
             output_schema: None,
+            task_support: None,
         }
     }
 
@@ -123,6 +140,13 @@ impl Tool {
     #[must_use]
     pub fn with_output_schema(mut self, output_schema: Value) -> Self {
         self.output_schema = Some(output_schema);
+        self
+    }
+
+    /// Set the per-tool task support (builder style) — `#[tool(task)]`.
+    #[must_use]
+    pub fn with_task_support(mut self, task_support: TaskSupport) -> Self {
+        self.task_support = Some(task_support);
         self
     }
 
@@ -1170,6 +1194,26 @@ impl From<Content> for legacy::ContentBlock {
     }
 }
 
+impl From<TaskSupport> for legacy::ToolExecutionTaskSupport {
+    fn from(ts: TaskSupport) -> Self {
+        match ts {
+            TaskSupport::Forbidden => legacy::ToolExecutionTaskSupport::Forbidden,
+            TaskSupport::Optional => legacy::ToolExecutionTaskSupport::Optional,
+            TaskSupport::Required => legacy::ToolExecutionTaskSupport::Required,
+        }
+    }
+}
+
+impl From<legacy::ToolExecutionTaskSupport> for TaskSupport {
+    fn from(ts: legacy::ToolExecutionTaskSupport) -> Self {
+        match ts {
+            legacy::ToolExecutionTaskSupport::Forbidden => TaskSupport::Forbidden,
+            legacy::ToolExecutionTaskSupport::Optional => TaskSupport::Optional,
+            legacy::ToolExecutionTaskSupport::Required => TaskSupport::Required,
+        }
+    }
+}
+
 impl From<Tool> for legacy::Tool {
     fn from(t: Tool) -> Self {
         // Deserialize the neutral JSON Schema into the (closed) legacy wrapper;
@@ -1186,7 +1230,11 @@ impl From<Tool> for legacy::Tool {
         legacy::Tool {
             annotations: None,
             description: t.description,
-            execution: None,
+            // A declared `#[tool(task)]` sets per-tool task support; otherwise
+            // left unset for the dispatcher to patch under a global Tasks policy.
+            execution: t.task_support.map(|ts| legacy::ToolExecution {
+                task_support: Some(ts.into()),
+            }),
             icons: Vec::new(),
             input_schema,
             meta: Map::new(),
@@ -1448,6 +1496,9 @@ impl From<draft::Tool> for Tool {
             input_schema: serde_json::to_value(&t.input_schema)
                 .unwrap_or_else(|_| Value::Object(Map::new())),
             output_schema: t.output_schema.and_then(|s| serde_json::to_value(s).ok()),
+            // The draft models Tasks as a server-directed extension, not a
+            // per-tool wire field.
+            task_support: None,
         }
     }
 }
@@ -1642,6 +1693,7 @@ impl From<legacy::Tool> for Tool {
             input_schema: serde_json::to_value(&t.input_schema)
                 .unwrap_or_else(|_| Value::Object(Map::new())),
             output_schema: t.output_schema.and_then(|s| serde_json::to_value(s).ok()),
+            task_support: t.execution.and_then(|e| e.task_support).map(Into::into),
         }
     }
 }

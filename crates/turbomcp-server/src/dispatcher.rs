@@ -1499,11 +1499,24 @@ async fn legacy_list_tools_with_task_support<S: McpServerCore>(
     match fut.await {
         Ok(result) => {
             let mut wire = legacy::ListToolsResult::from(result);
+            // If any tool declared per-tool support (`#[tool(task)]`), honor those
+            // and default the rest to `forbidden`. If none did, keep the blanket
+            // `optional` default (backward-compatible with servers that only flip
+            // Tasks on globally).
+            let any_declared = wire
+                .tools
+                .iter()
+                .any(|t| t.execution.as_ref().and_then(|e| e.task_support).is_some());
+            let default = if any_declared {
+                legacy::ToolExecutionTaskSupport::Forbidden
+            } else {
+                legacy::ToolExecutionTaskSupport::Optional
+            };
             for tool in &mut wire.tools {
                 tool.execution
                     .get_or_insert(legacy::ToolExecution { task_support: None })
                     .task_support
-                    .get_or_insert(legacy::ToolExecutionTaskSupport::Optional);
+                    .get_or_insert(default);
             }
             ok_value(id, &wire)
         }
