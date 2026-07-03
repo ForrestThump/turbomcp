@@ -35,6 +35,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
     let mut tools = Vec::new();
     let mut resources = Vec::new();
     let mut prompts = Vec::new();
+    let mut completion: Option<CompletionHandler> = None;
 
     for item in &mut block.items {
         let ImplItem::Fn(f) = item else { continue };
@@ -47,6 +48,15 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
             Marker::Resource { uri, desc } => {
                 resources.push(Handler::parse(f, desc, HandlerKind::Resource { uri })?);
             }
+            Marker::Completion => {
+                if completion.is_some() {
+                    return Err(syn::Error::new(
+                        f.sig.span(),
+                        "a #[server] may declare at most one #[completion] handler",
+                    ));
+                }
+                completion = Some(CompletionHandler::parse(f)?);
+            }
         }
         // Strip per-parameter helper attributes from the re-emitted method.
         strip_param_attrs(f);
@@ -56,6 +66,9 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
     let tools_impl = (!tools.is_empty()).then(|| gen_tools_impl(&self_ty, &tools));
     let resources_impl = (!resources.is_empty()).then(|| gen_resources_impl(&self_ty, &resources));
     let prompts_impl = (!prompts.is_empty()).then(|| gen_prompts_impl(&self_ty, &prompts));
+    let completions_impl = completion
+        .as_ref()
+        .map(|c| gen_completions_impl(&self_ty, c));
 
     let mut registrations = TokenStream::new();
     if !tools.is_empty() {
@@ -66,6 +79,9 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
     }
     if !prompts.is_empty() {
         registrations.extend(quote!(.with_prompts()));
+    }
+    if completion.is_some() {
+        registrations.extend(quote!(.with_completions()));
     }
 
     let entry_impl = quote! {
@@ -96,6 +112,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
         #tools_impl
         #resources_impl
         #prompts_impl
+        #completions_impl
         #entry_impl
     })
 }
@@ -156,14 +173,19 @@ enum Marker {
     Tool(Option<String>),
     Prompt(Option<String>),
     Resource { uri: String, desc: Option<String> },
+    Completion,
 }
 
-/// Find and remove a `#[tool]` / `#[prompt]` / `#[resource(...)]` marker from a
-/// method's attributes, returning its parsed form (and `None` for plain methods).
+/// Find and remove a `#[tool]` / `#[prompt]` / `#[resource(...)]` / `#[completion]`
+/// marker from a method's attributes, returning its parsed form (and `None` for
+/// plain methods).
 fn take_marker(attrs: &mut Vec<Attribute>) -> syn::Result<Option<Marker>> {
     let Some(pos) = attrs.iter().position(|a| {
         let p = &a.path();
-        p.is_ident("tool") || p.is_ident("prompt") || p.is_ident("resource")
+        p.is_ident("tool")
+            || p.is_ident("prompt")
+            || p.is_ident("resource")
+            || p.is_ident("completion")
     }) else {
         return Ok(None);
     };
@@ -173,6 +195,8 @@ fn take_marker(attrs: &mut Vec<Attribute>) -> syn::Result<Option<Marker>> {
         Ok(Some(Marker::Tool(marker_description(&attr)?.or(doc))))
     } else if attr.path().is_ident("prompt") {
         Ok(Some(Marker::Prompt(marker_description(&attr)?.or(doc))))
+    } else if attr.path().is_ident("completion") {
+        Ok(Some(Marker::Completion))
     } else {
         // #[resource("uri")] — URI is required.
         let uri = attr.parse_args::<syn::LitStr>().map_err(|_| {
@@ -629,6 +653,68 @@ fn gen_prompt_get_arm(p: &Handler) -> TokenStream {
             ::turbomcp::IntoGetPromptResult::into_get_prompt_result(
                 self.#method(#(#call_args),*).await
             )
+        }
+    }
+}
+
+// ---- codegen: completions ----------------------------------------------------
+
+/// The single `#[completion]` handler: its method name and whether it takes a
+/// `&CompleteContext` (so the generated delegation passes `ctx` or not).
+struct CompletionHandler {
+    method: Ident,
+    wants_ctx: bool,
+}
+
+impl CompletionHandler {
+    fn parse(f: &ImplItemFn) -> syn::Result<Self> {
+        if f.sig.asyncness.is_none() {
+            return Err(syn::Error::new(
+                f.sig.span(),
+                "handler methods must be `async`",
+            ));
+        }
+        let mut wants_ctx = false;
+        let mut value_params = 0usize;
+        for input in &f.sig.inputs {
+            let FnArg::Typed(pt) = input else { continue };
+            if is_ctx_type(&pt.ty) {
+                wants_ctx = true;
+            } else {
+                value_params += 1;
+            }
+        }
+        if value_params != 1 {
+            return Err(syn::Error::new(
+                f.sig.span(),
+                "a #[completion] handler takes exactly one `neutral::CompleteParams` \
+                 argument (plus an optional `&CompleteContext`)",
+            ));
+        }
+        Ok(Self {
+            method: f.sig.ident.clone(),
+            wants_ctx,
+        })
+    }
+}
+
+fn gen_completions_impl(self_ty: &Type, c: &CompletionHandler) -> TokenStream {
+    let method = &c.method;
+    let call = if c.wants_ctx {
+        quote!(self.#method(ctx, params))
+    } else {
+        quote!(self.#method(params))
+    };
+    quote! {
+        impl ::turbomcp::WithCompletions for #self_ty {
+            #[allow(unused_variables)]
+            async fn complete(
+                &self,
+                ctx: &::turbomcp::CompleteContext,
+                params: ::turbomcp::neutral::CompleteParams,
+            ) -> ::turbomcp::McpResult<::turbomcp::neutral::CompleteResult> {
+                #call.await
+            }
         }
     }
 }

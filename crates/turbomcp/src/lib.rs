@@ -155,7 +155,7 @@ pub use turbomcp_ext_tasks as ext_tasks;
 
 // ---- macros -----------------------------------------------------------------
 
-pub use turbomcp_macros::{mcp_header, prompt, resource, server, tool};
+pub use turbomcp_macros::{completion, mcp_header, prompt, resource, server, tool};
 
 /// Support items referenced by `#[server]`-generated code. **Not** a stable API
 /// — do not depend on it directly; it exists only so generated code has a single
@@ -186,5 +186,5 @@ pub mod prelude {
     #[cfg(feature = "http")]
     pub use crate::http::ServeHttp;
 
-    pub use turbomcp_macros::{mcp_header, prompt, resource, server, tool};
+    pub use turbomcp_macros::{completion, mcp_header, prompt, resource, server, tool};
 }

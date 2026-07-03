@@ -5,9 +5,9 @@
 //! capability trait impls, JSON schemas (via `schemars`), argument validation,
 //! and the `into_server()` / `run_stdio()` entry points.
 //!
-//! `#[tool]`, `#[resource]`, `#[prompt]`, and `#[mcp_header]` are inert markers:
-//! `#[server]` consumes them. They are defined as pass-through attribute macros
-//! only so the names resolve and tooling recognizes them.
+//! `#[tool]`, `#[resource]`, `#[prompt]`, `#[completion]`, and `#[mcp_header]`
+//! are inert markers: `#[server]` consumes them. They are defined as pass-through
+//! attribute macros only so the names resolve and tooling recognizes them.
 #![forbid(unsafe_code)]
 
 use proc_macro::TokenStream;
@@ -53,5 +53,14 @@ pub fn prompt(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Consumed by [`macro@server`].
 #[proc_macro_attribute]
 pub fn mcp_header(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+
+/// Marker: declares the server's `completion/complete` handler. At most one per
+/// `impl`; the method takes `neutral::CompleteParams` (and an optional
+/// `&CompleteContext`) and returns `McpResult<neutral::CompleteResult>`.
+/// Consumed by [`macro@server`].
+#[proc_macro_attribute]
+pub fn completion(_attr: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
