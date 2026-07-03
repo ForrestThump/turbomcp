@@ -21,7 +21,8 @@ context types, and `run_stdio`.
 ## Tool return types
 
 A `#[tool]` may return `String`/`&str`, any numeric or `bool` scalar (→ text),
-`()` (empty success), `Json<T>` (structured output), or a
+`()` (empty success), `Json<T>` (structured output), `Image` / `Audio`
+(base64 `data` + `mime_type` → an image/audio content block), or a
 `neutral::CallToolResult` — each optionally wrapped in `McpResult<_>`. Bare
 scalars work as in v3:
 
@@ -132,8 +133,6 @@ v3 surfaced Tasks one way. In v4 they split by protocol version:
 Tracked for later phases; absent in this alpha:
 
 - **Transports**: TCP, Unix-socket, and WebSocket (v4 surfaces stdio + HTTP).
-- **Multimodal tool returns** (v3's `Image<…>`/`Audio<…>` wrappers): return a
-  `neutral::CallToolResult` with the desired content blocks for now.
 - **`#[completion]`** marker (the `WithCompletions` trait + dispatch exist; the
   macro marker does not).
 - **Templated resource URIs** (RFC 6570, e.g. `file://{path}`) — v4 serves

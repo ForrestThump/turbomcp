@@ -87,6 +87,49 @@ scalar_tool_result!(
     i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize, f32, f64, bool,
 );
 
+/// Return an image from a `#[tool]`: base64-encoded `data` plus its `mime_type`
+/// (e.g. `image/png`) become a single image content block.
+///
+/// ```ignore
+/// #[tool(description = "Render a chart")]
+/// async fn chart(&self) -> Image { Image { data: png_base64, mime_type: "image/png".into() } }
+/// ```
+#[derive(Clone, Debug)]
+pub struct Image {
+    /// Base64-encoded image bytes.
+    pub data: String,
+    /// The image MIME type.
+    pub mime_type: String,
+}
+
+/// Return audio from a `#[tool]`: base64-encoded `data` plus its `mime_type`
+/// (e.g. `audio/wav`) become a single audio content block.
+#[derive(Clone, Debug)]
+pub struct Audio {
+    /// Base64-encoded audio bytes.
+    pub data: String,
+    /// The audio MIME type.
+    pub mime_type: String,
+}
+
+impl IntoCallToolResult for Image {
+    fn into_call_tool_result(self) -> McpResult<neutral::CallToolResult> {
+        Ok(neutral::CallToolResult::new(vec![neutral::Content::image(
+            self.data,
+            self.mime_type,
+        )]))
+    }
+}
+
+impl IntoCallToolResult for Audio {
+    fn into_call_tool_result(self) -> McpResult<neutral::CallToolResult> {
+        Ok(neutral::CallToolResult::new(vec![neutral::Content::audio(
+            self.data,
+            self.mime_type,
+        )]))
+    }
+}
+
 impl<T: Serialize> IntoCallToolResult for Json<T> {
     fn into_call_tool_result(self) -> McpResult<neutral::CallToolResult> {
         let value = serde_json::to_value(&self.0)

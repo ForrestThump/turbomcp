@@ -41,12 +41,12 @@ pub use turbomcp_service::{
 // ---- server -----------------------------------------------------------------
 
 pub use turbomcp_server::{
-    CallToolContext, ClientHandle, CompleteContext, GetPromptContext, IntoCallToolResult,
-    IntoGetPromptResult, IntoReadResourceResult, IntoServerBuilder, Json, LegacySessionAdapter,
-    ListPromptsContext, ListResourceTemplatesContext, ListResourcesContext, ListToolsContext,
-    LogSender, McpServerCore, MethodRouter, ProgressReporter, ReadResourceContext, ServerBuilder,
-    ServerNotifier, SessionState, SessionStore, VersionDispatcher, WithCompletions, WithPrompts,
-    WithResources, WithTools,
+    Audio, CallToolContext, ClientHandle, CompleteContext, GetPromptContext, Image,
+    IntoCallToolResult, IntoGetPromptResult, IntoReadResourceResult, IntoServerBuilder, Json,
+    LegacySessionAdapter, ListPromptsContext, ListResourceTemplatesContext, ListResourcesContext,
+    ListToolsContext, LogSender, McpServerCore, MethodRouter, ProgressReporter,
+    ReadResourceContext, ServerBuilder, ServerNotifier, SessionState, SessionStore,
+    VersionDispatcher, WithCompletions, WithPrompts, WithResources, WithTools,
 };
 
 /// Re-export of [`schemars`] for deriving `JsonSchema` on `#[tool]` argument
@@ -176,7 +176,7 @@ pub mod prelude {
     pub use crate::neutral;
     pub use turbomcp_core::{Implementation, LogLevel, McpError, McpResult, RequestContext};
     pub use turbomcp_server::{
-        CallToolContext, CompleteContext, GetPromptContext, IntoServerBuilder, Json,
+        Audio, CallToolContext, CompleteContext, GetPromptContext, Image, IntoServerBuilder, Json,
         ListPromptsContext, ListResourceTemplatesContext, ListResourcesContext, ListToolsContext,
         McpServerCore, ServerBuilder, WithCompletions, WithPrompts, WithResources, WithTools,
     };

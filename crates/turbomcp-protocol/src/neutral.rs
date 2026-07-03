@@ -35,19 +35,49 @@ pub mod result_type {
     pub const INPUT_REQUIRED: &str = "input_required";
 }
 
-/// A neutral content block. Phase 2 models text; the enum is `#[non_exhaustive]`
-/// so image/audio/resource blocks slot in without breaking callers.
+/// A neutral content block. The enum is `#[non_exhaustive]` so further block
+/// kinds (embedded resources, resource links) slot in without breaking callers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Content {
     /// Plain UTF-8 text.
     Text(String),
+    /// Base64-encoded image data with its MIME type (e.g. `image/png`).
+    Image {
+        /// Base64-encoded image bytes.
+        data: String,
+        /// The image MIME type.
+        mime_type: String,
+    },
+    /// Base64-encoded audio data with its MIME type (e.g. `audio/wav`).
+    Audio {
+        /// Base64-encoded audio bytes.
+        data: String,
+        /// The audio MIME type.
+        mime_type: String,
+    },
 }
 
 impl Content {
     /// A text content block.
     pub fn text(s: impl Into<String>) -> Self {
         Self::Text(s.into())
+    }
+
+    /// An image content block from base64 data and a MIME type.
+    pub fn image(data: impl Into<String>, mime_type: impl Into<String>) -> Self {
+        Self::Image {
+            data: data.into(),
+            mime_type: mime_type.into(),
+        }
+    }
+
+    /// An audio content block from base64 data and a MIME type.
+    pub fn audio(data: impl Into<String>, mime_type: impl Into<String>) -> Self {
+        Self::Audio {
+            data: data.into(),
+            mime_type: mime_type.into(),
+        }
     }
 }
 
@@ -159,6 +189,15 @@ pub struct CallToolResult {
 }
 
 impl CallToolResult {
+    /// A successful result carrying the given content blocks (text, image, audio).
+    pub fn new(content: Vec<Content>) -> Self {
+        Self {
+            content,
+            is_error: false,
+            structured_content: None,
+        }
+    }
+
     /// A successful result carrying a single text block.
     pub fn text(s: impl Into<String>) -> Self {
         Self {
@@ -827,6 +866,24 @@ impl From<Content> for draft::ContentBlock {
                 text,
                 type_: "text".to_string(),
             }),
+            Content::Image { data, mime_type } => {
+                draft::ContentBlock::ImageContent(draft::ImageContent {
+                    annotations: None,
+                    data,
+                    meta: None,
+                    mime_type,
+                    type_: "image".to_string(),
+                })
+            }
+            Content::Audio { data, mime_type } => {
+                draft::ContentBlock::AudioContent(draft::AudioContent {
+                    annotations: None,
+                    data,
+                    meta: None,
+                    mime_type,
+                    type_: "audio".to_string(),
+                })
+            }
         }
     }
 }
@@ -1091,6 +1148,24 @@ impl From<Content> for legacy::ContentBlock {
                 text,
                 type_: "text".to_string(),
             }),
+            Content::Image { data, mime_type } => {
+                legacy::ContentBlock::ImageContent(legacy::ImageContent {
+                    annotations: None,
+                    data,
+                    meta: Map::new(),
+                    mime_type,
+                    type_: "image".to_string(),
+                })
+            }
+            Content::Audio { data, mime_type } => {
+                legacy::ContentBlock::AudioContent(legacy::AudioContent {
+                    annotations: None,
+                    data,
+                    meta: Map::new(),
+                    mime_type,
+                    type_: "audio".to_string(),
+                })
+            }
         }
     }
 }
@@ -1351,6 +1426,14 @@ impl From<draft::ContentBlock> for Content {
     fn from(c: draft::ContentBlock) -> Self {
         match c {
             draft::ContentBlock::TextContent(t) => Content::Text(t.text),
+            draft::ContentBlock::ImageContent(i) => Content::Image {
+                data: i.data,
+                mime_type: i.mime_type,
+            },
+            draft::ContentBlock::AudioContent(a) => Content::Audio {
+                data: a.data,
+                mime_type: a.mime_type,
+            },
             other => content_block_json_fallback(&other),
         }
     }
@@ -1537,6 +1620,14 @@ impl From<legacy::ContentBlock> for Content {
     fn from(c: legacy::ContentBlock) -> Self {
         match c {
             legacy::ContentBlock::TextContent(t) => Content::Text(t.text),
+            legacy::ContentBlock::ImageContent(i) => Content::Image {
+                data: i.data,
+                mime_type: i.mime_type,
+            },
+            legacy::ContentBlock::AudioContent(a) => Content::Audio {
+                data: a.data,
+                mime_type: a.mime_type,
+            },
             other => content_block_json_fallback(&other),
         }
     }
@@ -2021,19 +2112,32 @@ mod tests {
     }
 
     #[test]
-    fn non_text_content_block_falls_back_to_json_text() {
-        // An image block the neutral `Content` enum can't model is preserved as
-        // its JSON serialization rather than dropped (lossy on kind, not data).
-        let image = draft::ContentBlock::ImageContent(draft::ImageContent {
-            annotations: None,
-            data: "Zm9v".to_string(),
-            meta: None,
-            mime_type: "image/png".to_string(),
-            type_: "image".to_string(),
-        });
-        let neutral: Content = image.into();
-        let Content::Text(json) = neutral;
-        assert!(json.contains("image/png"));
-        assert!(json.contains("Zm9v"));
+    fn image_and_audio_content_round_trip() {
+        for content in [
+            Content::image("Zm9v", "image/png"),
+            Content::audio("YmFy", "audio/wav"),
+        ] {
+            // draft
+            let draft_block: draft::ContentBlock = content.clone().into();
+            assert_eq!(Content::from(draft_block), content);
+            // legacy
+            let legacy_block: legacy::ContentBlock = content.clone().into();
+            assert_eq!(Content::from(legacy_block), content);
+        }
+    }
+
+    #[test]
+    fn unmodeled_content_block_falls_back_to_json_text() {
+        // A block the neutral `Content` enum doesn't model (a resource link) is
+        // preserved as its JSON serialization rather than dropped.
+        let link: draft::ResourceLink = serde_json::from_value(json!({
+            "type": "resource_link", "uri": "file://x", "name": "x"
+        }))
+        .expect("resource link");
+        let neutral: Content = draft::ContentBlock::ResourceLink(link).into();
+        let Content::Text(json) = neutral else {
+            panic!("expected JSON text fallback")
+        };
+        assert!(json.contains("file://x"));
     }
 }
