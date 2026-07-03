@@ -179,6 +179,7 @@ pub struct HttpConfig {
     authenticator: Option<Arc<dyn HttpAuthenticator>>,
     rate_limiter: Option<Arc<dyn RateLimiter>>,
     session_terminator: Option<Arc<dyn SessionTerminator>>,
+    trusted_proxies: Vec<IpAddr>,
 }
 
 impl core::fmt::Debug for HttpConfig {
@@ -192,6 +193,7 @@ impl core::fmt::Debug for HttpConfig {
             .field("authenticator", &self.authenticator.is_some())
             .field("rate_limiter", &self.rate_limiter.is_some())
             .field("session_terminator", &self.session_terminator.is_some())
+            .field("trusted_proxies", &self.trusted_proxies)
             .finish()
     }
 }
@@ -208,6 +210,7 @@ impl Default for HttpConfig {
             authenticator: None,
             rate_limiter: None,
             session_terminator: None,
+            trusted_proxies: Vec::new(),
         }
     }
 }
@@ -301,6 +304,18 @@ impl HttpConfig {
         self
     }
 
+    /// Trust these proxy IPs to set `X-Forwarded-For`. When the direct socket
+    /// peer is one of them, the client IP used for rate limiting is taken from
+    /// the right of the `X-Forwarded-For` chain (the first hop not itself
+    /// trusted) instead of the proxy's own address. Spoofable if you list an
+    /// address that isn't actually your proxy — list only your real front ends.
+    /// Empty (default) means the raw socket peer is always used.
+    #[must_use]
+    pub fn with_trusted_proxies(mut self, proxies: impl IntoIterator<Item = IpAddr>) -> Self {
+        self.trusted_proxies = proxies.into_iter().collect();
+        self
+    }
+
     /// Honor client-initiated session termination: a `DELETE` carrying an
     /// `Mcp-Session-Id` ends that `2025-11-25` session (dropping its state and
     /// subscription routes) and answers `204`; an unknown session answers
@@ -335,6 +350,7 @@ struct HttpState<S> {
     authenticator: Option<Arc<dyn HttpAuthenticator>>,
     rate_limiter: Option<Arc<dyn RateLimiter>>,
     session_terminator: Option<Arc<dyn SessionTerminator>>,
+    trusted_proxies: Arc<[IpAddr]>,
 }
 
 /// Build the configured axum [`Router`] for `service` without binding a socket —
@@ -353,6 +369,7 @@ where
         authenticator: config.authenticator.clone(),
         rate_limiter: config.rate_limiter.clone(),
         session_terminator: config.session_terminator.clone(),
+        trusted_proxies: config.trusted_proxies.clone().into(),
     };
     let mut app = Router::new()
         .route(
@@ -410,7 +427,7 @@ where
 
 async fn mcp_post<S>(
     State(state): State<HttpState<S>>,
-    PeerIp(peer_ip): PeerIp,
+    peer: PeerIp,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response
@@ -442,7 +459,11 @@ where
     // Rate limit (if configured) per identity: authenticated → per-subject,
     // anonymous → per source IP. Over budget → 429 + Retry-After, before any
     // dispatch.
-    if let Some(rejection) = enforce_rate_limit(&state, subject.as_deref(), peer_ip) {
+    if let Some(rejection) = enforce_rate_limit(
+        &state,
+        subject.as_deref(),
+        peer.client_ip(&state.trusted_proxies),
+    ) {
         return rejection;
     }
 
@@ -817,11 +838,7 @@ fn sse_response(
 ///
 /// The draft never GETs — it subscribes via `subscriptions/listen` over POST —
 /// so a session-less GET answers `405`, which the spec permits.
-async fn mcp_get<S>(
-    State(state): State<HttpState<S>>,
-    PeerIp(peer_ip): PeerIp,
-    headers: HeaderMap,
-) -> Response
+async fn mcp_get<S>(State(state): State<HttpState<S>>, peer: PeerIp, headers: HeaderMap) -> Response
 where
     S: McpService + Clone + Sync,
     S::Future: Send + 'static,
@@ -834,7 +851,11 @@ where
         Ok(subject) => subject,
         Err(rejection) => return rejection,
     };
-    if let Some(rejection) = enforce_rate_limit(&state, subject.as_deref(), peer_ip) {
+    if let Some(rejection) = enforce_rate_limit(
+        &state,
+        subject.as_deref(),
+        peer.client_ip(&state.trusted_proxies),
+    ) {
         return rejection;
     }
     let Some(sid) = headers
@@ -965,18 +986,51 @@ fn challenge_response(status: u16, www_authenticate: &str) -> Response {
 /// mounts without connect info simply have none. `Option<ConnectInfo<_>>` can't
 /// be used directly — axum 0.8's `Option` extractor needs
 /// `OptionalFromRequestParts`, which `ConnectInfo` doesn't implement.
-struct PeerIp(Option<IpAddr>);
+struct PeerIp {
+    socket: Option<IpAddr>,
+    forwarded: Option<String>,
+}
+
+impl PeerIp {
+    /// The effective client IP for rate limiting. If the direct socket peer is a
+    /// trusted proxy, walk `X-Forwarded-For` from the right to the first hop that
+    /// isn't itself trusted; otherwise use the socket peer as-is.
+    fn client_ip(&self, trusted: &[IpAddr]) -> Option<IpAddr> {
+        let socket = self.socket?;
+        if trusted.is_empty() || !trusted.contains(&socket) {
+            return Some(socket);
+        }
+        let hops: Vec<IpAddr> = self
+            .forwarded
+            .as_deref()
+            .unwrap_or("")
+            .split(',')
+            .filter_map(|s| s.trim().parse().ok())
+            .collect();
+        hops.iter()
+            .rev()
+            .find(|ip| !trusted.contains(ip))
+            .copied()
+            .or_else(|| hops.first().copied())
+            .or(Some(socket))
+    }
+}
 
 impl<St: Send + Sync> FromRequestParts<St> for PeerIp {
     type Rejection = Infallible;
 
     async fn from_request_parts(parts: &mut Parts, _state: &St) -> Result<Self, Infallible> {
-        Ok(PeerIp(
-            parts
+        Ok(PeerIp {
+            socket: parts
                 .extensions
                 .get::<ConnectInfo<SocketAddr>>()
                 .map(|ConnectInfo(addr)| addr.ip()),
-        ))
+            forwarded: parts
+                .headers
+                .get("x-forwarded-for")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned),
+        })
     }
 }
 
@@ -1135,6 +1189,45 @@ mod tests {
             );
         }
         h
+    }
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    fn peer(socket: &str, xff: Option<&str>) -> PeerIp {
+        PeerIp {
+            socket: Some(ip(socket)),
+            forwarded: xff.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn client_ip_uses_socket_when_no_trusted_proxies() {
+        // Even with an XFF header, an empty trust list ignores it (unspoofable).
+        let p = peer("203.0.113.9", Some("1.2.3.4"));
+        assert_eq!(p.client_ip(&[]), Some(ip("203.0.113.9")));
+    }
+
+    #[test]
+    fn client_ip_ignores_xff_from_untrusted_peer() {
+        let p = peer("203.0.113.9", Some("1.2.3.4"));
+        assert_eq!(p.client_ip(&[ip("10.0.0.1")]), Some(ip("203.0.113.9")));
+    }
+
+    #[test]
+    fn client_ip_uses_xff_behind_trusted_proxy() {
+        // Peer is the trusted LB; the real client is the rightmost untrusted hop.
+        let p = peer("10.0.0.1", Some("9.9.9.9, 203.0.113.7"));
+        assert_eq!(p.client_ip(&[ip("10.0.0.1")]), Some(ip("203.0.113.7")));
+    }
+
+    #[test]
+    fn client_ip_skips_trusted_hops_in_xff() {
+        // Two trusted proxies chained: skip both, take the client.
+        let p = peer("10.0.0.1", Some("203.0.113.7, 10.0.0.2"));
+        let trusted = [ip("10.0.0.1"), ip("10.0.0.2")];
+        assert_eq!(p.client_ip(&trusted), Some(ip("203.0.113.7")));
     }
 
     #[test]
