@@ -168,7 +168,9 @@ pub mod __macros {
 
     pub use turbomcp_core::{McpError, McpResult};
     pub use turbomcp_protocol::neutral;
-    pub use turbomcp_server::__macro_support::{mark_mcp_header, normalize_input_schema};
+    pub use turbomcp_server::__macro_support::{
+        mark_mcp_header, match_uri_template, normalize_input_schema,
+    };
 }
 
 /// The common imports for building a server.

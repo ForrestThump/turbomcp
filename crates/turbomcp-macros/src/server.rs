@@ -372,13 +372,26 @@ impl Handler {
             }
         }
 
-        if let HandlerKind::Resource { .. } = kind {
-            if !args.is_empty() {
+        if let HandlerKind::Resource { uri } = &kind {
+            let vars = template_vars(uri);
+            if vars.is_empty() && !args.is_empty() {
                 return Err(syn::Error::new(
                     f.sig.span(),
-                    "resource templates (parameterized URIs) are not yet supported; \
-                     a #[resource] method may take only `&self` and an optional context",
+                    "a fixed-URI #[resource] takes only `&self` and an optional context; \
+                     use a URI template (e.g. `#[resource(\"file://{path}\")]`) to accept args",
                 ));
+            }
+            // Every handler argument must name a template variable.
+            for a in &args {
+                if !vars.contains(&a.ident.to_string()) {
+                    return Err(syn::Error::new(
+                        a.ident.span(),
+                        format!(
+                            "resource argument `{}` does not match any variable in the URI template `{uri}`",
+                            a.ident
+                        ),
+                    ));
+                }
             }
         }
 
@@ -581,7 +594,17 @@ fn gen_tool_call_arm(t: &Handler) -> TokenStream {
 // ---- codegen: resources ------------------------------------------------------
 
 fn gen_resources_impl(self_ty: &Type, resources: &[Handler]) -> TokenStream {
-    let list_entries = resources.iter().map(|r| {
+    let is_template = |r: &Handler| {
+        let HandlerKind::Resource { uri } = &r.kind else {
+            unreachable!()
+        };
+        uri.contains('{')
+    };
+    let fixed: Vec<&Handler> = resources.iter().filter(|r| !is_template(r)).collect();
+    let templated: Vec<&Handler> = resources.iter().filter(|r| is_template(r)).collect();
+
+    // resources/list — concrete resources only (templates go to templates/list).
+    let list_entries = fixed.iter().map(|r| {
         let HandlerKind::Resource { uri } = &r.kind else {
             unreachable!()
         };
@@ -592,19 +615,89 @@ fn gen_resources_impl(self_ty: &Type, resources: &[Handler]) -> TokenStream {
             .map(|d| quote!(.with_description(#d)));
         quote!(::turbomcp::neutral::Resource::new(#uri, #name) #desc)
     });
-    let read_arms = resources.iter().map(|r| {
+
+    // resources/templates/list — parameterized URIs.
+    let template_entries = templated.iter().map(|r| {
+        let HandlerKind::Resource { uri } = &r.kind else {
+            unreachable!()
+        };
+        let name = r.method.to_string();
+        let desc = r
+            .description
+            .as_ref()
+            .map(|d| quote!(.with_description(#d)));
+        quote!(::turbomcp::neutral::ResourceTemplate::new(#uri, #name) #desc)
+    });
+
+    let fixed_arms = fixed.iter().map(|r| {
         let HandlerKind::Resource { uri } = &r.kind else {
             unreachable!()
         };
         let method = &r.method;
-        let call_args = r.call_args(|_| quote!(compile_error!("resource args unsupported")));
+        let call_args = r.call_args(|_| quote!(compile_error!("fixed resource takes no args")));
         quote! {
-            #uri => ::turbomcp::IntoReadResourceResult::into_read_resource_result(
+            #uri => return ::turbomcp::IntoReadResourceResult::into_read_resource_result(
                 self.#method(#(#call_args),*).await,
                 #uri,
             ),
         }
     });
+
+    // Each templated resource: try to match the incoming URI, bind vars by name.
+    let template_matches = templated.iter().map(|r| {
+        let HandlerKind::Resource { uri } = &r.kind else {
+            unreachable!()
+        };
+        let method = &r.method;
+        let extracts = r.args.iter().map(|a| {
+            let ident = &a.ident;
+            let arg_name = a.ident.to_string();
+            quote! {
+                let #ident: ::std::string::String = match __vars.iter()
+                    .find(|(k, _)| k == #arg_name)
+                {
+                    ::core::option::Option::Some((_, v)) => ::core::clone::Clone::clone(v),
+                    ::core::option::Option::None => return ::core::result::Result::Err(
+                        ::turbomcp::McpError::internal(
+                            ::std::format!("template var '{}' missing", #arg_name)
+                        )
+                    ),
+                };
+            }
+        });
+        let call_args = r.call_args(|a| {
+            let f = &a.ident;
+            quote!(#f)
+        });
+        quote! {
+            if let ::core::option::Option::Some(__vars) =
+                ::turbomcp::__macros::match_uri_template(#uri, __uri)
+            {
+                #(#extracts)*
+                return ::turbomcp::IntoReadResourceResult::into_read_resource_result(
+                    self.#method(#(#call_args),*).await,
+                    __uri,
+                );
+            }
+        }
+    });
+
+    let templates_list_fn = (!templated.is_empty()).then(|| {
+        quote! {
+            async fn list_resource_templates(
+                &self,
+                _ctx: &::turbomcp::ListResourceTemplatesContext,
+                _params: ::turbomcp::neutral::ListParams,
+            ) -> ::turbomcp::McpResult<::turbomcp::neutral::ListResourceTemplatesResult> {
+                ::core::result::Result::Ok(
+                    ::turbomcp::neutral::ListResourceTemplatesResult::new(
+                        ::std::vec![ #(#template_entries),* ],
+                    )
+                )
+            }
+        }
+    });
+
     quote! {
         impl ::turbomcp::WithResources for #self_ty {
             async fn list_resources(
@@ -617,18 +710,23 @@ fn gen_resources_impl(self_ty: &Type, resources: &[Handler]) -> TokenStream {
                 ))
             }
 
+            #templates_list_fn
+
             #[allow(unused_variables)]
             async fn read_resource(
                 &self,
                 ctx: &::turbomcp::ReadResourceContext,
                 params: ::turbomcp::neutral::ReadResourceParams,
             ) -> ::turbomcp::McpResult<::turbomcp::neutral::ReadResourceResult> {
-                match params.uri.as_str() {
-                    #(#read_arms)*
-                    other => ::core::result::Result::Err(
-                        ::turbomcp::McpError::resource_not_found(other)
-                    ),
+                let __uri = params.uri.as_str();
+                match __uri {
+                    #(#fixed_arms)*
+                    _ => {}
                 }
+                #(#template_matches)*
+                ::core::result::Result::Err(
+                    ::turbomcp::McpError::resource_not_found(__uri)
+                )
             }
         }
     }
@@ -791,6 +889,24 @@ fn gen_completions_impl(self_ty: &Type, c: &CompletionHandler) -> TokenStream {
 }
 
 // ---- small helpers -----------------------------------------------------------
+
+/// Variable names in an RFC 6570 URI template (`{var}` / `{+var}`), in order.
+fn template_vars(uri: &str) -> Vec<String> {
+    let mut vars = Vec::new();
+    let mut rest = uri;
+    while let Some(open) = rest.find('{') {
+        let Some(close_rel) = rest[open..].find('}') else {
+            break;
+        };
+        let mut var = &rest[open + 1..open + close_rel];
+        var = var.strip_prefix('+').unwrap_or(var);
+        if !var.is_empty() {
+            vars.push(var.to_string());
+        }
+        rest = &rest[open + close_rel + 1..];
+    }
+    vars
+}
 
 /// A string literal `Expr`, or `None`.
 fn lit_str(e: &Expr) -> Option<String> {

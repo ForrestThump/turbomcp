@@ -136,5 +136,3 @@ v3 surfaced Tasks one way. In v4 they split by protocol version:
 Tracked for later phases; absent in this alpha:
 
 - **Transports**: TCP, Unix-socket, and WebSocket (v4 surfaces stdio + HTTP).
-- **Templated resource URIs** (RFC 6570, e.g. `file://{path}`) — v4 serves
-  fixed-URI resources today.

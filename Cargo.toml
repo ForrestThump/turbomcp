@@ -71,6 +71,9 @@ pin-project-lite = "0.2.17"
 walkdir = "2.5"
 tempfile = "3.27"
 
+# URI template (RFC 6570) matching for #[resource("…/{var}")] — the pattern core
+regex = "1.11"
+
 # Serialization with performance focus
 serde = { version = "1.0.228", features = ["derive", "rc"] }
 serde_json = { version = "1.0.149", features = ["raw_value", "preserve_order"] }
