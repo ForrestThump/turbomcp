@@ -9,7 +9,7 @@ both halves of the protocol, server **and** client — with a macro-driven,
 zero-boilerplate surface and strict spec compliance as a feature.
 
 > **Status: `4.0.0-alpha.1`.** v4 is a from-scratch rewrite of TurboMCP; the
-> stable line is `3.x`. Edition 2024, MSRV 1.85.
+> stable line is `3.x`. Edition 2024, MSRV 1.88.
 
 ## What you get
 

@@ -2,7 +2,7 @@
 name = "turbomcp-codec"
 version = "4.0.0-alpha.1"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 authors = ["Nicholas Paterno <nick@epistates.com>"]
 description = "TurboMCP v4 wire codec: bytes <-> JsonRpcMessage (serde_json / sonic-rs / msgpack)."
 license = "MIT"
