@@ -10,4 +10,15 @@ repository = "https://github.com/Epistates/turbomcp"
 homepage = "https://turbomcp.org"
 
 [dependencies]
-turbomcp-core = { workspace = true }
+turbomcp-core = { workspace = true, features = ["std"] }
+turbomcp-codec = { workspace = true }
+turbomcp-service = { workspace = true }
+tokio-tungstenite = { workspace = true }
+tokio = { workspace = true, features = ["rt", "net"] }
+futures = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "io-util"] }
+serde_json = { workspace = true }

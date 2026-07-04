@@ -119,6 +119,13 @@ pub mod http {
     }
 }
 
+/// WebSocket transport (bidirectional, non-spec convenience). Enable with the
+/// `websocket` feature. Serve with
+/// [`ws::serve_websocket`](ws::serve_websocket) over a `TcpListener`, or connect
+/// a client transport with [`ws::connect`](ws::connect).
+#[cfg(feature = "websocket")]
+pub use turbomcp_transport_ws as ws;
+
 /// OAuth 2.1 resource-server auth: bearer-token validation + RFC 9728 metadata.
 /// Enable with the `auth` feature, then protect an HTTP endpoint with
 /// [`HttpConfig::with_authenticator`](http::HttpConfig::with_authenticator).

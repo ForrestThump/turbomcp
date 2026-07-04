@@ -21,6 +21,8 @@ auth = ["dep:turbomcp-auth"]
 # OpenTelemetry observability: the TraceContextLayer + W3C propagation +
 # redaction. Add `otlp` (on the telemetry crate) for the export pipeline.
 telemetry = ["dep:turbomcp-telemetry"]
+# WebSocket transport (bidirectional, non-spec convenience). Server + client.
+websocket = ["dep:turbomcp-transport-ws"]
 # The MCP client (ClientBuilder, ConnectMode probe, typed neutral API). The
 # other half of the protocol; opt-in for server-only users.
 client = ["dep:turbomcp-client"]
@@ -36,6 +38,7 @@ turbomcp-service = { workspace = true }
 turbomcp-server = { workspace = true }
 turbomcp-transport-stdio = { workspace = true }
 turbomcp-transport-http = { workspace = true, optional = true }
+turbomcp-transport-ws = { workspace = true, optional = true }
 turbomcp-auth = { workspace = true, optional = true }
 turbomcp-telemetry = { workspace = true, optional = true }
 turbomcp-client = { workspace = true, optional = true }

@@ -135,4 +135,5 @@ v3 surfaced Tasks one way. In v4 they split by protocol version:
 
 Tracked for later phases; absent in this alpha:
 
-- **Transports**: TCP, Unix-socket, and WebSocket (v4 surfaces stdio + HTTP).
+- **Transports**: TCP and Unix-socket (v4 surfaces stdio, HTTP, and WebSocket —
+  enable the `websocket` feature and serve with `turbomcp::ws::serve_websocket`).
