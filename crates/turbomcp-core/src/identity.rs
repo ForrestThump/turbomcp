@@ -88,6 +88,44 @@ impl Identity {
     fn claim_keys_of(claims: &Claims) -> Vec<&str> {
         claims.keys().map(String::as_str).collect()
     }
+
+    /// Look up a claim *value* by key (for programmatic access such as scope
+    /// checks). This does not affect the redaction-safe logging view — `Debug`,
+    /// [`claim_keys`](Self::claim_keys), and [`RedactedSubject`] still never
+    /// print claim values.
+    #[must_use]
+    pub fn claim(&self, key: &str) -> Option<&Value> {
+        match self {
+            Self::Anonymous => None,
+            Self::Bearer { claims, .. } | Self::Dpop { claims, .. } => claims.get(key),
+            Self::Custom(c) => c.claim(key),
+        }
+    }
+
+    /// The OAuth scopes granted to this identity, read from the standard `scope`
+    /// (space-delimited string) and `scp` (array) claims.
+    #[must_use]
+    pub fn granted_scopes(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(Value::String(s)) = self.claim("scope") {
+            out.extend(s.split_whitespace().map(String::from));
+        }
+        if let Some(Value::Array(arr)) = self.claim("scp") {
+            out.extend(arr.iter().filter_map(|v| v.as_str().map(String::from)));
+        }
+        out
+    }
+
+    /// Whether this identity holds every scope in `required` (`true` if the
+    /// requirement is empty). Anonymous identities hold no scopes.
+    #[must_use]
+    pub fn has_scopes(&self, required: &[&str]) -> bool {
+        if required.is_empty() {
+            return true;
+        }
+        let granted = self.granted_scopes();
+        required.iter().all(|r| granted.iter().any(|g| g == r))
+    }
 }
 
 impl fmt::Debug for Identity {

@@ -24,8 +24,8 @@
 // ---- foundation -------------------------------------------------------------
 
 pub use turbomcp_core::{
-    Implementation, JsonRpcMessage, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, LogLevel,
-    McpError, McpResult, ProtocolVersion, RequestContext, RequestId,
+    Claims, Identity, Implementation, JsonRpcMessage, JsonRpcNotification, JsonRpcRequest,
+    JsonRpcResponse, LogLevel, McpError, McpResult, ProtocolVersion, RequestContext, RequestId,
 };
 
 /// Version-stable, handler-facing types (the surface user handlers speak).

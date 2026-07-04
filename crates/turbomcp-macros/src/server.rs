@@ -43,9 +43,10 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
             continue;
         };
         match kind {
-            Marker::Tool { desc, task } => {
+            Marker::Tool { desc, task, scopes } => {
                 let mut h = Handler::parse(f, desc, HandlerKind::Tool)?;
                 h.task = task;
+                h.scopes = scopes;
                 tools.push(h);
             }
             Marker::Prompt(desc) => prompts.push(Handler::parse(f, desc, HandlerKind::Prompt)?),
@@ -174,17 +175,25 @@ impl ServerArgs {
 }
 
 enum Marker {
-    Tool { desc: Option<String>, task: bool },
+    Tool {
+        desc: Option<String>,
+        task: bool,
+        scopes: Vec<String>,
+    },
     Prompt(Option<String>),
-    Resource { uri: String, desc: Option<String> },
+    Resource {
+        uri: String,
+        desc: Option<String>,
+    },
     Completion,
 }
 
 /// One argument inside `#[tool(...)]`: a bare description string, `description =
-/// "…"`, or the `task` flag (opt the tool into `2025-11-25` task support).
+/// "…"`, the `task` flag, or `scopes("…", …)` (required OAuth scopes).
 enum ToolArg {
     Desc(String),
     Task,
+    Scopes(Vec<String>),
 }
 
 impl Parse for ToolArg {
@@ -206,32 +215,43 @@ impl Parse for ToolArg {
                     "expected `description = \"…\"`",
                 )),
             }
+        } else if meta.path().is_ident("scopes") {
+            match meta {
+                Meta::List(list) => {
+                    let lits =
+                        list.parse_args_with(Punctuated::<LitStr, Token![,]>::parse_terminated)?;
+                    Ok(ToolArg::Scopes(lits.iter().map(LitStr::value).collect()))
+                }
+                _ => Err(syn::Error::new(meta.span(), "expected `scopes(\"…\", …)`")),
+            }
         } else {
             Err(syn::Error::new(
                 meta.span(),
-                "expected `description = \"…\"` or `task`",
+                "expected `description = \"…\"`, `task`, or `scopes(…)`",
             ))
         }
     }
 }
 
 /// Parse `#[tool]`, `#[tool("…")]`, `#[tool(description = "…")]`, `#[tool(task)]`,
-/// and their combinations, into `(description, task)`.
-fn parse_tool_args(attr: &Attribute) -> syn::Result<(Option<String>, bool)> {
+/// `#[tool(scopes(…))]`, and their combinations.
+fn parse_tool_args(attr: &Attribute) -> syn::Result<(Option<String>, bool, Vec<String>)> {
     match &attr.meta {
-        Meta::Path(_) => Ok((None, false)),
-        Meta::NameValue(nv) => Ok((lit_str(&nv.value), false)),
+        Meta::Path(_) => Ok((None, false, Vec::new())),
+        Meta::NameValue(nv) => Ok((lit_str(&nv.value), false, Vec::new())),
         Meta::List(_) => {
             let args = attr.parse_args_with(Punctuated::<ToolArg, Token![,]>::parse_terminated)?;
             let mut desc = None;
             let mut task = false;
+            let mut scopes = Vec::new();
             for a in args {
                 match a {
                     ToolArg::Desc(s) => desc = Some(s),
                     ToolArg::Task => task = true,
+                    ToolArg::Scopes(s) => scopes = s,
                 }
             }
-            Ok((desc, task))
+            Ok((desc, task, scopes))
         }
     }
 }
@@ -252,10 +272,11 @@ fn take_marker(attrs: &mut Vec<Attribute>) -> syn::Result<Option<Marker>> {
     let attr = attrs.remove(pos);
     let doc = doc_comment(attrs);
     if attr.path().is_ident("tool") {
-        let (desc, task) = parse_tool_args(&attr)?;
+        let (desc, task, scopes) = parse_tool_args(&attr)?;
         Ok(Some(Marker::Tool {
             desc: desc.or(doc),
             task,
+            scopes,
         }))
     } else if attr.path().is_ident("prompt") {
         Ok(Some(Marker::Prompt(marker_description(&attr)?.or(doc))))
@@ -331,6 +352,8 @@ struct Handler {
     ret_ty: Option<Type>,
     /// `#[tool(task)]`: opt this tool into `2025-11-25` task support. Tools only.
     task: bool,
+    /// `#[tool(scopes(…))]`: OAuth scopes the caller must hold. Tools only.
+    scopes: Vec<String>,
 }
 
 impl Handler {
@@ -408,6 +431,7 @@ impl Handler {
             slots,
             ret_ty,
             task: false,
+            scopes: Vec::new(),
         })
     }
 
@@ -570,8 +594,23 @@ fn gen_tool_call_arm(t: &Handler) -> TokenStream {
         let f = &a.ident;
         quote!(__args.#f)
     });
+    // `#[tool(scopes(…))]`: deny the call unless the caller holds every scope.
+    let scope_guard = (!t.scopes.is_empty()).then(|| {
+        let scopes = &t.scopes;
+        let needed = t.scopes.join(", ");
+        quote! {
+            if !ctx.base.identity.has_scopes(&[#(#scopes),*]) {
+                return ::core::result::Result::Ok(
+                    ::turbomcp::neutral::CallToolResult::error(
+                        ::std::format!("insufficient scope: '{}' requires {}", #name, #needed)
+                    )
+                );
+            }
+        }
+    });
     quote! {
         #name => {
+            #scope_guard
             let __args: #ident = match ::turbomcp::__macros::serde_json::from_value(
                 ::turbomcp::__macros::serde_json::Value::Object(params.arguments)
             ) {
