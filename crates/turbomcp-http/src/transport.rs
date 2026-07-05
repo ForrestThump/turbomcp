@@ -755,12 +755,21 @@ impl StreamableHttpClientTransport {
         }
     }
 
-    /// Process SSE event from POST response
+    /// Process one complete SSE event (already split off a `\n\n` boundary) from a POST
+    /// response stream, queue it, and report whether it was the JSON-RPC *response* correlated
+    /// to `expected_id` — as opposed to some other message (a request or notification) the
+    /// server chose to send first over the same stream.
+    ///
+    /// Per the MCP Streamable HTTP transport, a server MAY keep this per-POST SSE stream open
+    /// after sending the correlated response (e.g. to send further related messages later); the
+    /// caller must stop reading once it has that response rather than waiting for the stream to
+    /// close, which is not guaranteed to happen. See `send()`'s call site.
     async fn process_post_sse_event(
         event_str: &str,
         response_sender: &mpsc::Sender<TransportMessage>,
         last_event_id: &Arc<RwLock<Option<String>>>,
-    ) -> TransportResult<()> {
+        expected_id: Option<&serde_json::Value>,
+    ) -> TransportResult<bool> {
         let lines: Vec<&str> = event_str.lines().collect();
         let mut event_data: Vec<String> = Vec::new();
         let mut event_id: Option<String> = None;
@@ -792,19 +801,29 @@ impl StreamableHttpClientTransport {
         }
 
         if event_data.is_empty() {
-            return Ok(());
+            return Ok(false);
         }
 
         let data_str = event_data.join("\n");
         if data_str.trim().is_empty() {
             debug!("Skipping empty POST SSE event");
-            return Ok(());
+            return Ok(false);
         }
 
         // Parse as JSON-RPC message
         let json_value: serde_json::Value = serde_json::from_str(&data_str).map_err(|e| {
             TransportError::SerializationFailed(format!("Invalid JSON in POST SSE: {}", e))
         })?;
+
+        // A JSON-RPC *response* carries "id" plus "result" xor "error" — that's what the caller
+        // is waiting for. A request or notification the server sends first over the same stream
+        // (e.g. a progress notification) has no such shape and must not end the read loop early.
+        let is_correlated_response = json_value.get("id").is_some()
+            && (json_value.get("result").is_some() || json_value.get("error").is_some())
+            && match expected_id {
+                Some(expected) => json_value.get("id") == Some(expected),
+                None => true,
+            };
 
         let message = TransportMessage::new(
             MessageId::from("post-sse-response".to_string()),
@@ -823,7 +842,7 @@ impl StreamableHttpClientTransport {
             "Queued message from POST SSE stream: {}",
             String::from_utf8_lossy(&message.payload)
         );
-        Ok(())
+        Ok(is_correlated_response)
     }
 
     /// Await the next inbound message.
@@ -946,9 +965,24 @@ impl Transport for StreamableHttpClientTransport {
 
                 debug!("JSON response queued successfully");
             } else if content_type.contains("text/event-stream") {
-                // MCP 2025-11-25: Server returned SSE stream response from POST
-                // Process the stream synchronously to ensure responses are available
+                // MCP 2025-11-25: Server returned SSE stream response from POST.
+                //
+                // Per the Streamable HTTP transport, a server MAY keep this stream open *after*
+                // sending the JSON-RPC response correlated to our request (e.g. to send further
+                // related messages later) — it is not required to close it. So this loop must
+                // stop as soon as it has queued that correlated response, not wait for the
+                // stream to end; otherwise a compliant server that keeps the connection open
+                // hangs this call until an unrelated operation-level timeout papers over it.
                 debug!("Received SSE stream response from POST, processing events");
+
+                // The outgoing request's own "id", so we know which SSE event is *the* response
+                // versus some other message (a notification, say) the server sends first over
+                // the same stream. `None` when the outgoing payload isn't a single object with an
+                // "id" (e.g. a notification) — in that case any response-shaped event ends the loop.
+                let expected_id: Option<serde_json::Value> =
+                    serde_json::from_slice::<serde_json::Value>(&message.payload)
+                        .ok()
+                        .and_then(|v| v.get("id").cloned());
 
                 let response_sender = self.response_sender.clone();
                 let last_event_id = Arc::clone(&self.last_event_id);
@@ -976,14 +1010,19 @@ impl Transport for StreamableHttpClientTransport {
                                 let event_str = buffer[..pos].to_string();
                                 buffer = buffer[pos + 2..].to_string();
 
-                                if let Err(e) = Self::process_post_sse_event(
+                                match Self::process_post_sse_event(
                                     &event_str,
                                     &response_sender,
                                     &last_event_id,
+                                    expected_id.as_ref(),
                                 )
                                 .await
                                 {
-                                    warn!("Failed to process POST SSE event: {}", e);
+                                    Ok(true) => break 'post_sse_loop,
+                                    Ok(false) => {}
+                                    Err(e) => {
+                                        warn!("Failed to process POST SSE event: {}", e);
+                                    }
                                 }
                             }
 
@@ -1267,14 +1306,16 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(1);
         let last_event_id = Arc::new(RwLock::new(None));
 
-        StreamableHttpClientTransport::process_post_sse_event(
+        let is_response = StreamableHttpClientTransport::process_post_sse_event(
             "id: primer-1\nevent: message\ndata:    \n",
             &tx,
             &last_event_id,
+            None,
         )
         .await
         .expect("whitespace POST SSE event should be ignored");
 
+        assert!(!is_response, "an ignored/empty event is never the response");
         assert_eq!(last_event_id.read().await.as_deref(), Some("primer-1"));
         assert!(rx.try_recv().is_err());
     }
@@ -1284,18 +1325,91 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(1);
         let last_event_id = Arc::new(RwLock::new(None));
 
-        StreamableHttpClientTransport::process_post_sse_event(
+        let is_response = StreamableHttpClientTransport::process_post_sse_event(
             "id: msg-1\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n",
             &tx,
             &last_event_id,
+            None,
         )
         .await
         .expect("valid POST SSE event should be queued");
 
+        assert!(
+            is_response,
+            "a result-bearing message is the correlated response"
+        );
         assert_eq!(last_event_id.read().await.as_deref(), Some("msg-1"));
         let message = rx.try_recv().expect("queued message");
         let value: serde_json::Value =
             serde_json::from_slice(&message.payload).expect("valid queued JSON");
         assert_eq!(value["jsonrpc"], "2.0");
+    }
+
+    #[tokio::test]
+    async fn test_post_sse_notification_before_response_does_not_end_the_read_loop() {
+        // A server MAY send other messages (e.g. a progress notification — "method", no
+        // "result"/"error") over the same POST-response stream before the actual correlated
+        // response. The caller must keep reading past it, not treat it as the final response.
+        let (tx, mut rx) = mpsc::channel(2);
+        let last_event_id = Arc::new(RwLock::new(None));
+        let expected_id = serde_json::json!(1);
+
+        let is_response = StreamableHttpClientTransport::process_post_sse_event(
+            "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{}}\n",
+            &tx,
+            &last_event_id,
+            Some(&expected_id),
+        )
+        .await
+        .expect("notification event should be queued, not erred");
+        assert!(
+            !is_response,
+            "a notification is never the correlated response"
+        );
+
+        let is_response = StreamableHttpClientTransport::process_post_sse_event(
+            "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n",
+            &tx,
+            &last_event_id,
+            Some(&expected_id),
+        )
+        .await
+        .expect("valid POST SSE event should be queued");
+        assert!(
+            is_response,
+            "the id-matching result IS the correlated response"
+        );
+
+        assert!(
+            !rx.try_recv()
+                .expect("notification queued")
+                .payload
+                .is_empty()
+        );
+        assert!(rx.try_recv().is_ok(), "response also queued");
+    }
+
+    #[tokio::test]
+    async fn test_post_sse_response_with_mismatched_id_is_not_the_correlated_response() {
+        // A late-arriving response to a DIFFERENT request than the one we're waiting on must not
+        // be mistaken for ours — only an exact id match ends the read loop.
+        let (tx, mut rx) = mpsc::channel(1);
+        let last_event_id = Arc::new(RwLock::new(None));
+        let expected_id = serde_json::json!(2);
+
+        let is_response = StreamableHttpClientTransport::process_post_sse_event(
+            "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n",
+            &tx,
+            &last_event_id,
+            Some(&expected_id),
+        )
+        .await
+        .expect("valid POST SSE event should be queued");
+
+        assert!(!is_response, "id 1 does not match the expected id 2");
+        assert!(
+            rx.try_recv().is_ok(),
+            "still queued for the caller, just not the loop's exit signal"
+        );
     }
 }
