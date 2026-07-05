@@ -28,6 +28,27 @@ use turbomcp_transport_traits::{
     TransportType, validate_request_size, validate_response_size,
 };
 
+/// Normalize SSE line endings to bare `\n`.
+///
+/// The SSE specification (and the MCP servers built on frameworks that follow it) permits a line
+/// to be terminated by `\r\n`, a lone `\r`, or `\n` — clients are required to accept all three.
+/// Both SSE read loops in this file locate event boundaries with a `\n\n` search, which silently
+/// finds nothing (and therefore silently drops every event, with no error) against a server that
+/// emits `\r\n`. Confirmed live against a real MCP server that does exactly this.
+///
+/// Applied per-chunk before appending to the read buffer. A chunk boundary that happens to land
+/// exactly inside a `\r\n` pair produces one extra blank line in the reassembled buffer in the
+/// rare worst case — harmless, since the per-field event parser below already treats blank lines
+/// as a no-op — so this stays a simple per-chunk pass rather than carrying a pending-CR byte
+/// across chunk boundaries.
+fn normalize_sse_line_endings(chunk: &str) -> std::borrow::Cow<'_, str> {
+    if chunk.contains('\r') {
+        std::borrow::Cow::Owned(chunk.replace("\r\n", "\n").replace('\r', "\n"))
+    } else {
+        std::borrow::Cow::Borrowed(chunk)
+    }
+}
+
 /// Retry policy for auto-reconnect
 #[derive(Clone, Debug)]
 pub enum RetryPolicy {
@@ -593,7 +614,15 @@ impl StreamableHttpClientTransport {
                         match chunk_result {
                             Ok(chunk) => {
                                 let chunk_str = String::from_utf8_lossy(&chunk);
-                                buffer.push_str(&chunk_str);
+                                // The SSE spec (and MCP servers built on frameworks that default
+                                // to it) permits `\r\n` or a lone `\r` as a line terminator, not
+                                // just `\n` — normalize per chunk so the `\n\n` event-boundary
+                                // search below works regardless of which convention the server
+                                // uses. (A chunk boundary landing exactly inside a `\r\n` pair
+                                // yields one extra blank line in the rare worst case, which the
+                                // per-field parser below already treats as a no-op — not worth
+                                // the complexity of carrying a pending-CR byte across chunks.)
+                                buffer.push_str(&normalize_sse_line_endings(&chunk_str));
 
                                 // Process complete events
                                 while let Some(pos) = buffer.find("\n\n") {
@@ -1003,7 +1032,11 @@ impl Transport for StreamableHttpClientTransport {
                     match chunk_result {
                         Ok(chunk) => {
                             let chunk_str = String::from_utf8_lossy(&chunk);
-                            buffer.push_str(&chunk_str);
+                            // See the matching comment in the GET SSE loop above: normalize
+                            // `\r\n`/lone `\r` to `\n` per chunk so the event-boundary search
+                            // below works against servers using either line-ending convention
+                            // (confirmed necessary live against a real server that emits `\r\n`).
+                            buffer.push_str(&normalize_sse_line_endings(&chunk_str));
 
                             // Process complete events
                             while let Some(pos) = buffer.find("\n\n") {
@@ -1180,6 +1213,30 @@ impl Transport for StreamableHttpClientTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_normalize_sse_line_endings_converts_crlf() {
+        let input = "event: message\r\ndata: {\"a\":1}\r\n\r\n";
+        assert_eq!(
+            normalize_sse_line_endings(input),
+            "event: message\ndata: {\"a\":1}\n\n"
+        );
+    }
+
+    #[test]
+    fn test_normalize_sse_line_endings_converts_lone_cr() {
+        let input = "event: message\rdata: {\"a\":1}\r\r";
+        assert_eq!(
+            normalize_sse_line_endings(input),
+            "event: message\ndata: {\"a\":1}\n\n"
+        );
+    }
+
+    #[test]
+    fn test_normalize_sse_line_endings_leaves_bare_lf_untouched() {
+        let input = "event: message\ndata: {\"a\":1}\n\n";
+        assert_eq!(normalize_sse_line_endings(input), input);
+    }
 
     #[test]
     fn test_retry_policy_fixed() {
@@ -1411,5 +1468,41 @@ mod tests {
             rx.try_recv().is_ok(),
             "still queued for the caller, just not the loop's exit signal"
         );
+    }
+
+    #[tokio::test]
+    async fn test_post_sse_event_with_crlf_line_endings_is_parsed() {
+        // Reproduces a real server's raw bytes (confirmed via a live capture): SSE fields
+        // terminated with `\r\n`, event boundary `\r\n\r\n`. Simulates the buffer normalization
+        // `send()` applies per chunk before handing a complete event to this function — without
+        // it, `event_str.lines()` still splits `\r\n` correctly (Rust's `lines()` already strips
+        // a trailing `\r`), but the buffer-level `\n\n` boundary search upstream would never fire
+        // on a `\r\n\r\n`-only stream, so the event would never reach this function at all. This
+        // test exercises the normalize step directly to prove the boundary is found.
+        let raw = "id: 1\r\nevent: message\r\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\r\n\r\nrest";
+        let normalized = normalize_sse_line_endings(raw);
+        let pos = normalized
+            .find("\n\n")
+            .expect("normalized buffer must expose an event boundary");
+        let event_str = &normalized[..pos];
+
+        let (tx, mut rx) = mpsc::channel(1);
+        let last_event_id = Arc::new(RwLock::new(None));
+
+        let is_response = StreamableHttpClientTransport::process_post_sse_event(
+            event_str,
+            &tx,
+            &last_event_id,
+            None,
+        )
+        .await
+        .expect("CRLF-terminated event should parse");
+
+        assert!(is_response);
+        assert_eq!(last_event_id.read().await.as_deref(), Some("1"));
+        let message = rx.try_recv().expect("queued message");
+        let value: serde_json::Value =
+            serde_json::from_slice(&message.payload).expect("valid queued JSON");
+        assert_eq!(value["result"], serde_json::json!({}));
     }
 }
