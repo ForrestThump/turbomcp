@@ -91,62 +91,174 @@ use turbomcp_codec::{Codec, DefaultCodec};
 use turbomcp_core::{JsonRpcMessage, ProtocolVersion, RequestId, meta};
 use turbomcp_service::{
     AuthDecision, CancellationToken, HttpAuthenticator, McpService, ProtocolError, RateKey,
-    RateLimiter, SessionTerminator, outbound,
+    RateLimiter, SessionTerminator, mcp_headers, outbound,
 };
 
 /// The session header of the `2025-11-25` Streamable HTTP transport.
 const HEADER_SESSION_ID: HeaderName = HeaderName::from_static("mcp-session-id");
-/// The per-request version header of the `2025-11-25` Streamable HTTP transport.
+/// The per-request version header of the Streamable HTTP transport.
 const HEADER_PROTOCOL_VERSION: HeaderName = HeaderName::from_static("mcp-protocol-version");
-/// Header-name prefix carrying a `#[mcp_header]` tool parameter (`Mcp-Param-<name>`).
-/// Compared case-insensitively (HTTP lowercases header names), so parameter names
-/// must be lowercase/`snake_case` to round-trip — the Rust argument convention.
+/// The draft's `Mcp-Method` standard request header (mirrors `method`).
+const HEADER_MCP_METHOD: HeaderName = HeaderName::from_static("mcp-method");
+/// The draft's `Mcp-Name` standard request header (mirrors `params.name`/`.uri`).
+const HEADER_MCP_NAME: HeaderName = HeaderName::from_static("mcp-name");
+/// Header-name prefix carrying an `x-mcp-header` tool parameter
+/// (`Mcp-Param-<name>`). Compared case-insensitively (HTTP lowercases header
+/// names).
 const MCP_PARAM_PREFIX: &str = "mcp-param-";
 
-/// Fold `Mcp-Param-*` request headers into a `tools/call` request's `arguments`
-/// (`#[mcp_header]` transport mirroring, P4-4). Only fills parameters **absent**
-/// from the body, so an explicit body argument always wins over a (possibly
-/// spoofed) header. A header value is parsed as JSON when it parses, else taken
-/// as a string. No-op for any other method.
-fn merge_param_headers(msg: &mut JsonRpcMessage, headers: &HeaderMap) {
-    let JsonRpcMessage::Request(req) = msg else {
-        return;
-    };
-    if req.method != "tools/call" {
-        return;
-    }
-    // Collect candidate headers first so we touch the body only if there are any.
-    let mut params: Vec<(String, &HeaderValue)> = Vec::new();
-    for (name, value) in headers {
-        if let Some(param) = name.as_str().strip_prefix(MCP_PARAM_PREFIX)
-            && !param.is_empty()
-        {
-            params.push((param.to_owned(), value));
-        }
-    }
-    if params.is_empty() {
-        return;
+/// The protocol version a message's own `_meta` declares, if any — the
+/// stateless draft envelope. Must be read **before** the dual-stack routing
+/// stamps a session's negotiated version into version-less legacy bodies.
+fn declared_version(msg: &JsonRpcMessage) -> Option<String> {
+    let params = match msg {
+        JsonRpcMessage::Request(r) => r.params.as_ref(),
+        JsonRpcMessage::Notification(n) => n.params.as_ref(),
+        JsonRpcMessage::Response(_) => None,
+    }?;
+    params
+        .get("_meta")?
+        .get(meta::keys::PROTOCOL_VERSION)?
+        .as_str()
+        .map(str::to_owned)
+}
+
+/// Validate the transport's request-metadata headers against the body
+/// (transports spec §Request Metadata / §Server Validation). Applies to
+/// messages whose body `_meta` declares a protocol version — the stateless
+/// draft envelope; the legacy `2025-11-25` session flow keeps its
+/// negotiated-version tolerance. Any failure is `400` +
+/// `HeaderMismatchError` (`-32020`).
+///
+/// Headers are pure **mirrors** — the body stays authoritative and values are
+/// never sourced *from* headers (the earlier fill-absent `Mcp-Param-*` merge
+/// is gone; it let a header inject an argument the body omitted).
+fn validate_request_headers(msg: &JsonRpcMessage, headers: &HeaderMap) -> Option<Response> {
+    let declared = declared_version(msg);
+    let header_version = headers
+        .get(&HEADER_PROTOCOL_VERSION)
+        .and_then(|v| v.to_str().ok());
+
+    // The mirror invariant: when both the header and the body name a version,
+    // they MUST agree — whatever the versions.
+    if let (Some(h), Some(d)) = (header_version, declared.as_deref())
+        && h != d
+    {
+        return Some(header_mismatch_rejection(&format!(
+            "MCP-Protocol-Version header ({h}) does not match the request body ({d})"
+        )));
     }
 
-    let body = req.params.get_or_insert_with(|| json!({}));
-    let Some(obj) = body.as_object_mut() else {
-        return;
-    };
-    let args = obj.entry("arguments").or_insert_with(|| json!({}));
-    let Some(args) = args.as_object_mut() else {
-        return;
-    };
-    for (param, value) in params {
-        if args.contains_key(&param) {
-            continue; // body wins
-        }
-        let Ok(raw) = value.to_str() else {
-            continue; // non-ASCII header value — skip
-        };
-        let parsed = serde_json::from_str::<serde_json::Value>(raw)
-            .unwrap_or_else(|_| serde_json::Value::String(raw.to_owned()));
-        args.insert(param, parsed);
+    // The remaining rules are the draft transport's: they apply when the body
+    // carries the draft's stateless envelope. A body declaring a *legacy*
+    // version without a header keeps `2025-11-25`'s softer absence rule (the
+    // session flow governs); a *header*-only draft version on an
+    // envelope-less body (e.g. a notification, whose params carry no
+    // envelope) requires nothing further.
+    let declared_draft = declared
+        .as_deref()
+        .is_some_and(|d| ProtocolVersion::from_wire(d) == ProtocolVersion::Draft);
+    if !declared_draft {
+        return None;
     }
+    if header_version.is_none() {
+        // The draft requires the version header on every POST; this server
+        // supports no pre-2025-06-18 clients, so absence is a rejection.
+        return Some(header_mismatch_rejection(
+            "missing required MCP-Protocol-Version header",
+        ));
+    }
+    let JsonRpcMessage::Request(req) = msg else {
+        return None;
+    };
+
+    // `Mcp-Method` is required on every request POST and mirrors `method`.
+    match headers
+        .get(&HEADER_MCP_METHOD)
+        .and_then(|v| v.to_str().ok())
+    {
+        None => {
+            return Some(header_mismatch_rejection(
+                "missing required Mcp-Method header",
+            ));
+        }
+        Some(m) if m != req.method => {
+            return Some(header_mismatch_rejection(&format!(
+                "Mcp-Method header ({m}) does not match the request body ({})",
+                req.method
+            )));
+        }
+        Some(_) => {}
+    }
+
+    // `Mcp-Name` is required for `tools/call`/`resources/read`/`prompts/get`
+    // and mirrors `params.name`/`params.uri` (Base64 sentinel decoded).
+    if let Some(field) = mcp_headers::name_field_for(&req.method) {
+        let body_value = req
+            .params
+            .as_ref()
+            .and_then(|p| p.get(field))
+            .and_then(serde_json::Value::as_str);
+        let Some(raw) = headers.get(&HEADER_MCP_NAME).and_then(|v| v.to_str().ok()) else {
+            return Some(header_mismatch_rejection(
+                "missing required Mcp-Name header",
+            ));
+        };
+        let Some(decoded) = mcp_headers::decode_value(raw) else {
+            return Some(header_mismatch_rejection(
+                "malformed Base64 sentinel in Mcp-Name header",
+            ));
+        };
+        if body_value != Some(decoded.as_str()) {
+            return Some(header_mismatch_rejection(&format!(
+                "Mcp-Name header does not match the request body's `{field}`"
+            )));
+        }
+    }
+
+    // Every `Mcp-Param-{name}` naming a `tools/call` argument must match it
+    // after decoding and type rendering. A header matching no argument is
+    // unrecognized here (it may use a custom `x-mcp-header` name mapping) and
+    // is ignored, per the intermediary forwarding rule.
+    if req.method == "tools/call"
+        && let Some(args) = req
+            .params
+            .as_ref()
+            .and_then(|p| p.get("arguments"))
+            .and_then(serde_json::Value::as_object)
+    {
+        for (name, value) in headers {
+            let Some(param) = name.as_str().strip_prefix(MCP_PARAM_PREFIX) else {
+                continue;
+            };
+            let Some((_, body_value)) = args.iter().find(|(k, _)| k.eq_ignore_ascii_case(param))
+            else {
+                continue;
+            };
+            let Ok(raw) = value.to_str() else {
+                return Some(header_mismatch_rejection(&format!(
+                    "Mcp-Param-{param} header contains invalid characters"
+                )));
+            };
+            let Some(decoded) = mcp_headers::decode_value(raw) else {
+                return Some(header_mismatch_rejection(&format!(
+                    "malformed Base64 sentinel in Mcp-Param-{param} header"
+                )));
+            };
+            let Some(rendered) = mcp_headers::render_argument(body_value) else {
+                return Some(header_mismatch_rejection(&format!(
+                    "Mcp-Param-{param} mirrors a non-primitive body argument"
+                )));
+            };
+            if decoded != rendered {
+                return Some(header_mismatch_rejection(&format!(
+                    "Mcp-Param-{param} header does not match the request body argument"
+                )));
+            }
+        }
+    }
+
+    None
 }
 
 /// Buffered events per SSE stream; a consumer this far behind backpressures
@@ -528,6 +640,20 @@ where
     {
         return version_header_rejection(v);
     }
+    // Header/body mirror validation (draft envelope): version header must
+    // match a body-declared version; `Mcp-Method`/`Mcp-Name`/`Mcp-Param-*`
+    // must mirror the body on draft requests. Runs BEFORE the dual-stack
+    // routing below, which stamps a negotiated version into version-less
+    // legacy bodies.
+    if let Some(rejection) = validate_request_headers(&msg, &headers) {
+        return rejection;
+    }
+    // Draft transport: an unimplemented RPC method answers HTTP 404 (with the
+    // JSON-RPC `-32601` body) rather than 200.
+    let method_not_found_404 = declared_version(&msg)
+        .is_some_and(|v| ProtocolVersion::from_wire(&v) == ProtocolVersion::Draft)
+        && matches!(&msg, JsonRpcMessage::Request(_));
+
     let session_header = headers
         .get(&HEADER_SESSION_ID)
         .and_then(|v| v.to_str().ok())
@@ -556,12 +682,6 @@ where
         return session_required_rejection();
     }
 
-    // `#[mcp_header]` transport mirroring (P4-4): fold any `Mcp-Param-*` headers
-    // into the `tools/call` arguments so a header-supplied param reaches the
-    // handler. Body args win (fill-absent), so a spoofed header can't override
-    // an explicit body value.
-    merge_param_headers(&mut msg, &headers);
-
     // A modern `subscriptions/listen` request answers with a long-lived SSE
     // stream rather than a JSON body. (A legacy-stamped or malformed listen
     // comes back from the dispatcher as an error *response*, which the SSE
@@ -575,7 +695,7 @@ where
     // the inline path below — its response must carry the minted session
     // header, and the handshake never streams.
     if !is_initialize && matches!(&msg, JsonRpcMessage::Request(_)) {
-        return request_post(&state, msg).await;
+        return request_post(&state, msg, method_not_found_404).await;
     }
 
     let mut svc = state.service.clone();
@@ -651,7 +771,11 @@ where
 /// the request-related messages followed by the final response, which
 /// terminates the stream. A client disconnect drops the in-flight call —
 /// HTTP's cancellation signal.
-async fn request_post<S>(state: &HttpState<S>, mut msg: JsonRpcMessage) -> Response
+async fn request_post<S>(
+    state: &HttpState<S>,
+    mut msg: JsonRpcMessage,
+    method_not_found_404: bool,
+) -> Response
 where
     S: McpService + Clone + Sync,
     S::Future: Send + 'static,
@@ -684,7 +808,16 @@ where
             drop(registration);
             match result {
                 Ok(Some(reply)) if events.is_empty() => {
-                    encode_json_response(&state.codec, &reply)
+                    let mut resp = encode_json_response(&state.codec, &reply);
+                    // Draft transport: an unimplemented RPC method is HTTP 404
+                    // with the JSON-RPC `-32601` body.
+                    if method_not_found_404
+                        && let JsonRpcMessage::Response(r) = &reply
+                        && r.error.as_ref().is_some_and(|e| e.code == -32601)
+                    {
+                        *resp.status_mut() = StatusCode::NOT_FOUND;
+                    }
+                    resp
                 }
                 Ok(Some(reply)) => {
                     events.push_back(reply);
@@ -1156,6 +1289,21 @@ fn message_has_version(msg: &JsonRpcMessage) -> bool {
         .is_some()
 }
 
+/// `400` + `HeaderMismatchError` (`-32020`): an HTTP header did not match the
+/// corresponding request-body value, or a required header is missing or
+/// malformed (transports spec §Server Validation).
+fn header_mismatch_rejection(detail: &str) -> Response {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": null,
+        "error": {
+            "code": -32020,
+            "message": format!("header mismatch: {detail}"),
+        },
+    });
+    (StatusCode::BAD_REQUEST, Json(body)).into_response()
+}
+
 /// `400` for an explicit but unsupported `MCP-Protocol-Version` header
 /// (`UnsupportedProtocolVersionError`, `-32022`).
 fn version_header_rejection(requested: &str) -> Response {
@@ -1264,7 +1412,6 @@ fn protocol_error_response(err: &ProtocolError) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::Value;
     use turbomcp_core::JsonRpcRequest;
 
     fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
@@ -1317,46 +1464,135 @@ mod tests {
         assert_eq!(p.client_ip(&trusted), Some(ip("203.0.113.7")));
     }
 
-    #[test]
-    fn merge_fills_absent_args_parsing_json_then_string() {
-        let mut msg = JsonRpcMessage::Request(JsonRpcRequest::new(
+    /// A draft-enveloped `tools/call` body and its compliant header set.
+    fn draft_call(region: &str) -> JsonRpcMessage {
+        JsonRpcMessage::Request(JsonRpcRequest::new(
             1,
             "tools/call",
-            Some(json!({ "name": "locate", "arguments": { "city": "SF" } })),
-        ));
-        merge_param_headers(
-            &mut msg,
-            &headers(&[("Mcp-Param-region", "us-west"), ("Mcp-Param-n", "3")]),
+            Some(json!({
+                "name": "locate",
+                "arguments": { "region": region, "n": 3, "ok": true },
+                "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28" },
+            })),
+        ))
+    }
+
+    fn draft_call_headers<'a>(extra: &[(&'a str, &'a str)]) -> Vec<(&'a str, &'a str)> {
+        let mut all = vec![
+            ("MCP-Protocol-Version", "2026-07-28"),
+            ("Mcp-Method", "tools/call"),
+            ("Mcp-Name", "locate"),
+        ];
+        all.extend_from_slice(extra);
+        all
+    }
+
+    #[test]
+    fn validation_passes_a_compliant_draft_request() {
+        let msg = draft_call("us-west");
+        let ok = validate_request_headers(
+            &msg,
+            &headers(&draft_call_headers(&[
+                ("Mcp-Param-region", "us-west"),
+                ("Mcp-Param-n", "3"),
+                ("Mcp-Param-ok", "true"),
+            ])),
         );
-        let JsonRpcMessage::Request(req) = &msg else {
-            unreachable!()
-        };
-        let args = &req.params.as_ref().unwrap()["arguments"];
-        assert_eq!(args["region"], "us-west"); // not valid JSON → string
-        assert_eq!(args["n"], Value::from(3)); // parses as JSON number
+        assert!(ok.is_none());
     }
 
     #[test]
-    fn merge_does_not_override_body_args() {
-        let mut msg = JsonRpcMessage::Request(JsonRpcRequest::new(
+    fn validation_skips_bodies_without_a_declared_version() {
+        // Legacy traffic (no `_meta` version envelope) keeps the session
+        // flow's tolerance — no headers required here.
+        let msg = JsonRpcMessage::Request(JsonRpcRequest::new(
             1,
             "tools/call",
-            Some(json!({ "name": "locate", "arguments": { "region": "body" } })),
+            Some(json!({ "name": "locate", "arguments": {} })),
         ));
-        merge_param_headers(&mut msg, &headers(&[("Mcp-Param-region", "header")]));
-        let JsonRpcMessage::Request(req) = &msg else {
-            unreachable!()
-        };
-        assert_eq!(req.params.as_ref().unwrap()["arguments"]["region"], "body");
+        assert!(validate_request_headers(&msg, &headers(&[])).is_none());
     }
 
     #[test]
-    fn merge_ignores_non_tool_call_methods() {
-        let mut msg = JsonRpcMessage::Request(JsonRpcRequest::new(1, "tools/list", None));
-        merge_param_headers(&mut msg, &headers(&[("Mcp-Param-region", "us-west")]));
+    fn validation_requires_and_matches_the_standard_headers() {
+        let msg = draft_call("us-west");
+        // Missing version header.
+        assert!(validate_request_headers(&msg, &headers(&[])).is_some());
+        // Version header not matching the body.
+        assert!(
+            validate_request_headers(
+                &msg,
+                &headers(&[
+                    ("MCP-Protocol-Version", "2025-11-25"),
+                    ("Mcp-Method", "tools/call"),
+                    ("Mcp-Name", "locate"),
+                ])
+            )
+            .is_some()
+        );
+        // Missing Mcp-Method.
+        assert!(
+            validate_request_headers(
+                &msg,
+                &headers(&[
+                    ("MCP-Protocol-Version", "2026-07-28"),
+                    ("Mcp-Name", "locate")
+                ])
+            )
+            .is_some()
+        );
+        // Mcp-Name not matching `params.name`.
+        assert!(
+            validate_request_headers(
+                &msg,
+                &headers(&[
+                    ("MCP-Protocol-Version", "2026-07-28"),
+                    ("Mcp-Method", "tools/call"),
+                    ("Mcp-Name", "other_tool"),
+                ])
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn mcp_param_headers_are_validated_never_merged() {
+        let msg = draft_call("body-value");
+        // A mismatching mirror is rejected…
+        assert!(
+            validate_request_headers(
+                &msg,
+                &headers(&draft_call_headers(&[("Mcp-Param-region", "header-value")])),
+            )
+            .is_some()
+        );
+        // …a Base64-sentinel-encoded matching mirror is accepted…
+        let unicode = draft_call("Hello, 世界");
+        assert!(
+            validate_request_headers(
+                &unicode,
+                &headers(&draft_call_headers(&[(
+                    "Mcp-Param-region",
+                    "=?base64?SGVsbG8sIOS4lueVjA==?="
+                )])),
+            )
+            .is_none()
+        );
+        // …a header naming no body argument is unrecognized and ignored…
+        assert!(
+            validate_request_headers(
+                &msg,
+                &headers(&draft_call_headers(&[("Mcp-Param-unknown", "x")])),
+            )
+            .is_none()
+        );
+        // …and the body is never mutated (headers are mirrors, not sources).
         let JsonRpcMessage::Request(req) = &msg else {
             unreachable!()
         };
-        assert!(req.params.is_none());
+        assert_eq!(
+            req.params.as_ref().unwrap()["arguments"]["region"],
+            "body-value"
+        );
     }
 }

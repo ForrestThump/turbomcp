@@ -208,8 +208,6 @@ async fn declared_legacy_without_session_is_400() {
 
 #[tokio::test]
 async fn modern_stateless_requests_pass_through_unchanged() {
-    // No headers at all; the body carries the draft version. Also valid with
-    // an explicit modern version header.
     let call = json!({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": {
@@ -217,12 +215,44 @@ async fn modern_stateless_requests_pass_through_unchanged() {
             "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28" }
         }
     });
-    for headers in [vec![], vec![("mcp-protocol-version", "2026-07-28")]] {
+    // The draft transport requires the mirrored request-metadata headers.
+    let headers = [
+        ("mcp-protocol-version", "2026-07-28"),
+        ("mcp-method", "tools/call"),
+        ("mcp-name", "add"),
+    ];
+    let resp = app().oneshot(post(call.clone(), &headers)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v = body_json(resp).await;
+    assert_eq!(v["result"]["content"][0]["text"], "42");
+    assert_eq!(v["result"]["resultType"], "complete", "draft wire");
+}
+
+#[tokio::test]
+async fn draft_request_without_required_headers_is_400() {
+    // A draft-enveloped body without its mirrored headers is a
+    // HeaderMismatch (-32020): this server supports no pre-2025-06-18
+    // clients, so the version header is required, and draft requests also
+    // require Mcp-Method (+ Mcp-Name for call/read/get).
+    let call = json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {
+            "name": "add", "arguments": { "a": 20, "b": 22 },
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28" }
+        }
+    });
+    for headers in [
+        vec![],
+        vec![("mcp-protocol-version", "2026-07-28")],
+        vec![
+            ("mcp-protocol-version", "2026-07-28"),
+            ("mcp-method", "tools/call"),
+        ],
+    ] {
         let resp = app().oneshot(post(call.clone(), &headers)).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let v = body_json(resp).await;
-        assert_eq!(v["result"]["content"][0]["text"], "42");
-        assert_eq!(v["result"]["resultType"], "complete", "draft wire");
+        assert_eq!(v["error"]["code"], -32020);
     }
 }
 
@@ -273,7 +303,10 @@ async fn posted_cancellation_is_accepted_but_inert() {
             }
         }
     });
-    let resp = app().oneshot(post(note, &[])).await.unwrap();
+    let resp = app()
+        .oneshot(post(note, &[("mcp-protocol-version", "2026-07-28")]))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::ACCEPTED);
 }
 

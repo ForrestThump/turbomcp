@@ -1,9 +1,11 @@
-//! Phase 8e: the `#[mcp_header]` round-trip (P4-4). A tool parameter marked
-//! `#[mcp_header]` mirrors to an `Mcp-Param-*` HTTP header; the server folds the
-//! header back into the call's `arguments`. Proven two ways:
-//!  1. a raw client sending the param via header *only* (no body arg) — the
-//!     server merge delivers it to the handler;
-//!  2. the typed `Client`, which (after `list_tools` learns the schema mark)
+//! The `#[mcp_header]` round-trip (SEP-2243, current semantics). A tool
+//! parameter marked `#[mcp_header]` mirrors to an `Mcp-Param-*` HTTP header;
+//! the server **validates** the mirror against the body (never sources
+//! arguments from headers — a mismatch is `400` + `-32020`). Proven three
+//! ways:
+//!  1. a raw client whose mirror header contradicts the body is rejected;
+//!  2. a raw client whose mirror header matches the body is served;
+//!  3. the typed `Client`, which (after `list_tools` learns the schema mark)
 //!     transparently mirrors the param to a header on `call_tool`.
 
 #![cfg(all(feature = "client", feature = "http"))]
@@ -42,23 +44,46 @@ async fn spawn_server() -> (String, CancellationToken) {
     (format!("http://{addr}/mcp"), shutdown)
 }
 
+fn call_body(region: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {
+            "name": "locate",
+            "arguments": { "city": "SF", "region": region },
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28" }
+        }
+    })
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn server_merges_header_param_supplied_only_via_header() {
+async fn server_validates_mirror_headers_against_the_body() {
     let (url, shutdown) = spawn_server().await;
     let http = reqwest::Client::new();
 
-    // `region` is NOT in the body arguments — only in the Mcp-Param-region header.
+    // A mirror header contradicting the body argument is a HeaderMismatch:
+    // 400 + -32020. Headers are validation mirrors — never argument sources.
     let resp = http
         .post(&url)
+        .header("MCP-Protocol-Version", "2026-07-28")
+        .header("Mcp-Method", "tools/call")
+        .header("Mcp-Name", "locate")
+        .header("Mcp-Param-region", "spoofed")
+        .json(&call_body("us-west"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], -32020);
+
+    // A matching mirror is served normally.
+    let resp = http
+        .post(&url)
+        .header("MCP-Protocol-Version", "2026-07-28")
+        .header("Mcp-Method", "tools/call")
+        .header("Mcp-Name", "locate")
         .header("Mcp-Param-region", "us-west")
-        .json(&json!({
-            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-            "params": {
-                "name": "locate",
-                "arguments": { "city": "SF" },
-                "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28" }
-            }
-        }))
+        .json(&call_body("us-west"))
         .send()
         .await
         .unwrap();

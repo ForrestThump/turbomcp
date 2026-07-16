@@ -165,10 +165,18 @@ async fn both_versions_over_http() {
     assert_eq!(v["result"]["content"][0]["text"], "HI");
     assert!(v["result"].get("resultType").is_none());
 
-    // Modern: stateless draft body, no headers, same app.
+    // Modern: stateless draft body with its mirrored request-metadata
+    // headers (required by the draft transport), same app.
     let resp = app
         .clone()
-        .oneshot(post(draft_call_frame(3, "bye"), vec![]))
+        .oneshot(post(
+            draft_call_frame(3, "bye"),
+            vec![
+                ("mcp-protocol-version", "2026-07-28".to_owned()),
+                ("mcp-method", "tools/call".to_owned()),
+                ("mcp-name", "shout".to_owned()),
+            ],
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);

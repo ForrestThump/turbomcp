@@ -36,6 +36,10 @@ fn call_request(id: i64) -> Request<Body> {
         .method("POST")
         .uri("/mcp")
         .header(header::CONTENT_TYPE, "application/json")
+        // The draft envelope requires the mirrored request-metadata headers.
+        .header("MCP-Protocol-Version", "2026-07-28")
+        .header("Mcp-Method", "tools/call")
+        .header("Mcp-Name", "echo")
         .body(Body::from(body.to_string()))
         .unwrap()
 }
@@ -136,6 +140,10 @@ fn call_with_token(id: i64) -> Request<Body> {
         .method("POST")
         .uri("/mcp")
         .header(header::CONTENT_TYPE, "application/json")
+        // The draft envelope requires the mirrored request-metadata headers.
+        .header("MCP-Protocol-Version", "2026-07-28")
+        .header("Mcp-Method", "tools/call")
+        .header("Mcp-Name", "slow")
         .body(Body::from(body.to_string()))
         .unwrap()
 }

@@ -44,6 +44,14 @@ impl Deleter {
     }
 }
 
+/// The mirrored request-metadata headers the draft transport requires on a
+/// `tools/call` POST.
+const DRAFT_HEADERS: &[(&str, &str)] = &[
+    ("mcp-protocol-version", "2026-07-28"),
+    ("mcp-method", "tools/call"),
+    ("mcp-name", "delete"),
+];
+
 fn draft_meta() -> Value {
     json!({
         "io.modelcontextprotocol/protocolVersion": "2026-07-28",
@@ -200,7 +208,7 @@ async fn elicitation_works_on_both_versions_over_http() {
     // Draft MRTR over plain POSTs.
     let resp = app
         .clone()
-        .oneshot(post(draft_call(1, json!({})), &[]))
+        .oneshot(post(draft_call(1, json!({})), DRAFT_HEADERS))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -208,7 +216,11 @@ async fn elicitation_works_on_both_versions_over_http() {
     assert_eq!(first["result"]["resultType"], "input_required");
 
     let retry = draft_call(2, json!({ "inputResponses": { "confirm": accept() } }));
-    let resp = app.clone().oneshot(post(retry, &[])).await.unwrap();
+    let resp = app
+        .clone()
+        .oneshot(post(retry, DRAFT_HEADERS))
+        .await
+        .unwrap();
     let second = body_json(resp).await;
     assert_eq!(second["result"]["content"][0]["text"], "deleted /tmp/x");
 

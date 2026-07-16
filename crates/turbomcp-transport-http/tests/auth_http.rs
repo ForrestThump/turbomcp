@@ -97,7 +97,11 @@ fn call_request(auth: Option<&str>) -> Request<Body> {
     let mut req = Request::builder()
         .method("POST")
         .uri("/mcp")
-        .header(header::CONTENT_TYPE, "application/json");
+        .header(header::CONTENT_TYPE, "application/json")
+        // The draft envelope requires the mirrored request-metadata headers.
+        .header("MCP-Protocol-Version", "2026-07-28")
+        .header("Mcp-Method", "tools/call")
+        .header("Mcp-Name", "whoami");
     if let Some(auth) = auth {
         req = req.header(header::AUTHORIZATION, auth);
     }

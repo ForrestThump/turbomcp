@@ -41,6 +41,10 @@ async fn macro_server_answers_tools_call_over_http() {
         .method("POST")
         .uri("/mcp")
         .header(header::CONTENT_TYPE, "application/json")
+        // The draft envelope requires the mirrored request-metadata headers.
+        .header("MCP-Protocol-Version", "2026-07-28")
+        .header("Mcp-Method", "tools/call")
+        .header("Mcp-Name", "shout")
         .body(Body::from(call_frame(1, "hi")))
         .unwrap();
 

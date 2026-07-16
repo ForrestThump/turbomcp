@@ -64,6 +64,9 @@ fn listen_request(id: i64, notifications: Value) -> Request<Body> {
         .method("POST")
         .uri("/mcp")
         .header(header::CONTENT_TYPE, "application/json")
+        // The draft envelope requires the mirrored request-metadata headers.
+        .header("MCP-Protocol-Version", "2026-07-28")
+        .header("Mcp-Method", "subscriptions/listen")
         .body(Body::from(body.to_string()))
         .unwrap()
 }
@@ -214,6 +217,8 @@ async fn malformed_listen_filter_answers_json_error() {
         .method("POST")
         .uri("/mcp")
         .header(header::CONTENT_TYPE, "application/json")
+        .header("MCP-Protocol-Version", "2026-07-28")
+        .header("Mcp-Method", "subscriptions/listen")
         .body(Body::from(body.to_string()))
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();

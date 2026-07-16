@@ -74,6 +74,21 @@ fn post(body: &str) -> Request<Body> {
         .unwrap()
 }
 
+/// A draft-enveloped request POST with its required mirrored headers
+/// (`MCP-Protocol-Version`, `Mcp-Method`, and `Mcp-Name` when applicable).
+fn draft_post(body: &str, method: &str, name: Option<&str>) -> Request<Body> {
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("MCP-Protocol-Version", "2026-07-28")
+        .header("Mcp-Method", method);
+    if let Some(name) = name {
+        req = req.header("Mcp-Name", name);
+    }
+    req.body(Body::from(body.to_owned())).unwrap()
+}
+
 async fn body_json(resp: axum::response::Response) -> Value {
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     serde_json::from_slice(&bytes).unwrap()
@@ -99,11 +114,15 @@ async fn discover_list_and_call_over_http() {
         "calculator"
     );
 
-    // tools/list (modern, version in _meta)
+    // tools/list (modern, version in _meta + mirrored headers)
     let resp = app(HttpConfig::new())
-        .oneshot(post(&format!(
-            r#"{{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{{"_meta":{DRAFT_META}}}}}"#
-        )))
+        .oneshot(draft_post(
+            &format!(
+                r#"{{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{{"_meta":{DRAFT_META}}}}}"#
+            ),
+            "tools/list",
+            None,
+        ))
         .await
         .unwrap();
     let v = body_json(resp).await;
@@ -111,9 +130,13 @@ async fn discover_list_and_call_over_http() {
 
     // tools/call → 2 + 40 = 42
     let resp = app(HttpConfig::new())
-        .oneshot(post(&format!(
-            r#"{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"add","arguments":{{"a":2,"b":40}},"_meta":{DRAFT_META}}}}}"#
-        )))
+        .oneshot(draft_post(
+            &format!(
+                r#"{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"add","arguments":{{"a":2,"b":40}},"_meta":{DRAFT_META}}}}}"#
+            ),
+            "tools/call",
+            Some("add"),
+        ))
         .await
         .unwrap();
     let v = body_json(resp).await;

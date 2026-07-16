@@ -70,6 +70,10 @@ async fn round_trip_and_graceful_shutdown_over_a_real_socket() {
     let client = reqwest::Client::new();
     let resp = client
         .post(&url)
+        // The draft envelope requires the mirrored request-metadata headers.
+        .header("MCP-Protocol-Version", "2026-07-28")
+        .header("Mcp-Method", "tools/call")
+        .header("Mcp-Name", "shout")
         .json(&json!({
             "jsonrpc": "2.0",
             "id": 1,
