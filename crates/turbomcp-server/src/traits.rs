@@ -45,6 +45,11 @@ pub trait McpServerCore: Clone + Send + Sync + 'static {
 /// Implement to serve tools (`tools/list`, `tools/call`).
 pub trait WithTools: McpServerCore {
     /// Enumerate available tools. `params.cursor` continues a prior page.
+    ///
+    /// Return tools in a **deterministic order** across calls (the spec
+    /// SHOULD: stable ordering enables client-side caching and improves LLM
+    /// prompt-cache hit rates). `#[server]`-generated impls list tools in
+    /// declaration order, which satisfies this.
     fn list_tools(
         &self,
         ctx: &ListToolsContext,

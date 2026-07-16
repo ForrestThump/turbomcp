@@ -309,6 +309,12 @@ mod tests {
         assert_eq!(result["tools"][0]["name"], "add");
         assert_eq!(result["tools"][0]["description"], "Add two numbers");
         assert_eq!(result["resultType"], "complete");
+        // Every draft result identifies the server in `_meta` (spec SHOULD;
+        // opt out via `without_server_info_meta`).
+        assert_eq!(
+            result["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+            "calculator"
+        );
     }
 
     #[tokio::test]

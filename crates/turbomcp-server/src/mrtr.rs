@@ -357,8 +357,21 @@ impl ClientHandle {
         key: &str,
         params: neutral::ElicitUrlParams,
     ) -> McpResult<neutral::ElicitOutcome> {
+        // `elicitationId` is version-split: the `2025-11-25` wire requires it
+        // (mint one if the handler didn't set it), the draft removed it
+        // (correlate across MRTR retries via `requestState` instead).
+        let legacy_id = matches!(self.inner.mode, HandleMode::Bidi { .. }).then(|| {
+            params
+                .elicitation_id
+                .clone()
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+        });
         let raw = self
-            .obtain(key, "elicitation", elicit_url_request_value(&params))
+            .obtain(
+                key,
+                "elicitation",
+                elicit_url_request_value(&params, legacy_id),
+            )
             .await?;
         parse_elicit_outcome(&raw)
     }
@@ -594,17 +607,22 @@ fn elicit_request_value(params: &neutral::ElicitParams) -> Value {
     })
 }
 
-/// The wire `InputRequest` object for a URL-mode elicitation.
-fn elicit_url_request_value(params: &neutral::ElicitUrlParams) -> Value {
-    json!({
+/// The wire `InputRequest` object for a URL-mode elicitation. `legacy_id` is
+/// `Some` only on the `2025-11-25` inline-bidi path — the draft removed
+/// `elicitationId` from URL-mode requests.
+fn elicit_url_request_value(params: &neutral::ElicitUrlParams, legacy_id: Option<String>) -> Value {
+    let mut request = json!({
         "method": "elicitation/create",
         "params": {
             "mode": "url",
             "message": params.message,
-            "elicitationId": params.elicitation_id,
             "url": params.url,
         },
-    })
+    });
+    if let Some(id) = legacy_id {
+        request["params"]["elicitationId"] = json!(id);
+    }
+    request
 }
 
 #[derive(serde::Deserialize)]
@@ -718,7 +736,8 @@ mod tests {
         let err = handle
             .elicit_url(
                 "k",
-                neutral::ElicitUrlParams::new("Sign in", "eid-1", "https://auth.example/go"),
+                neutral::ElicitUrlParams::new("Sign in", "https://auth.example/go")
+                    .with_elicitation_id("eid-1"),
             )
             .await
             .expect_err("no cached response → abort");
@@ -727,7 +746,22 @@ mod tests {
         let params = &collected["k"]["params"];
         assert_eq!(params["mode"], "url");
         assert_eq!(params["url"], "https://auth.example/go");
-        assert_eq!(params["elicitationId"], "eid-1");
+        // The draft removed `elicitationId` from URL-mode requests — the MRTR
+        // path never emits it, even when the handler set one (it is a
+        // `2025-11-25`-only field; correlate via `requestState` instead).
+        assert!(params.get("elicitationId").is_none());
+    }
+
+    #[test]
+    fn elicit_url_wire_value_is_version_split() {
+        let params = neutral::ElicitUrlParams::new("Sign in", "https://auth.example/go");
+        // Draft (MRTR): no elicitationId, ever.
+        let draft = elicit_url_request_value(&params, None);
+        assert!(draft["params"].get("elicitationId").is_none());
+        // Legacy (inline bidi): the wire requires it — threaded/minted by
+        // `elicit_url`.
+        let legacy = elicit_url_request_value(&params, Some("eid-9".into()));
+        assert_eq!(legacy["params"]["elicitationId"], "eid-9");
     }
 
     #[tokio::test]

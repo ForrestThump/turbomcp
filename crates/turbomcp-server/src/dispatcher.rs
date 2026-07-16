@@ -84,6 +84,9 @@ struct Shared {
     extensions: Arc<Vec<Arc<dyn Extension>>>,
     /// Opt-in: treat an elicit key reused with a different shape as an error.
     strict_elicitation_keys: bool,
+    /// Stamp `io.modelcontextprotocol/serverInfo` into every draft result's
+    /// `_meta` (spec SHOULD; opt out via `without_server_info_meta`).
+    server_info_meta: bool,
 }
 
 impl Shared {
@@ -153,6 +156,7 @@ impl<S: McpServerCore> VersionDispatcher<S> {
                 pending: Arc::new(PendingRequests::default()),
                 extensions: Arc::new(Vec::new()),
                 strict_elicitation_keys: false,
+                server_info_meta: true,
             },
         }
     }
@@ -193,6 +197,16 @@ impl<S: McpServerCore> VersionDispatcher<S> {
     #[must_use]
     pub fn strict_elicitation_keys(mut self) -> Self {
         self.shared.strict_elicitation_keys = true;
+        self
+    }
+
+    /// Opt out of stamping `io.modelcontextprotocol/serverInfo` into every
+    /// draft result's `_meta`. The stamp is on by default — servers SHOULD
+    /// identify themselves on every response ("unless specifically configured
+    /// not to do so"); this is that configuration.
+    #[must_use]
+    pub fn without_server_info_meta(mut self) -> Self {
+        self.shared.server_info_meta = false;
         self
     }
 
@@ -289,6 +303,16 @@ async fn handle<S: McpServerCore>(
                 .await;
             }
 
+            // Draft results carry the server's identity in `_meta`
+            // (`io.modelcontextprotocol/serverInfo`, spec SHOULD) — resolve
+            // both facts before `req` moves into the dispatch.
+            let stamp_info = (shared.server_info_meta
+                && matches!(
+                    classify_version(req.params.as_ref(), &supported),
+                    VersionRoute::Modern
+                ))
+            .then(|| server.server_info());
+
             let dispatch =
                 handle_request(server, &router, &supported, &shared, req, cancel.clone());
             tokio::select! {
@@ -296,7 +320,13 @@ async fn handle<S: McpServerCore>(
                 // nothing (cancellation spec: "stop processing … not send a
                 // response for the cancelled request").
                 () = cancel.cancelled() => Ok(None),
-                out = dispatch => out.map(Some),
+                out = dispatch => {
+                    let mut reply = out?;
+                    if let Some(info) = &stamp_info {
+                        stamp_server_info(&mut reply, info);
+                    }
+                    Ok(Some(reply))
+                }
             }
         }
         JsonRpcMessage::Notification(n) => {
@@ -1801,6 +1831,30 @@ fn build_discover_result<S: McpServerCore>(
         result_type: neutral::result_type::COMPLETE.to_string(),
         supported_versions: supported.iter().map(|v| v.as_str().to_owned()).collect(),
         ttl_ms: 0,
+    }
+}
+
+/// Stamp `io.modelcontextprotocol/serverInfo` into a successful result's
+/// `_meta` (draft results only; servers SHOULD identify themselves on every
+/// response). An existing key — e.g. `server/discover`'s own — is left alone;
+/// error responses and non-object results are untouched.
+fn stamp_server_info(msg: &mut JsonRpcMessage, info: &Implementation) {
+    let JsonRpcMessage::Response(resp) = msg else {
+        return;
+    };
+    let Some(result) = resp.result.as_mut().and_then(Value::as_object_mut) else {
+        return;
+    };
+    let Ok(info_value) = serde_json::to_value(to_draft_impl(info.clone())) else {
+        return;
+    };
+    let meta = result
+        .entry("_meta")
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if let Some(meta) = meta.as_object_mut()
+        && !meta.contains_key(meta::keys::SERVER_INFO)
+    {
+        meta.insert(meta::keys::SERVER_INFO.to_owned(), info_value);
     }
 }
 
