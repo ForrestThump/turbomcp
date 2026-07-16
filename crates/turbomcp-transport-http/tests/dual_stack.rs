@@ -172,13 +172,28 @@ async fn unknown_session_is_404() {
 }
 
 #[tokio::test]
-async fn unsupported_version_header_is_400() {
+async fn unrecognized_version_header_is_400() {
+    // A `MCP-Protocol-Version` header naming a version this build does not
+    // recognize at all is rejected.
     let list = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" });
     let resp = app()
-        .oneshot(post(list, &[("mcp-protocol-version", "2024-11-05")]))
+        .oneshot(post(list, &[("mcp-protocol-version", "1999-01-01")]))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn recognized_older_version_header_is_tolerated() {
+    // A recognized but older published version (e.g. a long-lived client still
+    // sending `2025-03-26`) must NOT be rejected at the transport — the official
+    // conformance suite's multi-POST-stream scenario relies on this.
+    let list = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" });
+    let resp = app()
+        .oneshot(post(list, &[("mcp-protocol-version", "2025-03-26")]))
+        .await
+        .unwrap();
+    assert_ne!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

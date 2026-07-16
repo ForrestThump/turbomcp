@@ -85,6 +85,18 @@ impl ProtocolVersion {
     pub fn is_supported(&self) -> bool {
         Self::SUPPORTED.contains(self)
     }
+
+    /// Whether `self` names a *published* MCP protocol version this build
+    /// recognizes (any variant other than [`ProtocolVersion::Unknown`]).
+    ///
+    /// Broader than [`is_supported`](Self::is_supported): an older revision such
+    /// as `2025-03-26` is recognized but not a first-class dispatch target. A
+    /// transport can tolerate a recognized version header (letting a session's
+    /// negotiated version govern) while still rejecting an unrecognized string.
+    #[must_use]
+    pub fn is_recognized(&self) -> bool {
+        !matches!(self, Self::Unknown(_))
+    }
 }
 
 impl core::fmt::Display for ProtocolVersion {
@@ -156,5 +168,18 @@ mod tests {
         assert!(ProtocolVersion::V2025_11_25.is_supported());
         assert!(ProtocolVersion::Draft.is_supported());
         assert!(!ProtocolVersion::V2024_11_05.is_supported());
+    }
+
+    #[test]
+    fn recognized_is_broader_than_supported() {
+        // Recognized but not a dispatch target (older revisions).
+        assert!(ProtocolVersion::from_wire("2025-03-26").is_recognized());
+        assert!(ProtocolVersion::from_wire("2024-11-05").is_recognized());
+        assert!(!ProtocolVersion::from_wire("2025-03-26").is_supported());
+        // Supported implies recognized.
+        assert!(ProtocolVersion::V2025_11_25.is_recognized());
+        assert!(ProtocolVersion::Draft.is_recognized());
+        // A garbage string is neither.
+        assert!(!ProtocolVersion::from_wire("nonsense").is_recognized());
     }
 }

@@ -467,12 +467,16 @@ where
         return rejection;
     }
 
-    // Transport spec: an explicit but invalid/unsupported version header is 400.
+    // Transport spec: a `MCP-Protocol-Version` header naming an *unrecognized*
+    // version is 400. A recognized-but-older published version (e.g. an
+    // established client that keeps sending `2025-03-26`) is tolerated: a
+    // stateful session's negotiated version governs dispatch, so the transport
+    // should not reject a request bearing a real protocol version.
     let header_version = headers
         .get(&HEADER_PROTOCOL_VERSION)
         .and_then(|v| v.to_str().ok());
     if let Some(v) = header_version
-        && !ProtocolVersion::from_wire(v).is_supported()
+        && !ProtocolVersion::from_wire(v).is_recognized()
     {
         return version_header_rejection(v);
     }
