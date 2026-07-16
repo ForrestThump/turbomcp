@@ -92,16 +92,19 @@ pub mod __macro_support {
         v
     }
 
-    /// Mark a property as an MCP header parameter (SEP-2243). Transport-side
-    /// mirroring lands in Phase 4; here we annotate the input schema so the
-    /// information is present and snapshot-tested.
+    /// Mark a property as an MCP header parameter (SEP-2243). The annotation
+    /// value is the **name portion** of the mirrored `Mcp-Param-{name}` header
+    /// (the transports spec made `x-mcp-header` a string; the earlier boolean
+    /// form is obsolete) — we use the property name itself, which satisfies
+    /// the spec's constraints (RFC 9110 tchar, case-insensitively unique
+    /// within one schema) for any valid Rust identifier.
     pub fn mark_mcp_header(schema: &mut Value, property: &str) {
         if let Some(prop) = schema
             .get_mut("properties")
             .and_then(|p| p.get_mut(property))
             .and_then(Value::as_object_mut)
         {
-            prop.insert("x-mcp-header".into(), Value::Bool(true));
+            prop.insert("x-mcp-header".into(), Value::String(property.to_owned()));
         }
     }
 

@@ -28,7 +28,7 @@ use turbomcp_protocol::draft::types as draft;
 use turbomcp_protocol::methods::{notification, request};
 use turbomcp_protocol::neutral;
 use turbomcp_protocol::v2025_11_25::types as legacy;
-use turbomcp_service::Transport;
+use turbomcp_service::{Transport, mcp_headers};
 
 use crate::connection::Connection;
 use crate::error::{ClientError, ClientResult};
@@ -38,11 +38,18 @@ use crate::handler::{ClientHandler, dispatch_server_request};
 /// `input_required` forever.
 const MAX_MRTR_ROUNDS: usize = 16;
 
-/// Internal `_meta` key carrying the list of `#[mcp_header]` parameter names to
-/// mirror as `Mcp-Param-*` headers. Consumed and stripped by the HTTP transport
-/// (and sanitized server-side as an `io.turbomcp.internal/*` key on other
-/// transports), so it never reaches a handler.
+/// Internal `_meta` key carrying the `#[mcp_header]` mirror map — header-name
+/// portion → already-encoded header value — to emit as `Mcp-Param-*` headers.
+/// Consumed and stripped by the HTTP transport (and sanitized server-side as
+/// an `io.turbomcp.internal/*` key on other transports), so it never reaches
+/// a handler.
 pub(crate) const HEADER_PARAMS_META_KEY: &str = "io.turbomcp.internal/headerParams";
+
+/// Internal `_meta` key carrying the negotiated protocol version for the HTTP
+/// transport's `MCP-Protocol-Version` header (required on every POST by both
+/// versions' transports specs). Stripped by the HTTP transport; sanitized at
+/// every server boundary otherwise.
+pub(crate) const NEGOTIATED_VERSION_META_KEY: &str = "io.turbomcp.internal/negotiatedVersion";
 
 /// How a [`Client`] decides which protocol version to speak.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -261,7 +268,7 @@ pub struct Client {
     handler: Option<Arc<dyn ClientHandler>>,
     /// Tool name → its `#[mcp_header]` parameter names, learned from `list_tools`.
     /// Drives transparent `Mcp-Param-*` mirroring on `call_tool`.
-    header_params: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    header_params: Arc<Mutex<HashMap<String, Vec<HeaderParam>>>>,
 }
 
 impl Client {
@@ -301,7 +308,11 @@ impl Client {
     /// # Errors
     /// Propagates connection failure.
     pub async fn ping(&self) -> ClientResult<()> {
-        self.conn.request(request::PING, None).await.map(|_| ())
+        // Routed through `versioned_request` so the HTTP transport can stamp
+        // the required `MCP-Protocol-Version` header on the POST.
+        self.versioned_request(request::PING, Map::new())
+            .await
+            .map(|_| ())
     }
 
     /// Issue a raw request for `method` with `params`, stamped with the
@@ -325,19 +336,36 @@ impl Client {
         let v = self
             .versioned_request(request::TOOLS_LIST, list_params(cursor))
             .await?;
-        let result: neutral::ListToolsResult =
+        let mut result: neutral::ListToolsResult =
             self.decode::<draft::ListToolsResult, legacy::ListToolsResult, _>(v)?;
-        // Learn which params each tool marks `#[mcp_header]` so `call_tool` can
-        // mirror them transparently. (Last-seen page wins; tools paginate cleanly.)
+        // Learn which params each tool marks `x-mcp-header` so `call_tool` can
+        // mirror them transparently — and enforce the annotation constraints:
+        // a tool whose annotations violate them MUST be rejected (excluded
+        // from the result, with a warning), so one malformed definition
+        // doesn't block the rest. (Last-seen page wins; tools paginate
+        // cleanly.)
         let mut cache = self.header_params.lock().expect("header_params poisoned");
-        for tool in &result.tools {
-            let headers = header_param_names(&tool.input_schema);
-            if headers.is_empty() {
-                cache.remove(&tool.name);
-            } else {
-                cache.insert(tool.name.clone(), headers);
-            }
-        }
+        result
+            .tools
+            .retain(|tool| match header_params_from_schema(&tool.input_schema) {
+                Ok(headers) if headers.is_empty() => {
+                    cache.remove(&tool.name);
+                    true
+                }
+                Ok(headers) => {
+                    cache.insert(tool.name.clone(), headers);
+                    true
+                }
+                Err(reason) => {
+                    tracing::warn!(
+                        tool = %tool.name,
+                        %reason,
+                        "rejecting tool definition: invalid x-mcp-header annotation"
+                    );
+                    cache.remove(&tool.name);
+                    false
+                }
+            });
         drop(cache);
         Ok(result)
     }
@@ -353,33 +381,66 @@ impl Client {
         arguments: Map<String, Value>,
     ) -> ClientResult<neutral::CallToolResult> {
         let name = name.into();
-        // Mirror any `#[mcp_header]` params (learned from `list_tools`) to
-        // `Mcp-Param-*` headers — values stay in `arguments`; the HTTP transport
-        // lifts the signal into headers. No-op if the schema wasn't listed.
-        let header_names: Vec<String> = self
+        let params = self.tool_call_params(&name, &arguments);
+        let v = match self.mrtr_request(request::TOOLS_CALL, params).await {
+            // `-32020` HeaderMismatch: our mirror headers may be built from a
+            // stale schema. Per the transports spec, refresh `tools/list`
+            // (which rebuilds the header cache) and retry once.
+            Err(ClientError::Rpc(e)) if e.code == -32020 => {
+                tracing::warn!(
+                    tool = %name,
+                    "HeaderMismatch (-32020); refreshing tools/list and retrying once"
+                );
+                let _ = self.list_tools(None).await;
+                let params = self.tool_call_params(&name, &arguments);
+                self.mrtr_request(request::TOOLS_CALL, params).await?
+            }
+            other => other?,
+        };
+        self.decode::<draft::CallToolResult, legacy::CallToolResult, _>(v)
+    }
+
+    /// Build `tools/call` params, attaching the `x-mcp-header` mirror signal
+    /// (header-name → encoded value, from the `list_tools` cache) for the HTTP
+    /// transport to emit as `Mcp-Param-*` headers. Values stay in `arguments`
+    /// — headers are copies, the body is authoritative. A parameter absent
+    /// from `arguments` (or non-primitive) is simply not mirrored, per the
+    /// extraction rule.
+    fn tool_call_params(&self, name: &str, arguments: &Map<String, Value>) -> Map<String, Value> {
+        let mut mirrors = Map::new();
+        if let Some(headers) = self
             .header_params
             .lock()
             .expect("header_params poisoned")
-            .get(&name)
-            .map(|names| {
-                names
-                    .iter()
-                    .filter(|n| arguments.contains_key(*n))
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default();
+            .get(name)
+        {
+            for param in headers {
+                let mut value: Option<&Value> = None;
+                for (i, segment) in param.path.iter().enumerate() {
+                    value = if i == 0 {
+                        arguments.get(segment)
+                    } else {
+                        value.and_then(|v| v.get(segment))
+                    };
+                }
+                if let Some(rendered) = value.and_then(mcp_headers::render_argument) {
+                    mirrors.insert(
+                        param.header.clone(),
+                        json!(mcp_headers::encode_value(&rendered)),
+                    );
+                }
+            }
+        }
 
         let mut params = Map::new();
         params.insert("name".into(), json!(name));
-        params.insert("arguments".into(), Value::Object(arguments));
-        if !header_names.is_empty() {
+        params.insert("arguments".into(), Value::Object(arguments.clone()));
+        if !mirrors.is_empty() {
             let mut meta = Map::new();
-            meta.insert(HEADER_PARAMS_META_KEY.into(), json!(header_names));
+            meta.insert(HEADER_PARAMS_META_KEY.into(), Value::Object(mirrors));
             params.insert("_meta".into(), Value::Object(meta));
         }
-        let v = self.mrtr_request(request::TOOLS_CALL, params).await?;
-        self.decode::<draft::CallToolResult, legacy::CallToolResult, _>(v)
+        params
     }
 
     /// List the server's resources (one page; pass a `cursor` to continue).
@@ -533,18 +594,26 @@ impl Client {
 
     /// Issue a request, stamping the modern `_meta` envelope when the negotiated
     /// version is the stateless draft (legacy carries identity in the session).
+    /// Every request also carries the internal negotiated-version signal for
+    /// the HTTP transport's `MCP-Protocol-Version` header (required on all
+    /// post-negotiation requests by both versions' transports specs); other
+    /// transports sanitize it at the server boundary.
     async fn versioned_request(
         &self,
         method: &str,
         mut params: Map<String, Value>,
     ) -> ClientResult<Value> {
-        if self.version == ProtocolVersion::Draft {
-            // Merge the version envelope into any existing `_meta` (e.g. the
-            // `#[mcp_header]` mirror signal) rather than clobbering it.
-            let meta = params
-                .entry("_meta")
-                .or_insert_with(|| Value::Object(Map::new()));
-            if let Some(meta) = meta.as_object_mut() {
+        let meta = params
+            .entry("_meta")
+            .or_insert_with(|| Value::Object(Map::new()));
+        if let Some(meta) = meta.as_object_mut() {
+            meta.insert(
+                NEGOTIATED_VERSION_META_KEY.into(),
+                json!(self.version.as_str()),
+            );
+            if self.version == ProtocolVersion::Draft {
+                // Merge the version envelope into any existing `_meta` (e.g. the
+                // `#[mcp_header]` mirror signal) rather than clobbering it.
                 for (key, value) in &self.request_meta {
                     meta.entry(key.clone()).or_insert_with(|| value.clone());
                 }
@@ -581,16 +650,209 @@ fn list_params(cursor: Option<&str>) -> Map<String, Value> {
     params
 }
 
-/// The names of a tool's `#[mcp_header]`-marked parameters — its input-schema
-/// properties flagged `"x-mcp-header": true` (set by the `#[mcp_header]` macro
-/// marker via `mark_mcp_header`).
-fn header_param_names(input_schema: &Value) -> Vec<String> {
-    let Some(properties) = input_schema.get("properties").and_then(Value::as_object) else {
-        return Vec::new();
-    };
-    properties
-        .iter()
-        .filter(|(_, schema)| schema.get("x-mcp-header").and_then(Value::as_bool) == Some(true))
-        .map(|(name, _)| name.clone())
-        .collect()
+/// One `x-mcp-header`-annotated tool parameter: the header-name portion
+/// (mirrored as `Mcp-Param-{header}`) and the `properties` path to its value
+/// in the call arguments.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct HeaderParam {
+    header: String,
+    path: Vec<String>,
+}
+
+/// Collect a tool's `x-mcp-header` annotations, enforcing the transports
+/// spec's constraints. `Err` names the violation — a client using Streamable
+/// HTTP MUST then reject the whole tool definition (exclude it from
+/// `tools/list` and warn).
+///
+/// Constraints checked: the annotation is a string (the obsolete boolean form
+/// is tolerated as "use the property name"), a valid RFC 9110 field-name
+/// token, case-insensitively unique within the schema, applied only to
+/// primitive `string`/`integer`/`boolean` parameters (never `number`), and
+/// only on properties *statically reachable* through chains of `properties`
+/// keys — an annotation under `items`, composition/conditional keywords,
+/// `$ref`, or `$defs` invalidates the tool.
+fn header_params_from_schema(input_schema: &Value) -> Result<Vec<HeaderParam>, String> {
+    let mut found = Vec::new();
+    scan(input_schema, true, &mut Vec::new(), &mut found)?;
+    let mut seen = std::collections::HashSet::new();
+    for param in &found {
+        if !seen.insert(param.header.to_ascii_lowercase()) {
+            return Err(format!(
+                "duplicate x-mcp-header name {:?} (names are case-insensitively unique)",
+                param.header
+            ));
+        }
+    }
+    return Ok(found);
+
+    /// Walk every node; `reachable` is true only along root→`properties`→…
+    /// chains. An `x-mcp-header` on any other node is invalid.
+    fn scan(
+        node: &Value,
+        reachable: bool,
+        path: &mut Vec<String>,
+        found: &mut Vec<HeaderParam>,
+    ) -> Result<(), String> {
+        let Value::Object(map) = node else {
+            if let Value::Array(items) = node {
+                for item in items {
+                    scan(item, false, path, found)?;
+                }
+            }
+            return Ok(());
+        };
+        if let Some(annotation) = map.get("x-mcp-header") {
+            if !reachable || path.is_empty() {
+                return Err(format!(
+                    "x-mcp-header at {:?} is not statically reachable via `properties` chains",
+                    path.join(".")
+                ));
+            }
+            let header = match annotation {
+                Value::String(s) => s.clone(),
+                // Obsolete boolean form (pre-string SEP-2243 revisions):
+                // treat as "mirror under the property's own name".
+                Value::Bool(true) => path.last().cloned().unwrap_or_default(),
+                _ => {
+                    return Err(format!(
+                        "invalid x-mcp-header value at {:?}",
+                        path.join(".")
+                    ));
+                }
+            };
+            if !mcp_headers::is_valid_header_name(&header) {
+                return Err(format!(
+                    "x-mcp-header {header:?} at {:?} is not a valid header-name token",
+                    path.join(".")
+                ));
+            }
+            let ty = map.get("type").and_then(Value::as_str);
+            if !matches!(ty, Some("string" | "integer" | "boolean")) {
+                return Err(format!(
+                    "x-mcp-header at {:?} requires a primitive string/integer/boolean parameter",
+                    path.join(".")
+                ));
+            }
+            found.push(HeaderParam {
+                header,
+                path: path.clone(),
+            });
+        }
+        for (key, child) in map {
+            if key == "properties" && reachable {
+                if let Value::Object(props) = child {
+                    for (name, prop) in props {
+                        path.push(name.clone());
+                        scan(prop, true, path, found)?;
+                        path.pop();
+                    }
+                }
+            } else if key != "x-mcp-header" {
+                // Everything else (items, oneOf/anyOf/allOf/not, if/then/else,
+                // $defs, …) breaks static reachability for what's below it.
+                scan(child, false, path, found)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod header_param_tests {
+    use super::*;
+
+    #[test]
+    fn collects_string_annotations_and_nested_paths() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "region": { "type": "string", "x-mcp-header": "Region" },
+                "options": {
+                    "type": "object",
+                    "properties": {
+                        "tier": { "type": "integer", "x-mcp-header": "Tier" }
+                    }
+                },
+                "query": { "type": "string" }
+            }
+        });
+        let mut params = header_params_from_schema(&schema).unwrap();
+        params.sort_by(|a, b| a.header.cmp(&b.header));
+        assert_eq!(
+            params,
+            vec![
+                HeaderParam {
+                    header: "Region".into(),
+                    path: vec!["region".into()],
+                },
+                HeaderParam {
+                    header: "Tier".into(),
+                    path: vec!["options".into(), "tier".into()],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn tolerates_the_obsolete_boolean_form() {
+        let schema = json!({
+            "type": "object",
+            "properties": { "region": { "type": "string", "x-mcp-header": true } }
+        });
+        let params = header_params_from_schema(&schema).unwrap();
+        assert_eq!(params[0].header, "region");
+    }
+
+    #[test]
+    fn rejects_constraint_violations() {
+        // Not a tchar token.
+        let bad_name = json!({
+            "type": "object",
+            "properties": { "a": { "type": "string", "x-mcp-header": "has space" } }
+        });
+        assert!(header_params_from_schema(&bad_name).is_err());
+
+        // `number` is not permitted (integers only).
+        let number_type = json!({
+            "type": "object",
+            "properties": { "a": { "type": "number", "x-mcp-header": "A" } }
+        });
+        assert!(header_params_from_schema(&number_type).is_err());
+
+        // Case-insensitively duplicate names.
+        let dupes = json!({
+            "type": "object",
+            "properties": {
+                "a": { "type": "string", "x-mcp-header": "Region" },
+                "b": { "type": "string", "x-mcp-header": "region" }
+            }
+        });
+        assert!(header_params_from_schema(&dupes).is_err());
+
+        // Not statically reachable: inside a composition keyword.
+        let unreachable = json!({
+            "type": "object",
+            "properties": {
+                "a": {
+                    "oneOf": [
+                        { "type": "string", "x-mcp-header": "A" },
+                        { "type": "integer" }
+                    ]
+                }
+            }
+        });
+        assert!(header_params_from_schema(&unreachable).is_err());
+
+        // Not statically reachable: inside `items`.
+        let in_items = json!({
+            "type": "object",
+            "properties": {
+                "a": {
+                    "type": "array",
+                    "items": { "type": "string", "x-mcp-header": "A" }
+                }
+            }
+        });
+        assert!(header_params_from_schema(&in_items).is_err());
+    }
 }

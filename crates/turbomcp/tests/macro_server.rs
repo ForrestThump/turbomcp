@@ -176,9 +176,11 @@ async fn mcp_header_param_is_marked_in_schema() {
         .iter()
         .find(|t| t["name"] == "query")
         .unwrap();
+    // The annotation value is the header-name portion (`Mcp-Param-region`)
+    // per the transports spec — a string, not the obsolete boolean.
     assert_eq!(
         query["inputSchema"]["properties"]["region"]["x-mcp-header"],
-        true
+        "region"
     );
     assert_eq!(
         query["inputSchema"]["properties"]["sql"]["description"],

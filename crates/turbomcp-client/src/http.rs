@@ -26,8 +26,8 @@ use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use tokio::sync::mpsc;
-use turbomcp_core::{JsonRpcError, JsonRpcMessage, JsonRpcResponse};
-use turbomcp_service::Transport;
+use turbomcp_core::{JsonRpcError, JsonRpcMessage, JsonRpcResponse, ProtocolVersion};
+use turbomcp_service::{Transport, mcp_headers};
 
 use crate::client::{Client, ClientBuilder};
 use crate::error::{ClientError, ClientResult};
@@ -44,11 +44,16 @@ pub enum HttpClientError {
 const SESSION_HEADER: &str = "mcp-session-id";
 
 /// Shared state for the spawned POST tasks: the HTTP client, target URL, the
-/// captured session id, and the inbound delivery channel.
+/// captured session id, the last negotiated protocol version, and the inbound
+/// delivery channel.
 struct Shared {
     http: reqwest::Client,
     url: String,
     session: Mutex<Option<String>>,
+    /// The negotiated protocol version last seen on an outbound signal —
+    /// the `MCP-Protocol-Version` header fallback for messages that carry no
+    /// signal of their own (responses to server requests, notifications).
+    version: Mutex<Option<String>>,
     inbound_tx: mpsc::Sender<JsonRpcMessage>,
 }
 
@@ -73,6 +78,7 @@ impl HttpClientTransport {
                 http,
                 url: url.into(),
                 session: Mutex::new(None),
+                version: Mutex::new(None),
                 inbound_tx,
             }),
             inbound_rx,
@@ -146,10 +152,11 @@ async fn post_and_pump(shared: Arc<Shared>, msg: JsonRpcMessage) {
 /// The fallible body of a POST + response pump. Errors are returned as a string
 /// for [`post_and_pump`] to route.
 async fn pump(shared: &Shared, mut msg: JsonRpcMessage) -> Result<(), String> {
-    // `#[mcp_header]` mirroring: lift the marked params out of the `_meta` signal
-    // into `Mcp-Param-*` headers (their values stay in `arguments`). Done before
-    // serialization so the signal never reaches the wire body.
-    let header_params = extract_header_params(&mut msg);
+    // Lift the transport signals out of the body before serialization so they
+    // never reach the wire: the `x-mcp-header` mirror map and the negotiated
+    // protocol version.
+    let mirror_headers = extract_header_params(&mut msg);
+    let version = extract_protocol_version(&mut msg, shared);
 
     let body = serde_json::to_string(&msg).map_err(|e| format!("encode failed: {e}"))?;
 
@@ -162,8 +169,33 @@ async fn pump(shared: &Shared, mut msg: JsonRpcMessage) -> Result<(), String> {
     if let Some(sid) = shared.session.lock().expect("session mutex").clone() {
         req = req.header(SESSION_HEADER, sid);
     }
-    for (name, value) in header_params {
-        req = req.header(format!("Mcp-Param-{name}"), value);
+    // `MCP-Protocol-Version` is required on every POST (both versions'
+    // transports specs; on `2025-11-25` from the first post-`initialize`
+    // request onward — the handshake itself negotiates in-band).
+    if let Some(v) = &version {
+        req = req.header(mcp_headers::PROTOCOL_VERSION, v);
+    }
+    // The draft's standard request headers mirror body fields for
+    // intermediaries: `Mcp-Method` on every request POST, `Mcp-Name` for
+    // `tools/call`/`resources/read`/`prompts/get`. `2025-11-25` doesn't
+    // define them.
+    let is_draft = version
+        .as_deref()
+        .is_some_and(|v| ProtocolVersion::from_wire(v) == ProtocolVersion::Draft);
+    if is_draft && let JsonRpcMessage::Request(r) = &msg {
+        req = req.header(mcp_headers::MCP_METHOD, &r.method);
+        if let Some(field) = mcp_headers::name_field_for(&r.method)
+            && let Some(value) = r
+                .params
+                .as_ref()
+                .and_then(|p| p.get(field))
+                .and_then(serde_json::Value::as_str)
+        {
+            req = req.header(mcp_headers::MCP_NAME, mcp_headers::encode_value(value));
+        }
+    }
+    for (name, value) in mirror_headers {
+        req = req.header(format!("{}{name}", mcp_headers::MCP_PARAM_PREFIX), value);
     }
 
     let resp = req
@@ -219,8 +251,9 @@ async fn pump(shared: &Shared, mut msg: JsonRpcMessage) -> Result<(), String> {
     Ok(())
 }
 
-/// Pull the `#[mcp_header]` mirror signal out of a request's `_meta` and resolve
-/// each named param to its `(name, string-value)` from `arguments`.
+/// Pull the `x-mcp-header` mirror signal — a map of header-name portion →
+/// already-encoded value, built by the typed client from the tool's schema —
+/// out of a request's `_meta`.
 ///
 /// Mutates `msg`: removes the [`HEADER_PARAMS_META_KEY`](crate::client::HEADER_PARAMS_META_KEY)
 /// entry so it never reaches the wire. The param values stay in `arguments`
@@ -229,43 +262,72 @@ fn extract_header_params(msg: &mut JsonRpcMessage) -> Vec<(String, String)> {
     let JsonRpcMessage::Request(req) = msg else {
         return Vec::new();
     };
-    let Some(params) = req
-        .params
+    req.params
         .as_mut()
         .and_then(serde_json::Value::as_object_mut)
-    else {
-        return Vec::new();
-    };
-
-    // Take the list of header-param names out of `_meta`.
-    let names: Vec<String> = params
-        .get_mut("_meta")
+        .and_then(|params| params.get_mut("_meta"))
         .and_then(serde_json::Value::as_object_mut)
         .and_then(|meta| meta.remove(crate::client::HEADER_PARAMS_META_KEY))
-        .and_then(|v| serde_json::from_value(v).ok())
-        .unwrap_or_default();
-    if names.is_empty() {
-        return Vec::new();
+        .and_then(|v| match v {
+            serde_json::Value::Object(map) => Some(
+                map.into_iter()
+                    .filter_map(|(name, value)| match value {
+                        serde_json::Value::String(s) => Some((name, s)),
+                        _ => None,
+                    })
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// Resolve the `MCP-Protocol-Version` header value for `msg` and strip the
+/// internal signal from the body: the typed client's negotiated-version
+/// signal first, else the body's public `_meta` protocol version (draft
+/// requests), else the last version seen on this connection (covers
+/// responses to server requests and notifications, which carry no signal).
+/// Remembers whatever it resolves. An emptied `_meta` is dropped entirely.
+fn extract_protocol_version(msg: &mut JsonRpcMessage, shared: &Shared) -> Option<String> {
+    let params = match msg {
+        JsonRpcMessage::Request(r) => r.params.as_mut(),
+        JsonRpcMessage::Notification(n) => n.params.as_mut(),
+        JsonRpcMessage::Response(_) => None,
+    }
+    .and_then(serde_json::Value::as_object_mut);
+
+    let mut version = None;
+    if let Some(params) = params {
+        if let Some(meta) = params
+            .get_mut("_meta")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            version = meta
+                .remove(crate::client::NEGOTIATED_VERSION_META_KEY)
+                .and_then(|v| v.as_str().map(str::to_owned))
+                .or_else(|| {
+                    meta.get(turbomcp_core::meta::keys::PROTOCOL_VERSION)
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                });
+        }
+        if params
+            .get("_meta")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(serde_json::Map::is_empty)
+        {
+            params.remove("_meta");
+        }
     }
 
-    let Some(args) = params
-        .get("arguments")
-        .and_then(serde_json::Value::as_object)
-    else {
-        return Vec::new();
-    };
-    names
-        .into_iter()
-        .filter_map(|name| {
-            args.get(&name).map(|v| {
-                let value = match v {
-                    serde_json::Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                };
-                (name, value)
-            })
-        })
-        .collect()
+    let mut last = shared.version.lock().expect("version mutex");
+    match version {
+        Some(v) => {
+            *last = Some(v.clone());
+            Some(v)
+        }
+        None => last.clone(),
+    }
 }
 
 /// Connect a [`Client`] to an MCP server over Streamable HTTP at `url`, running
@@ -286,6 +348,7 @@ mod tests {
 
     #[test]
     fn extracts_marked_header_params_and_strips_the_signal() {
+        // The signal is a map of header-name portion → already-encoded value.
         let mut msg = JsonRpcMessage::Request(JsonRpcRequest::new(
             1,
             "tools/call",
@@ -293,19 +356,19 @@ mod tests {
                 "name": "locate",
                 "arguments": { "city": "SF", "region": "us-west", "n": 3 },
                 "_meta": {
-                    crate::client::HEADER_PARAMS_META_KEY: ["region", "n"],
+                    crate::client::HEADER_PARAMS_META_KEY: { "region": "us-west", "n": "3" },
                     "io.modelcontextprotocol/protocolVersion": "2026-07-28",
                 },
             })),
         ));
 
-        let headers = extract_header_params(&mut msg);
-        // String value passed through verbatim; non-string serialized as JSON.
+        let mut headers = extract_header_params(&mut msg);
+        headers.sort();
         assert_eq!(
             headers,
             vec![
+                ("n".to_owned(), "3".to_owned()),
                 ("region".to_owned(), "us-west".to_owned()),
-                ("n".to_owned(), "3".to_owned())
             ]
         );
 
@@ -335,5 +398,48 @@ mod tests {
             Some(json!({ "name": "x", "arguments": { "a": 1 } })),
         ));
         assert!(extract_header_params(&mut msg).is_empty());
+    }
+
+    #[test]
+    fn protocol_version_signal_is_lifted_and_remembered() {
+        let shared = Shared {
+            http: reqwest::Client::new(),
+            url: "http://unused/mcp".into(),
+            session: Mutex::new(None),
+            version: Mutex::new(None),
+            inbound_tx: mpsc::channel(1).0,
+        };
+
+        // A legacy request carries only the internal signal — lifted,
+        // stripped, and the emptied `_meta` dropped from the wire body.
+        let mut msg = JsonRpcMessage::Request(JsonRpcRequest::new(
+            1,
+            "tools/list",
+            Some(json!({
+                "_meta": { crate::client::NEGOTIATED_VERSION_META_KEY: "2025-11-25" },
+            })),
+        ));
+        assert_eq!(
+            extract_protocol_version(&mut msg, &shared).as_deref(),
+            Some("2025-11-25")
+        );
+        let JsonRpcMessage::Request(req) = &msg else {
+            unreachable!()
+        };
+        assert!(
+            req.params.as_ref().unwrap().get("_meta").is_none(),
+            "an emptied _meta is dropped"
+        );
+
+        // A signal-less follow-up (e.g. a response to a server request) falls
+        // back to the remembered version.
+        let mut response = JsonRpcMessage::Response(JsonRpcResponse::success(
+            turbomcp_core::RequestId::from(2),
+            json!({}),
+        ));
+        assert_eq!(
+            extract_protocol_version(&mut response, &shared).as_deref(),
+            Some("2025-11-25")
+        );
     }
 }

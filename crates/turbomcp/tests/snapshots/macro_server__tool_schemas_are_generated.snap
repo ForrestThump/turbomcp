@@ -57,7 +57,7 @@ expression: tools
       "properties": {
         "region": {
           "type": "string",
-          "x-mcp-header": true
+          "x-mcp-header": "region"
         },
         "sql": {
           "description": "The SQL to run",

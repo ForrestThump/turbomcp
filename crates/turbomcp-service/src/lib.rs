@@ -19,6 +19,7 @@
 
 mod auth;
 mod error;
+pub mod mcp_headers;
 mod middleware;
 pub mod outbound;
 mod ratelimit;
