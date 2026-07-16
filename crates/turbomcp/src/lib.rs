@@ -45,8 +45,9 @@ pub use turbomcp_server::{
     IntoCallToolResult, IntoGetPromptResult, IntoReadResourceResult, IntoServerBuilder, Json,
     LegacySessionAdapter, ListPromptsContext, ListResourceTemplatesContext, ListResourcesContext,
     ListToolsContext, LogSender, McpServerCore, MethodRouter, ProgressReporter,
-    ReadResourceContext, ServerBuilder, ServerNotifier, SessionState, SessionStore,
-    VersionDispatcher, WithCompletions, WithPrompts, WithResources, WithTools,
+    ReadResourceContext, ServerBuilder, ServerNotifier, SessionBackend, SessionState, SessionStore,
+    TaskBackend, TaskError, TaskSnapshot, TaskStatus, TaskStore, VersionDispatcher,
+    WithCompletions, WithPrompts, WithResources, WithTools,
 };
 
 /// Re-export of [`schemars`] for deriving `JsonSchema` on `#[tool]` argument

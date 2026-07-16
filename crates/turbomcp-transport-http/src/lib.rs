@@ -1112,7 +1112,7 @@ where
         )
             .into_response();
     };
-    if terminator.terminate(sid) {
+    if terminator.terminate(sid).await {
         StatusCode::NO_CONTENT.into_response()
     } else {
         // Unknown/already-terminated session: the spec maps this to 404 so the

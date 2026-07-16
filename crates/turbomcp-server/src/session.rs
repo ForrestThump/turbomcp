@@ -8,7 +8,11 @@
 //! the dispatcher via the internal `_meta` side-channel
 //! ([`turbomcp_core::meta::internal::SESSION_ID`]).
 //!
-//! In-memory only for now; pluggable backends (Redis, …) are post-GA (PLAN §11).
+//! The dispatcher reaches session state only through the [`SessionBackend`]
+//! trait, so the storage is pluggable (`ServerBuilder::with_session_backend`).
+//! [`SessionStore`] is the bundled in-memory backend (bounded, LRU eviction,
+//! optional idle timeout) and the default; external backends (Redis, …) ship
+//! post-GA behind the same trait.
 //!
 //! [`LegacySessionAdapter`]: crate::LegacySessionAdapter
 
@@ -16,8 +20,9 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
+use async_trait::async_trait;
 use serde_json::Value;
-use turbomcp_core::{Implementation, ProtocolVersion};
+use turbomcp_core::{Implementation, LogLevel, ProtocolVersion};
 
 /// What `initialize` negotiated for one session.
 #[derive(Clone, Debug)]
@@ -201,6 +206,65 @@ impl SessionStore {
 impl Default for SessionStore {
     fn default() -> Self {
         Self::with_capacity(Self::DEFAULT_CAPACITY)
+    }
+}
+
+/// Pluggable storage for legacy (`2025-11-25`) session state.
+///
+/// The dispatcher only ever touches sessions through this trait, so the state
+/// can live anywhere — the bundled [`SessionStore`] keeps it in process memory;
+/// a shared backend (e.g. Redis) lets multiple server instances serve the same
+/// `Mcp-Session-Id`. Register one with `ServerBuilder::with_session_backend`.
+///
+/// Contract notes for implementors:
+/// - [`get`](Self::get) refreshes the session's recency (it gates every legacy
+///   request); `None` means expired, evicted, or never created — the caller
+///   answers "unknown session" and the client re-`initialize`s.
+/// - Eviction policy (capacity, TTL) belongs to the backend.
+///   [`sweep_expired`](Self::sweep_expired) reports reclaimed ids so the
+///   dispatcher can tear down their subscription routes; a backend that
+///   expires internally (e.g. Redis TTLs) may return only what it can
+///   enumerate, or nothing.
+#[async_trait]
+pub trait SessionBackend: Send + Sync {
+    /// Store (or replace) `state` under `id`.
+    async fn insert(&self, id: &str, state: SessionState);
+
+    /// Look up a session, refreshing its recency.
+    async fn get(&self, id: &str) -> Option<SessionState>;
+
+    /// Record the session's `logging/setLevel` choice. Returns whether the
+    /// session exists.
+    async fn set_log_level(&self, id: &str, level: LogLevel) -> bool;
+
+    /// Terminate a session. Returns whether it existed.
+    async fn remove(&self, id: &str) -> bool;
+
+    /// Reclaim idle-expired sessions, returning their ids (the dispatcher
+    /// tears down each id's subscription routes).
+    async fn sweep_expired(&self) -> Vec<String>;
+}
+
+#[async_trait]
+impl SessionBackend for SessionStore {
+    async fn insert(&self, id: &str, state: SessionState) {
+        SessionStore::insert(self, id, state);
+    }
+
+    async fn get(&self, id: &str) -> Option<SessionState> {
+        SessionStore::get(self, id)
+    }
+
+    async fn set_log_level(&self, id: &str, level: LogLevel) -> bool {
+        SessionStore::set_log_level(self, id, level)
+    }
+
+    async fn remove(&self, id: &str) -> bool {
+        SessionStore::remove(self, id)
+    }
+
+    async fn sweep_expired(&self) -> Vec<String> {
+        SessionStore::sweep_expired(self)
     }
 }
 

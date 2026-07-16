@@ -7,11 +7,19 @@
 //! boundary through a small `service`-level trait the server implements and the
 //! transport holds behind `Arc<dyn …>`.
 
+use std::future::Future;
+use std::pin::Pin;
+
+/// Boxed future returned by [`SessionTerminator::terminate`] (keeps the trait
+/// dyn-compatible).
+pub type TerminateFuture<'a> = Pin<Box<dyn Future<Output = bool> + Send + 'a>>;
+
 /// Terminates a server session by id (backs HTTP `DELETE`). Implemented by the
 /// dispatcher (it drops the session state *and* its subscription routes);
 /// obtained from `VersionDispatcher::session_terminator`.
 pub trait SessionTerminator: Send + Sync {
     /// Terminate the session `session_id`. Returns whether it existed (the
-    /// transport answers `204` vs `404` accordingly).
-    fn terminate(&self, session_id: &str) -> bool;
+    /// transport answers `204` vs `404` accordingly). Async because the
+    /// session state may live in an external backend.
+    fn terminate<'a>(&'a self, session_id: &'a str) -> TerminateFuture<'a>;
 }

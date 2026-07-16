@@ -21,6 +21,8 @@ use std::sync::Arc;
 use crate::dispatcher::VersionDispatcher;
 use crate::extension::Extension;
 use crate::router::MethodRouter;
+use crate::session::SessionBackend;
+use crate::tasks::TaskBackend;
 use crate::traits::{McpServerCore, WithCompletions, WithPrompts, WithResources, WithTools};
 
 /// Assembles a server and its [`MethodRouter`] into a [`VersionDispatcher`].
@@ -31,6 +33,8 @@ pub struct ServerBuilder<S> {
     strict_elicitation_keys: bool,
     server_info_meta: bool,
     session_idle_timeout: Option<std::time::Duration>,
+    session_backend: Option<Arc<dyn SessionBackend>>,
+    task_backend: Option<Arc<dyn TaskBackend>>,
     extensions: Vec<Arc<dyn Extension>>,
 }
 
@@ -45,6 +49,8 @@ impl<S: McpServerCore> ServerBuilder<S> {
             strict_elicitation_keys: false,
             server_info_meta: true,
             session_idle_timeout: None,
+            session_backend: None,
+            task_backend: None,
             extensions: Vec::new(),
         }
     }
@@ -60,6 +66,8 @@ impl<S: McpServerCore> ServerBuilder<S> {
             strict_elicitation_keys: false,
             server_info_meta: true,
             session_idle_timeout: None,
+            session_backend: None,
+            task_backend: None,
             extensions: Vec::new(),
         }
     }
@@ -81,6 +89,29 @@ impl<S: McpServerCore> ServerBuilder<S> {
     #[must_use]
     pub fn with_tasks(mut self) -> Self {
         self.tasks = true;
+        self
+    }
+
+    /// Enable core Tasks backed by a custom [`TaskBackend`] instead of the
+    /// bundled in-memory store — the seam for external task storage. See
+    /// [`VersionDispatcher::with_task_backend`]. Implies
+    /// [`with_tasks`](Self::with_tasks).
+    #[must_use]
+    pub fn with_task_backend(mut self, backend: Arc<dyn TaskBackend>) -> Self {
+        self.task_backend = Some(backend);
+        self
+    }
+
+    /// Store legacy (`2025-11-25`) session state in a custom
+    /// [`SessionBackend`] instead of the bundled in-memory store — the seam
+    /// for external session storage (e.g. Redis), so multiple instances can
+    /// serve the same session. When set,
+    /// [`session_idle_timeout`](Self::session_idle_timeout) is ignored
+    /// (eviction policy belongs to the backend). See
+    /// [`VersionDispatcher::with_session_backend`].
+    #[must_use]
+    pub fn with_session_backend(mut self, backend: Arc<dyn SessionBackend>) -> Self {
+        self.session_backend = Some(backend);
         self
     }
 
@@ -168,7 +199,9 @@ impl<S: McpServerCore> ServerBuilder<S> {
     #[must_use]
     pub fn build(self) -> VersionDispatcher<S> {
         let mut dispatcher = VersionDispatcher::new(self.server, self.router);
-        if self.tasks {
+        if let Some(backend) = self.task_backend {
+            dispatcher = dispatcher.with_task_backend(backend);
+        } else if self.tasks {
             dispatcher = dispatcher.with_task_support();
         }
         if self.strict_elicitation_keys {
@@ -177,7 +210,9 @@ impl<S: McpServerCore> ServerBuilder<S> {
         if !self.server_info_meta {
             dispatcher = dispatcher.without_server_info_meta();
         }
-        if let Some(timeout) = self.session_idle_timeout {
+        if let Some(backend) = self.session_backend {
+            dispatcher = dispatcher.with_session_backend(backend);
+        } else if let Some(timeout) = self.session_idle_timeout {
             dispatcher = dispatcher.with_session_idle_timeout(timeout);
         }
         for extension in self.extensions {

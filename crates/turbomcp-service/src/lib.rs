@@ -32,7 +32,7 @@ pub use error::{ProtocolError, mcp_to_jsonrpc_error};
 pub use middleware::{Tracing, TracingLayer};
 pub use ratelimit::{GovernorRateLimiter, RateKey, RateLimiter};
 pub use serve::{ServeConfig, serve, serve_with};
-pub use session::SessionTerminator;
+pub use session::{SessionTerminator, TerminateFuture};
 pub use transport::Transport;
 
 pub use tokio_util::sync::CancellationToken;

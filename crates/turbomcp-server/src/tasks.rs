@@ -28,32 +28,42 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use async_trait::async_trait;
 use serde_json::Value;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tokio::sync::watch;
 use turbomcp_core::{CancellationToken, JsonRpcError};
 
-/// Internal task status (rendered to the wire by the dispatcher).
+/// A task's lifecycle status (rendered to the wire by the dispatcher).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TaskStatus {
+pub enum TaskStatus {
+    /// Created and not yet terminal; the underlying request is executing.
     Working,
+    /// The underlying request produced a result.
     Completed,
+    /// The underlying request produced an error.
     Failed,
+    /// `tasks/cancel` ended the task before it finished.
     Cancelled,
 }
 
 impl TaskStatus {
-    pub(crate) fn is_terminal(self) -> bool {
+    /// Whether this status never transitions again.
+    #[must_use]
+    pub fn is_terminal(self) -> bool {
         matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
     }
 }
 
 /// A point-in-time copy of one task's externally visible state.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct TaskSnapshot {
+pub struct TaskSnapshot {
+    /// The task's unique id.
     pub task_id: String,
+    /// Current lifecycle status.
     pub status: TaskStatus,
+    /// Optional human-readable status detail.
     pub status_message: Option<String>,
     /// RFC 3339.
     pub created_at: String,
@@ -65,7 +75,8 @@ pub(crate) struct TaskSnapshot {
 
 /// Why a task operation failed (mapped to JSON-RPC codes by the dispatcher).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum TaskError {
+#[non_exhaustive]
+pub enum TaskError {
     /// No live task with that id under this session (`-32602`).
     NotFound,
     /// `tasks/cancel` on a task already in a terminal status (`-32602`).
@@ -114,25 +125,26 @@ fn rfc3339(t: OffsetDateTime) -> String {
         .unwrap_or_else(|_| String::from("1970-01-01T00:00:00Z"))
 }
 
-/// Bounded, session-scoped, in-memory task registry.
-pub(crate) struct TaskStore {
+/// Bounded, session-scoped, in-memory task registry — the default
+/// [`TaskBackend`].
+pub struct TaskStore {
     inner: Mutex<HashMap<String, TaskEntry>>,
     capacity: usize,
 }
 
 impl TaskStore {
     /// Retention when the client doesn't request a `ttl`, in milliseconds.
-    pub(crate) const DEFAULT_TTL_MS: i64 = 300_000; // 5 minutes
+    pub const DEFAULT_TTL_MS: i64 = 300_000; // 5 minutes
     /// Hard upper bound on retention (the spec lets receivers override).
-    pub(crate) const MAX_TTL_MS: i64 = 3_600_000; // 1 hour
+    pub const MAX_TTL_MS: i64 = 3_600_000; // 1 hour
     /// Suggested client polling interval, in milliseconds.
-    pub(crate) const POLL_INTERVAL_MS: i64 = 500;
+    pub const POLL_INTERVAL_MS: i64 = 500;
 
     const DEFAULT_CAPACITY: usize = 1024;
 
     /// Create a task in `working` status, owned by `session_id`, driven by
     /// `cancel`. Returns the snapshot to render as `CreateTaskResult`.
-    pub(crate) fn create(
+    pub fn create(
         &self,
         session_id: String,
         requested_ttl_ms: Option<i64>,
@@ -168,7 +180,7 @@ impl TaskStore {
     /// Record the underlying request's outcome: `Ok` ⇒ `completed`,
     /// `Err` ⇒ `failed`. No-op if the task is already terminal (a cancel won
     /// the race) or was purged.
-    pub(crate) fn complete(&self, id: &str, outcome: Result<Value, JsonRpcError>) {
+    pub fn complete(&self, id: &str, outcome: Result<Value, JsonRpcError>) {
         let mut map = self.inner.lock().expect("task store lock poisoned");
         let Some(entry) = map.get_mut(id) else {
             return;
@@ -189,7 +201,7 @@ impl TaskStore {
     }
 
     /// `tasks/cancel`: fire the task's token and transition to `cancelled`.
-    pub(crate) fn cancel(&self, session_id: &str, id: &str) -> Result<TaskSnapshot, TaskError> {
+    pub fn cancel(&self, session_id: &str, id: &str) -> Result<TaskSnapshot, TaskError> {
         let mut map = self.inner.lock().expect("task store lock poisoned");
         Self::purge_expired(&mut map);
         let entry = match map.get_mut(id) {
@@ -218,7 +230,7 @@ impl TaskStore {
     }
 
     /// `tasks/get`: the task's current state.
-    pub(crate) fn get(&self, session_id: &str, id: &str) -> Result<TaskSnapshot, TaskError> {
+    pub fn get(&self, session_id: &str, id: &str) -> Result<TaskSnapshot, TaskError> {
         let mut map = self.inner.lock().expect("task store lock poisoned");
         Self::purge_expired(&mut map);
         match map.get(id) {
@@ -229,7 +241,7 @@ impl TaskStore {
 
     /// `tasks/list`: this session's tasks, oldest first, paginated. The cursor
     /// is the stringified offset of the next page.
-    pub(crate) fn list(
+    pub fn list(
         &self,
         session_id: &str,
         cursor: Option<&str>,
@@ -259,7 +271,7 @@ impl TaskStore {
     /// `tasks/result`: block until the task is terminal, then return the
     /// underlying request's outcome verbatim (success value or JSON-RPC
     /// error), per spec §Result Retrieval.
-    pub(crate) async fn wait_result(
+    pub async fn wait_result(
         &self,
         session_id: &str,
         id: &str,
@@ -308,6 +320,110 @@ impl Default for TaskStore {
             inner: Mutex::new(HashMap::new()),
             capacity: Self::DEFAULT_CAPACITY,
         }
+    }
+}
+
+/// Pluggable storage for core Tasks (`2025-11-25`).
+///
+/// The dispatcher drives `tasks/*` and task-augmented `tools/call` entirely
+/// through this trait; the bundled [`TaskStore`] is the in-memory default
+/// (`ServerBuilder::with_tasks`), and `ServerBuilder::with_task_backend`
+/// substitutes any other. All methods are async so a backend may live out of
+/// process.
+///
+/// Contract notes for implementors (tasks.mdx §Behavior Requirements):
+/// - tasks begin `working`; terminal statuses never transition again;
+/// - `get`/`list`/`cancel`/`wait_result` are session-scoped — a task is only
+///   visible to the `session_id` that created it;
+/// - the `cancel` token handed to [`create`](Self::create) fires the spawned
+///   handler's cancellation. It is process-local: a distributed backend
+///   cancels local work through it and propagates cross-instance cancellation
+///   its own way (e.g. pub/sub);
+/// - [`wait_result`](Self::wait_result) blocks until the task is terminal and
+///   returns the underlying request's outcome verbatim.
+#[async_trait]
+pub trait TaskBackend: Send + Sync {
+    /// Create a task in `working` status, owned by `session_id`, driven by
+    /// `cancel`. Returns the snapshot rendered as `CreateTaskResult`.
+    async fn create(
+        &self,
+        session_id: &str,
+        requested_ttl_ms: Option<i64>,
+        cancel: CancellationToken,
+    ) -> Result<TaskSnapshot, TaskError>;
+
+    /// Record the underlying request's outcome: `Ok` ⇒ `completed`, `Err` ⇒
+    /// `failed`. Must be a no-op if the task is already terminal or purged.
+    async fn complete(&self, task_id: &str, outcome: Result<Value, JsonRpcError>);
+
+    /// `tasks/cancel`: fire the task's token and transition to `cancelled`.
+    async fn cancel(&self, session_id: &str, task_id: &str) -> Result<TaskSnapshot, TaskError>;
+
+    /// `tasks/get`: the task's current state.
+    async fn get(&self, session_id: &str, task_id: &str) -> Result<TaskSnapshot, TaskError>;
+
+    /// `tasks/list`: this session's tasks, oldest first, paginated. The cursor
+    /// is backend-defined and opaque to clients.
+    async fn list(
+        &self,
+        session_id: &str,
+        cursor: Option<&str>,
+        page_size: usize,
+    ) -> Result<(Vec<TaskSnapshot>, Option<String>), TaskError>;
+
+    /// `tasks/result`: block until the task is terminal, then return the
+    /// underlying request's outcome verbatim (success value or JSON-RPC
+    /// error), per spec §Result Retrieval.
+    async fn wait_result(
+        &self,
+        session_id: &str,
+        task_id: &str,
+    ) -> Result<Result<Value, JsonRpcError>, TaskError>;
+
+    /// The polling interval to suggest to clients, in milliseconds.
+    fn poll_interval_ms(&self) -> i64 {
+        TaskStore::POLL_INTERVAL_MS
+    }
+}
+
+#[async_trait]
+impl TaskBackend for TaskStore {
+    async fn create(
+        &self,
+        session_id: &str,
+        requested_ttl_ms: Option<i64>,
+        cancel: CancellationToken,
+    ) -> Result<TaskSnapshot, TaskError> {
+        TaskStore::create(self, session_id.to_owned(), requested_ttl_ms, cancel)
+    }
+
+    async fn complete(&self, task_id: &str, outcome: Result<Value, JsonRpcError>) {
+        TaskStore::complete(self, task_id, outcome);
+    }
+
+    async fn cancel(&self, session_id: &str, task_id: &str) -> Result<TaskSnapshot, TaskError> {
+        TaskStore::cancel(self, session_id, task_id)
+    }
+
+    async fn get(&self, session_id: &str, task_id: &str) -> Result<TaskSnapshot, TaskError> {
+        TaskStore::get(self, session_id, task_id)
+    }
+
+    async fn list(
+        &self,
+        session_id: &str,
+        cursor: Option<&str>,
+        page_size: usize,
+    ) -> Result<(Vec<TaskSnapshot>, Option<String>), TaskError> {
+        TaskStore::list(self, session_id, cursor, page_size)
+    }
+
+    async fn wait_result(
+        &self,
+        session_id: &str,
+        task_id: &str,
+    ) -> Result<Result<Value, JsonRpcError>, TaskError> {
+        TaskStore::wait_result(self, session_id, task_id).await
     }
 }
 

@@ -17,7 +17,7 @@ use turbomcp_protocol::v2025_11_25::types as legacy;
 
 use crate::extension::Extension;
 use crate::router::MethodRouter;
-use crate::session::{SessionState, SessionStore};
+use crate::session::{SessionBackend, SessionState};
 use crate::traits::McpServerCore;
 
 use super::{error_response, session_id};
@@ -26,11 +26,11 @@ use super::{error_response, session_id};
 /// echo the requested version when supported, otherwise our latest
 /// `initialize`-speaking version. When the transport supplied a session id,
 /// the negotiated state is stored under it for later context injection.
-pub(super) fn handle_initialize<S: McpServerCore>(
+pub(super) async fn handle_initialize<S: McpServerCore>(
     server: &S,
     router: &MethodRouter<S>,
     supported: &[ProtocolVersion],
-    sessions: &SessionStore,
+    sessions: &dyn SessionBackend,
     tasks_enabled: bool,
     req: &JsonRpcRequest,
 ) -> JsonRpcMessage {
@@ -52,15 +52,17 @@ pub(super) fn handle_initialize<S: McpServerCore>(
 
     if let Some(sid) = session_id(req.params.as_ref()) {
         let client_capabilities = serde_json::to_value(&params.capabilities).unwrap_or(Value::Null);
-        sessions.insert(
-            sid,
-            SessionState {
-                version: negotiated.clone(),
-                client_info: from_legacy_impl(params.client_info),
-                client_capabilities,
-                log_level: None,
-            },
-        );
+        sessions
+            .insert(
+                sid,
+                SessionState {
+                    version: negotiated.clone(),
+                    client_info: from_legacy_impl(params.client_info),
+                    client_capabilities,
+                    log_level: None,
+                },
+            )
+            .await;
     }
 
     let result = legacy::InitializeResult {

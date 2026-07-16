@@ -38,9 +38,9 @@ use crate::extension::{Extension, ExtensionRequest};
 use crate::inflight::InFlightRegistry;
 use crate::mrtr::{PendingRequests, StateSigner};
 use crate::router::MethodRouter;
-use crate::session::SessionStore;
+use crate::session::{SessionBackend, SessionStore};
 use crate::subscriptions::{ServerNotifier, SubscriptionRegistry};
-use crate::tasks::TaskStore;
+use crate::tasks::{TaskBackend, TaskStore};
 use crate::traits::McpServerCore;
 
 mod augment;
@@ -78,8 +78,8 @@ pub struct VersionDispatcher<S> {
 /// subscription routes, has one place to live). Cheap to clone (six `Arc`s).
 #[derive(Clone)]
 struct Shared {
-    sessions: Arc<SessionStore>,
-    tasks: Option<Arc<TaskStore>>,
+    sessions: Arc<dyn SessionBackend>,
+    tasks: Option<Arc<dyn TaskBackend>>,
     inflight: Arc<InFlightRegistry>,
     subs: Arc<SubscriptionRegistry>,
     signer: Arc<StateSigner>,
@@ -102,8 +102,8 @@ impl Shared {
     /// opportunistically at `initialize`, where new sessions are minted — a
     /// natural, cheap point to bound stale-session growth without a background
     /// task. A store with no idle timeout sweeps nothing.
-    fn sweep_idle_sessions(&self) {
-        for id in self.sessions.sweep_expired() {
+    async fn sweep_idle_sessions(&self) {
+        for id in self.sessions.sweep_expired().await {
             self.subs.legacy_remove(&id);
         }
     }
@@ -111,8 +111,8 @@ impl Shared {
     /// Terminate one session: drop its state and its legacy subscription
     /// routes. Returns whether the session existed. Backs explicit `DELETE`
     /// session termination.
-    fn terminate_session(&self, id: &str) -> bool {
-        let existed = self.sessions.remove(id);
+    async fn terminate_session(&self, id: &str) -> bool {
+        let existed = self.sessions.remove(id).await;
         self.subs.legacy_remove(id);
         existed
     }
@@ -127,8 +127,8 @@ pub struct DispatcherSessionTerminator {
 }
 
 impl turbomcp_service::SessionTerminator for DispatcherSessionTerminator {
-    fn terminate(&self, session_id: &str) -> bool {
-        self.shared.terminate_session(session_id)
+    fn terminate<'a>(&'a self, session_id: &'a str) -> turbomcp_service::TerminateFuture<'a> {
+        Box::pin(self.shared.terminate_session(session_id))
     }
 }
 
@@ -253,6 +253,26 @@ impl<S: McpServerCore> VersionDispatcher<S> {
             SessionStore::with_capacity(SessionStore::DEFAULT_CAPACITY)
                 .with_idle_timeout(Some(timeout)),
         );
+        self
+    }
+
+    /// Store legacy session state in `backend` instead of the bundled
+    /// in-memory [`SessionStore`] — the seam for external session storage
+    /// (e.g. Redis), so multiple instances can serve the same session.
+    /// Replaces any prior store configuration
+    /// ([`with_session_idle_timeout`](Self::with_session_idle_timeout) applies
+    /// only to the bundled store).
+    #[must_use]
+    pub fn with_session_backend(mut self, backend: Arc<dyn SessionBackend>) -> Self {
+        self.shared.sessions = backend;
+        self
+    }
+
+    /// Enable core Tasks (`2025-11-25`) backed by `backend` instead of the
+    /// bundled in-memory [`TaskStore`] — the seam for external task storage.
+    #[must_use]
+    pub fn with_task_backend(mut self, backend: Arc<dyn TaskBackend>) -> Self {
+        self.shared.tasks = Some(backend);
         self
     }
 }
@@ -465,10 +485,17 @@ async fn handle_request<S: McpServerCore>(
         methods::request::INITIALIZE => {
             // Bound stale-session growth: reclaim idle sessions (and their
             // routes) whenever a new one is minted.
-            shared.sweep_idle_sessions();
+            shared.sweep_idle_sessions().await;
             let tasks_enabled = tasks.is_some() && router.has_tools();
-            let reply =
-                handle_initialize(&server, router, supported, sessions, tasks_enabled, &req);
+            let reply = handle_initialize(
+                &server,
+                router,
+                supported,
+                sessions.as_ref(),
+                tasks_enabled,
+                &req,
+            )
+            .await;
             // A successfully initialized session gets a delivery route, so
             // list_changed notifications can reach it from the start.
             if matches!(&reply, JsonRpcMessage::Response(r) if r.error.is_none())
@@ -516,7 +543,7 @@ async fn handle_request<S: McpServerCore>(
                     )
                 }
                 VersionRoute::Legacy => {
-                    let mut ctx = match legacy_context(sessions, &req)? {
+                    let mut ctx = match legacy_context(sessions.as_ref(), &req).await? {
                         Ok(ctx) => ctx,
                         Err(response) => return Ok(response),
                     };
@@ -532,7 +559,9 @@ async fn handle_request<S: McpServerCore>(
                         if method == methods::request::TOOLS_CALL
                             && has_task_field(req.params.as_ref())
                         {
-                            return Ok(task_augmented_call(server, router, store, ctx, &req, id));
+                            return Ok(
+                                task_augmented_call(server, router, store, ctx, &req, id).await
+                            );
                         }
                         if method == methods::request::TOOLS_LIST {
                             return Ok(legacy_list_tools_with_task_support(
@@ -559,7 +588,7 @@ async fn handle_request<S: McpServerCore>(
         methods::request::RESOURCES_SUBSCRIBE | methods::request::RESOURCES_UNSUBSCRIBE => {
             match classify_version(req.params.as_ref(), supported) {
                 VersionRoute::Legacy => {
-                    if let Err(response) = legacy_context(sessions, &req)? {
+                    if let Err(response) = legacy_context(sessions.as_ref(), &req).await? {
                         return Ok(response);
                     }
                     if !router.has_resources() {
@@ -590,7 +619,7 @@ async fn handle_request<S: McpServerCore>(
         methods::request::LOGGING_SET_LEVEL => {
             match classify_version(req.params.as_ref(), supported) {
                 VersionRoute::Legacy => {
-                    if let Err(response) = legacy_context(sessions, &req)? {
+                    if let Err(response) = legacy_context(sessions.as_ref(), &req).await? {
                         return Ok(response);
                     }
                     if !router.has_logging() {
@@ -602,7 +631,7 @@ async fn handle_request<S: McpServerCore>(
                     };
                     // `legacy_context` proved the session id is present.
                     let sid = session_id(req.params.as_ref()).unwrap_or_default();
-                    sessions.set_log_level(sid, level);
+                    sessions.set_log_level(sid, level).await;
                     Ok(JsonRpcResponse::success(id, serde_json::json!({})).into())
                 }
                 VersionRoute::Modern => Ok(error_response(id, &McpError::method_not_found(method))),
@@ -621,7 +650,7 @@ async fn handle_request<S: McpServerCore>(
             match classify_version(req.params.as_ref(), supported) {
                 VersionRoute::Legacy => {
                     // Same session gate as every other legacy method.
-                    if let Err(response) = legacy_context(sessions, &req)? {
+                    if let Err(response) = legacy_context(sessions.as_ref(), &req).await? {
                         return Ok(response);
                     }
                     let Some(store) = tasks else {

@@ -14,7 +14,7 @@ use turbomcp_core::{
 use turbomcp_protocol::{methods, neutral, version};
 use turbomcp_service::ProtocolError;
 
-use crate::session::SessionStore;
+use crate::session::SessionBackend;
 
 use super::session_id;
 
@@ -29,8 +29,8 @@ use super::session_id;
 /// - `Ok(Err(response))` — no session id at all: the connection never ran
 ///   `initialize`, answered in-band as a JSON-RPC error.
 /// - `Ok(Ok(ctx))` — live session.
-pub(super) fn legacy_context(
-    sessions: &SessionStore,
+pub(super) async fn legacy_context(
+    sessions: &dyn SessionBackend,
     req: &JsonRpcRequest,
 ) -> Result<Result<RequestContext, JsonRpcMessage>, ProtocolError> {
     let Some(sid) = session_id(req.params.as_ref()) else {
@@ -41,7 +41,7 @@ pub(super) fn legacy_context(
         };
         return Ok(Err(JsonRpcResponse::error(req.id.clone(), err).into()));
     };
-    let Some(state) = sessions.get(sid) else {
+    let Some(state) = sessions.get(sid).await else {
         return Err(ProtocolError::UnknownSession(sid.to_owned()));
     };
     let mut ctx = RequestContext::new(state.version).with_client_info(state.client_info);

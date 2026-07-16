@@ -17,7 +17,7 @@ use turbomcp_service::mcp_to_jsonrpc_error;
 
 use crate::context::{CallToolContext, ListToolsContext};
 use crate::router::MethodRouter;
-use crate::tasks::{TaskError, TaskSnapshot, TaskStatus, TaskStore};
+use crate::tasks::{TaskBackend, TaskError, TaskSnapshot, TaskStatus};
 use crate::traits::McpServerCore;
 
 use super::params::{parse_call_tool_params, parse_list_params};
@@ -45,10 +45,10 @@ struct RawTaskMetadata {
 /// `tools/call` with a `task` field: validate, register the task, spawn the
 /// handler under the task's cancellation token, and answer immediately with
 /// `CreateTaskResult` (spec §Creating Tasks).
-pub(super) fn task_augmented_call<S: McpServerCore>(
+pub(super) async fn task_augmented_call<S: McpServerCore>(
     server: S,
     router: &MethodRouter<S>,
-    store: &Arc<TaskStore>,
+    store: &Arc<dyn TaskBackend>,
     ctx: RequestContext,
     req: &JsonRpcRequest,
     id: RequestId,
@@ -88,11 +88,12 @@ pub(super) fn task_augmented_call<S: McpServerCore>(
     let sid = session_id(req.params.as_ref())
         .unwrap_or_default()
         .to_owned();
-    let snap = match store.create(sid, task_meta.ttl, token.clone()) {
+    let snap = match store.create(&sid, task_meta.ttl, token.clone()).await {
         Ok(s) => s,
         Err(e) => return task_error_response(id, &e),
     };
 
+    let poll_interval_ms = store.poll_interval_ms();
     let store = Arc::clone(store);
     let task_id = snap.task_id.clone();
     tokio::spawn(async move {
@@ -114,7 +115,7 @@ pub(super) fn task_augmented_call<S: McpServerCore>(
                     }
                     Err(e) => Err(mcp_to_jsonrpc_error(&e)),
                 };
-                store.complete(&task_id, outcome);
+                store.complete(&task_id, outcome).await;
             }
         }
     });
@@ -123,7 +124,7 @@ pub(super) fn task_augmented_call<S: McpServerCore>(
         id,
         &legacy::CreateTaskResult {
             meta: Map::new(),
-            task: to_wire_task(&snap),
+            task: to_wire_task(&snap, poll_interval_ms),
         },
     )
 }
@@ -175,7 +176,7 @@ pub(super) async fn legacy_list_tools_with_task_support<S: McpServerCore>(
 }
 
 pub(super) async fn handle_tasks_method(
-    store: &Arc<TaskStore>,
+    store: &Arc<dyn TaskBackend>,
     sid: &str,
     method: &str,
     req: &JsonRpcRequest,
@@ -188,13 +189,16 @@ pub(super) async fn handle_tasks_method(
                 .as_ref()
                 .and_then(|p| p.get("cursor"))
                 .and_then(Value::as_str);
-            match store.list(sid, cursor, TASKS_PAGE_SIZE) {
+            match store.list(sid, cursor, TASKS_PAGE_SIZE).await {
                 Ok((page, next_cursor)) => ok_value(
                     id,
                     &legacy::ListTasksResult {
                         meta: Map::new(),
                         next_cursor,
-                        tasks: page.iter().map(to_wire_task).collect(),
+                        tasks: page
+                            .iter()
+                            .map(|s| to_wire_task(s, store.poll_interval_ms()))
+                            .collect(),
                     },
                 ),
                 Err(e) => task_error_response(id, &e),
@@ -202,14 +206,14 @@ pub(super) async fn handle_tasks_method(
         }
         methods::request::TASKS_GET => match parse_task_id(req.params.as_ref()) {
             Err(e) => error_response(id, &e),
-            Ok(tid) => match store.get(sid, &tid) {
+            Ok(tid) => match store.get(sid, &tid).await {
                 Ok(s) => ok_value(
                     id,
                     &legacy::GetTaskResult {
                         created_at: s.created_at.clone(),
                         last_updated_at: s.last_updated_at.clone(),
                         meta: Map::new(),
-                        poll_interval: Some(TaskStore::POLL_INTERVAL_MS),
+                        poll_interval: Some(store.poll_interval_ms()),
                         status: to_wire_status(s.status),
                         status_message: s.status_message.clone(),
                         task_id: s.task_id.clone(),
@@ -222,14 +226,14 @@ pub(super) async fn handle_tasks_method(
         },
         methods::request::TASKS_CANCEL => match parse_task_id(req.params.as_ref()) {
             Err(e) => error_response(id, &e),
-            Ok(tid) => match store.cancel(sid, &tid) {
+            Ok(tid) => match store.cancel(sid, &tid).await {
                 Ok(s) => ok_value(
                     id,
                     &legacy::CancelTaskResult {
                         created_at: s.created_at.clone(),
                         last_updated_at: s.last_updated_at.clone(),
                         meta: Map::new(),
-                        poll_interval: Some(TaskStore::POLL_INTERVAL_MS),
+                        poll_interval: Some(store.poll_interval_ms()),
                         status: to_wire_status(s.status),
                         status_message: s.status_message.clone(),
                         task_id: s.task_id.clone(),
@@ -276,11 +280,11 @@ fn to_wire_status(s: TaskStatus) -> legacy::TaskStatus {
     }
 }
 
-fn to_wire_task(s: &TaskSnapshot) -> legacy::Task {
+fn to_wire_task(s: &TaskSnapshot, poll_interval_ms: i64) -> legacy::Task {
     legacy::Task {
         created_at: s.created_at.clone(),
         last_updated_at: s.last_updated_at.clone(),
-        poll_interval: Some(TaskStore::POLL_INTERVAL_MS),
+        poll_interval: Some(poll_interval_ms),
         status: to_wire_status(s.status),
         status_message: s.status_message.clone(),
         task_id: s.task_id.clone(),

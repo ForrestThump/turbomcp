@@ -52,8 +52,9 @@ pub use response::{
     Audio, Image, IntoCallToolResult, IntoGetPromptResult, IntoReadResourceResult, Json,
 };
 pub use router::MethodRouter;
-pub use session::{SessionState, SessionStore};
+pub use session::{SessionBackend, SessionState, SessionStore};
 pub use subscriptions::ServerNotifier;
+pub use tasks::{TaskBackend, TaskError, TaskSnapshot, TaskStatus, TaskStore};
 pub use traits::{McpServerCore, WithCompletions, WithPrompts, WithResources, WithTools};
 
 /// Support items called by `#[server]`-generated code. Not part of the stable
