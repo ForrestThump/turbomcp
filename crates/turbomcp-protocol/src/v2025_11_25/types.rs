@@ -2617,7 +2617,8 @@ pub struct ElicitRequest {
 ///          "type": "string",
 ///          "const": "object"
 ///        }
-///      }
+///      },
+///      "additionalProperties": {}
 ///    },
 ///    "task": {
 ///      "description": "If specified, the caller is requesting task-augmented execution for this request.\nThe request will return a CreateTaskResult immediately, and the actual result can be\nretrieved later via tasks/result.\n\nTask augmentation is subject to capability negotiation - receivers MUST declare support\nfor task augmentation of specific request types in their capabilities.",
@@ -2714,7 +2715,8 @@ Only top-level properties are allowed, without nesting.*/
 ///      "type": "string",
 ///      "const": "object"
 ///    }
-///  }
+///  },
+///  "additionalProperties": {}
 ///}
 /// ```
 /// </details>
@@ -2732,6 +2734,8 @@ pub struct ElicitRequestFormParamsRequestedSchema {
     pub schema: ::core::option::Option<::alloc::string::String>,
     #[serde(rename = "type")]
     pub type_: ::alloc::string::String,
+    #[serde(flatten)]
+    pub extra: ::serde_json::Map<::alloc::string::String, ::serde_json::Value>,
 }
 ///The parameters for a request to elicit additional information from the user via the client.
 ///
@@ -9804,7 +9808,8 @@ pub struct TitledSingleSelectEnumSchemaOneOfItem {
 ///          "type": "string",
 ///          "const": "object"
 ///        }
-///      }
+///      },
+///      "additionalProperties": {}
 ///    },
 ///    "name": {
 ///      "description": "Intended for programmatic or logical use, but used as a display name in past specs or fallback (if title isn't present).",
@@ -9837,7 +9842,8 @@ pub struct TitledSingleSelectEnumSchemaOneOfItem {
 ///          "type": "string",
 ///          "const": "object"
 ///        }
-///      }
+///      },
+///      "additionalProperties": {}
 ///    },
 ///    "title": {
 ///      "description": "Intended for UI and end-user contexts — optimized to be human-readable and easily understood,\neven by those unfamiliar with domain-specific terminology.\n\nIf not provided, the name should be used for display (except for Tool,\nwhere `annotations.title` should be given precedence over using `name`,\nif present).",
@@ -10285,7 +10291,8 @@ impl ::core::convert::TryFrom<::alloc::string::String> for ToolExecutionTaskSupp
 ///      "type": "string",
 ///      "const": "object"
 ///    }
-///  }
+///  },
+///  "additionalProperties": {}
 ///}
 /// ```
 /// </details>
@@ -10309,6 +10316,8 @@ pub struct ToolInputSchema {
     pub schema: ::core::option::Option<::alloc::string::String>,
     #[serde(rename = "type")]
     pub type_: ::alloc::string::String,
+    #[serde(flatten)]
+    pub extra: ::serde_json::Map<::alloc::string::String, ::serde_json::Value>,
 }
 ///An optional notification from the server to the client, informing it that the list of tools it offers has changed. This may be issued by servers without any previous subscription from the client.
 ///
@@ -10381,7 +10390,8 @@ Currently restricted to type: "object" at the root level.*/
 ///      "type": "string",
 ///      "const": "object"
 ///    }
-///  }
+///  },
+///  "additionalProperties": {}
 ///}
 /// ```
 /// </details>
@@ -10405,6 +10415,8 @@ pub struct ToolOutputSchema {
     pub schema: ::core::option::Option<::alloc::string::String>,
     #[serde(rename = "type")]
     pub type_: ::alloc::string::String,
+    #[serde(flatten)]
+    pub extra: ::serde_json::Map<::alloc::string::String, ::serde_json::Value>,
 }
 ///The result of a tool use, provided by the user back to the assistant.
 ///

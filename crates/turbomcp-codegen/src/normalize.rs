@@ -125,6 +125,65 @@ fn merge_object_into(target: &mut Map<String, Value>, src: &Map<String, Value>) 
     }
 }
 
+/// Open every "schema-of-schema" node so typify keeps arbitrary JSON Schema
+/// keywords instead of dropping them.
+///
+/// `Tool.inputSchema`/`outputSchema` describe a *nested* JSON Schema. The
+/// `2025-11-25` schema models them with fixed `properties` (`$schema`,
+/// `properties`, `required`, `type`) and **no** `additionalProperties`, so
+/// typify emits a CLOSED struct — serializing a tool schema then silently drops
+/// every other keyword (`$defs`, `additionalProperties`, `oneOf`, `if`/`then`,
+/// …). That corrupts any tool whose argument schema uses them: a nested-type
+/// argument advertises a `$ref` into a `$defs` that was dropped (a dangling
+/// reference). The `draft` schema fixed this by adding `"additionalProperties":
+/// {}`, which typify turns into a flattened `extra` catch-all. Backport that to
+/// every version: inject `additionalProperties: {}` into any object node that
+/// declares both a `$schema` string property and a `type` property pinned to
+/// `{const: "object"}` (the distinctive shape of an embedded JSON Schema) and
+/// doesn't already set `additionalProperties`.
+pub fn open_embedded_schemas(schema: &mut Value) {
+    walk(schema);
+
+    fn walk(value: &mut Value) {
+        match value {
+            Value::Object(map) => {
+                if is_embedded_schema(map) && !map.contains_key("additionalProperties") {
+                    map.insert("additionalProperties".into(), Value::Object(Map::new()));
+                }
+                for child in map.values_mut() {
+                    walk(child);
+                }
+            }
+            Value::Array(items) => {
+                for child in items {
+                    walk(child);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A node describing an embedded JSON Schema: `type: "object"` with a
+    /// `properties` map that pins a nested `type` to `{const: "object"}` and
+    /// declares a `$schema` string field (as `inputSchema`/`outputSchema` do).
+    fn is_embedded_schema(map: &Map<String, Value>) -> bool {
+        if map.get("type").and_then(Value::as_str) != Some("object") {
+            return false;
+        }
+        let Some(props) = map.get("properties").and_then(Value::as_object) else {
+            return false;
+        };
+        let declares_schema = props.contains_key("$schema");
+        let type_is_object_const = props
+            .get("type")
+            .and_then(Value::as_object)
+            .and_then(|t| t.get("const"))
+            .and_then(Value::as_str)
+            == Some("object");
+        declares_schema && type_is_object_const
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,5 +218,54 @@ mod tests {
         assert_eq!(result["type"], json!("object"));
         // The standalone Task definition keeps its own description.
         assert_eq!(schema["$defs"]["Task"]["description"], json!("a task"));
+    }
+
+    #[test]
+    fn opens_embedded_schema_nodes() {
+        // A `2025-11-25`-style closed inputSchema node gains `additionalProperties`.
+        let mut schema = json!({
+            "$defs": {
+                "Tool": {
+                    "type": "object",
+                    "properties": {
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "$schema": { "type": "string" },
+                                "properties": { "type": "object" },
+                                "type": { "const": "object", "type": "string" }
+                            }
+                        },
+                        // A plain object property (no `$schema`, no type-const) is
+                        // left closed.
+                        "name": { "type": "object", "properties": { "x": { "type": "string" } } }
+                    }
+                }
+            }
+        });
+        open_embedded_schemas(&mut schema);
+        let input = &schema["$defs"]["Tool"]["properties"]["inputSchema"];
+        assert_eq!(input["additionalProperties"], json!({}), "opened");
+        let name = &schema["$defs"]["Tool"]["properties"]["name"];
+        assert!(
+            name.get("additionalProperties").is_none(),
+            "a non-schema object stays closed"
+        );
+    }
+
+    #[test]
+    fn open_embedded_schemas_is_idempotent() {
+        // A node that already sets `additionalProperties` (the draft shape) is
+        // left untouched.
+        let mut schema = json!({
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {
+                "$schema": { "type": "string" },
+                "type": { "const": "object", "type": "string" }
+            }
+        });
+        open_embedded_schemas(&mut schema);
+        assert_eq!(schema["additionalProperties"], json!(true), "unchanged");
     }
 }

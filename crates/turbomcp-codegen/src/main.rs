@@ -30,6 +30,9 @@ fn main() -> Result<()> {
 
     // Normalize before handing to typify (F14).
     normalize::flatten_all_of(&mut value);
+    // Keep embedded JSON-Schema nodes (tool input/output schemas) open so
+    // arbitrary keywords (`$defs`, `additionalProperties`, …) survive the wire.
+    normalize::open_embedded_schemas(&mut value);
 
     let schema: schemars::schema::RootSchema =
         serde_json::from_value(value).context("interpreting normalized JSON as a RootSchema")?;

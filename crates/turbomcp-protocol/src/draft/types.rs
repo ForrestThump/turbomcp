@@ -2356,7 +2356,8 @@ pub struct ElicitRequest {
 ///          "type": "string",
 ///          "const": "object"
 ///        }
-///      }
+///      },
+///      "additionalProperties": {}
 ///    }
 ///  }
 ///}
@@ -2405,7 +2406,8 @@ Only top-level properties are allowed, without nesting.*/
 ///      "type": "string",
 ///      "const": "object"
 ///    }
-///  }
+///  },
+///  "additionalProperties": {}
 ///}
 /// ```
 /// </details>
@@ -2423,6 +2425,8 @@ pub struct ElicitRequestFormParamsRequestedSchema {
     pub schema: ::core::option::Option<::alloc::string::String>,
     #[serde(rename = "type")]
     pub type_: ::alloc::string::String,
+    #[serde(flatten)]
+    pub extra: ::serde_json::Map<::alloc::string::String, ::serde_json::Value>,
 }
 ///The parameters for a request to elicit additional information from the user via the client.
 ///

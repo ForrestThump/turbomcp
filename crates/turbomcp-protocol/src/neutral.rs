@@ -1343,6 +1343,7 @@ impl From<Tool> for legacy::Tool {
                 required: Vec::new(),
                 schema: None,
                 type_: "object".to_string(),
+                extra: Map::new(),
             });
         legacy::Tool {
             annotations: None,
