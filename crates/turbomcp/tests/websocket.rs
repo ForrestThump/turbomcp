@@ -25,7 +25,7 @@ async fn websocket_round_trip() {
     let addr = listener.local_addr().unwrap();
     let dispatcher = Srv.into_server().build();
     tokio::spawn(async move {
-        let _ = turbomcp::ws::serve_websocket(listener, dispatcher).await;
+        let _ = turbomcp::ws::serve_websocket(listener, move || dispatcher.clone()).await;
     });
 
     let mut client = turbomcp::ws::connect(&format!("ws://{addr}"))

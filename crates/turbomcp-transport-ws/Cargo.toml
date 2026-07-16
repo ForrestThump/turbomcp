@@ -14,7 +14,7 @@ turbomcp-core = { workspace = true, features = ["std"] }
 turbomcp-codec = { workspace = true }
 turbomcp-service = { workspace = true }
 tokio-tungstenite = { workspace = true }
-tokio = { workspace = true, features = ["rt", "net"] }
+tokio = { workspace = true, features = ["rt", "net", "time"] }
 futures = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
@@ -22,3 +22,4 @@ tracing = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "io-util"] }
 serde_json = { workspace = true }
+tower = { workspace = true }

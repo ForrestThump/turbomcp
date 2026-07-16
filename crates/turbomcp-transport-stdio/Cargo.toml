@@ -13,11 +13,12 @@ homepage = "https://turbomcp.org"
 turbomcp-core = { workspace = true }
 turbomcp-codec = { workspace = true }
 turbomcp-service = { workspace = true }
-tokio = { workspace = true, features = ["io-std", "io-util"] }
+tokio = { workspace = true, features = ["io-std", "io-util", "net", "rt"] }
 thiserror = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 turbomcp-server = { workspace = true }
 turbomcp-protocol = { workspace = true }
-tokio = { workspace = true, features = ["io-std", "io-util", "macros", "rt"] }
+tokio = { workspace = true, features = ["io-std", "io-util", "macros", "rt", "rt-multi-thread", "time"] }
 serde_json = { workspace = true }

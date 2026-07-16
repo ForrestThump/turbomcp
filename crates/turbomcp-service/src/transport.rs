@@ -4,6 +4,41 @@
 //! and hand the codec complete frames. The serve loop drives a `Transport`
 //! directly, so the trait uses return-position `impl Future` (native AFIT/RPITIT)
 //! rather than boxed futures — no per-message allocation, fully monomorphized.
+//!
+//! # The production parity contract
+//!
+//! Every bundled server transport — stdio, TCP/Unix (`turbomcp-transport-stdio`),
+//! WebSocket (`turbomcp-transport-ws`), and Streamable HTTP
+//! (`turbomcp-transport-http`, a runner rather than a `Transport`) — must
+//! uphold the same production guarantees. A new transport (or a change to one)
+//! is held to this checklist:
+//!
+//! 1. **Trust boundary.** Client input passes
+//!    [`meta::sanitize_inbound`](turbomcp_core::meta::sanitize_inbound) before
+//!    any internal `_meta` key (`connectionId`, `sessionId`, `identity`) is
+//!    injected — a client can never forge them. The serve driver does this for
+//!    `Transport`-based servers; HTTP does it in its endpoint.
+//! 2. **Authentication seam.** Where the deployment is network-reachable, the
+//!    [`HttpAuthenticator`](crate::HttpAuthenticator) seam validates a bearer
+//!    credential (per request on HTTP; at the upgrade for WebSocket, with the
+//!    principal carried per-connection via [`ServeConfig::identity`](crate::ServeConfig)).
+//!    stdio/TCP/Unix are for trusted-channel deployments; front them with a
+//!    network transport otherwise.
+//! 3. **Cross-origin defense.** Browser-reachable endpoints validate `Origin`
+//!    (HTTP requests, WebSocket upgrades) — default-deny with an allowlist.
+//! 4. **Bounded input.** A size cap on inbound payloads (HTTP body limit, WS
+//!    message limit). Line transports bound per-frame memory by the reader's
+//!    buffer growth only — cap upstream if untrusted peers can reach them.
+//! 5. **Liveness + shutdown.** Long-lived channels keep intermediaries alive
+//!    (SSE keep-alive comments, WS idle pings) and honor the shutdown token:
+//!    accept loops stop, in-flight handlers drain within the configured
+//!    deadline, `subscriptions/listen` streams close gracefully.
+//! 6. **Backpressure.** Inbound dispatch is bounded (`max_in_flight` in the
+//!    serve driver; connection/request limits in the HTTP stack) so a fast
+//!    peer cannot grow memory without bound.
+//! 7. **TLS.** Terminate at the ingress/proxy, or layer a TLS stream under the
+//!    transport (`WebSocketTransport::accept` / `LineTransport::new` take any
+//!    byte stream). No transport hand-rolls crypto.
 
 use core::future::Future;
 use std::time::Instant;

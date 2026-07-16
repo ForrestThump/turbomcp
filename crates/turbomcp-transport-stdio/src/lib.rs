@@ -6,15 +6,14 @@
 //! frame's bytes into a value is the [`Codec`]'s.
 //!
 //! The framing lives in [`LineTransport`], generic over any async byte streams,
-//! so it is unit-testable over an in-memory pipe (and reusable by future
-//! socket transports). [`StdioTransport`]/[`stdio`] specialize it to
-//! stdin/stdout; [`serve_stdio`] pairs it with a service (the dispatcher).
-//!
-//! Phase 2 reads and replies one frame at a time. The concurrent writer-actor
-//! (so a slow handler can't head-of-line-block reads, with writes kept ordered)
-//! lands in Phase 4.
+//! so it is unit-testable over an in-memory pipe and reusable by the socket
+//! servers in [`net`] (TCP + Unix domain sockets, same framing).
+//! [`StdioTransport`]/[`stdio`] specialize it to stdin/stdout; [`serve_stdio`]
+//! pairs it with a service (the dispatcher).
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
+
+pub mod net;
 
 use tokio::io::{
     AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, Stdin, Stdout,

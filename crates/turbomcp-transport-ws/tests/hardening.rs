@@ -1,0 +1,134 @@
+//! Production guards on the WebSocket server: Origin policy at the upgrade,
+//! bearer auth right after it (close 1008 on rejection), and the
+//! authenticated principal stamped into every inbound message.
+
+use std::task::{Context, Poll};
+
+use serde_json::{Value, json};
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tower::Service;
+use turbomcp_codec::DefaultCodec;
+use turbomcp_core::{JsonRpcMessage, JsonRpcRequest, JsonRpcResponse, meta};
+use turbomcp_service::{AuthDecision, AuthFuture, HttpAuthenticator, ProtocolError, Transport};
+use turbomcp_transport_ws::{WebSocketTransport, WsConfig, serve_websocket_with};
+
+/// Answers every request with the request's internal identity `_meta` (so the
+/// test can observe what the trust boundary stamped).
+#[derive(Clone)]
+struct IdentityEcho;
+
+impl Service<JsonRpcMessage> for IdentityEcho {
+    type Response = Option<JsonRpcMessage>;
+    type Error = ProtocolError;
+    type Future = std::future::Ready<Result<Self::Response, Self::Error>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, msg: JsonRpcMessage) -> Self::Future {
+        let JsonRpcMessage::Request(req) = msg else {
+            return std::future::ready(Ok(None));
+        };
+        let identity = req
+            .params
+            .as_ref()
+            .and_then(|p| p.get("_meta"))
+            .and_then(|m| m.get(meta::internal::IDENTITY))
+            .cloned()
+            .unwrap_or(Value::Null);
+        let resp = JsonRpcResponse::success(req.id, json!({ "identity": identity }));
+        std::future::ready(Ok(Some(resp.into())))
+    }
+}
+
+/// Allows exactly `Bearer good` as `{"sub":"tester","claims":{}}`.
+struct GoodToken;
+
+impl HttpAuthenticator for GoodToken {
+    fn authenticate<'a>(&'a self, authorization: Option<&'a str>) -> AuthFuture<'a> {
+        Box::pin(async move {
+            if authorization == Some("Bearer good") {
+                AuthDecision::Allow(json!({ "sub": "tester", "claims": {} }))
+            } else {
+                AuthDecision::Challenge {
+                    status: 401,
+                    www_authenticate: "Bearer".to_owned(),
+                }
+            }
+        })
+    }
+
+    fn resource_metadata(&self) -> Value {
+        json!({})
+    }
+}
+
+async fn spawn_server(config: WsConfig) -> std::net::SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = serve_websocket_with(listener, || IdentityEcho, config).await;
+    });
+    addr
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn browser_origin_is_rejected_at_the_upgrade() {
+    let addr = spawn_server(WsConfig::new()).await;
+
+    let mut req = format!("ws://{addr}").into_client_request().unwrap();
+    req.headers_mut()
+        .insert("origin", "https://evil.example".parse().unwrap());
+    let result = tokio_tungstenite::connect_async(req).await;
+    assert!(result.is_err(), "default policy rejects browser origins");
+
+    // An allowlisted origin connects.
+    let addr = spawn_server(WsConfig::new().allow_origin("https://app.example")).await;
+    let mut req = format!("ws://{addr}").into_client_request().unwrap();
+    req.headers_mut()
+        .insert("origin", "https://app.example".parse().unwrap());
+    assert!(tokio_tungstenite::connect_async(req).await.is_ok());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bearer_auth_gates_the_connection_and_stamps_identity() {
+    let config = WsConfig::new().with_authenticator(std::sync::Arc::new(GoodToken));
+    let addr = spawn_server(config).await;
+
+    // Wrong token: the upgrade completes (WS has no post-upgrade 401) but the
+    // server immediately closes with policy violation — recv sees end-of-stream.
+    let mut req = format!("ws://{addr}").into_client_request().unwrap();
+    req.headers_mut()
+        .insert("authorization", "Bearer wrong".parse().unwrap());
+    let (stream, _) = tokio_tungstenite::connect_async(req).await.unwrap();
+    let mut rejected = WebSocketTransport::new(stream, DefaultCodec::default());
+    assert!(
+        rejected.recv().await.unwrap().is_none(),
+        "rejected connection closes without serving"
+    );
+
+    // Right token: served, and every request carries the principal.
+    let mut req = format!("ws://{addr}").into_client_request().unwrap();
+    req.headers_mut()
+        .insert("authorization", "Bearer good".parse().unwrap());
+    let (stream, _) = tokio_tungstenite::connect_async(req).await.unwrap();
+    let mut client = WebSocketTransport::new(stream, DefaultCodec::default());
+    client
+        .send(JsonRpcMessage::Request(JsonRpcRequest::new(
+            1,
+            "whoami",
+            // A forged identity in the request must be stripped by the trust
+            // boundary and replaced with the authenticated principal.
+            Some(json!({
+                "_meta": { meta::internal::IDENTITY: { "sub": "forged", "claims": {} } }
+            })),
+        )))
+        .await
+        .unwrap();
+    let JsonRpcMessage::Response(resp) = client.recv().await.unwrap().expect("response") else {
+        panic!("expected response");
+    };
+    let identity = &resp.result.expect("result")["identity"];
+    assert_eq!(identity["sub"], "tester", "got {identity}");
+}

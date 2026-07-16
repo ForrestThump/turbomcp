@@ -131,10 +131,73 @@ pub mod http {
 
 /// WebSocket transport (bidirectional, non-spec convenience). Enable with the
 /// `websocket` feature. Serve with
-/// [`ws::serve_websocket`](ws::serve_websocket) over a `TcpListener`, or connect
-/// a client transport with [`ws::connect`](ws::connect).
+/// [`ws::serve_websocket`](ws::serve_websocket) over a `TcpListener` (see
+/// [`ws::WsConfig`](ws::WsConfig) for Origin policy, bearer auth, limits, and
+/// keepalive), or connect a client transport with [`ws::connect`](ws::connect).
 #[cfg(feature = "websocket")]
 pub use turbomcp_transport_ws as ws;
+
+/// TCP and Unix-domain-socket transports: the stdio line framing over network
+/// sockets (always available — no feature flag). One-liners
+/// [`net::ServeNet::run_tcp`] / [`net::ServeNet::run_unix`] mirror
+/// `run_stdio`; the underlying [`net::serve_tcp`] / [`net::serve_unix`] take a
+/// per-connection service factory for custom composition.
+pub mod net {
+    use std::net::SocketAddr;
+
+    pub use turbomcp_transport_stdio::net::{connect_tcp, serve_tcp, serve_tcp_with};
+    #[cfg(unix)]
+    pub use turbomcp_transport_stdio::net::{connect_unix, serve_unix, serve_unix_with};
+
+    use turbomcp_server::{LegacySessionAdapter, McpServerCore, ServerBuilder};
+    use turbomcp_transport_stdio::StdioError;
+
+    /// One-call socket serving for a [`ServerBuilder`] (the value
+    /// `MyServer.into_server()` produces). Each accepted connection gets its
+    /// own legacy session (fresh [`LegacySessionAdapter`] per connection), so
+    /// both protocol versions work — exactly like `run_stdio`, multiplied
+    /// across connections.
+    pub trait ServeNet {
+        /// Build this server's dispatcher and serve line-framed JSON-RPC on a
+        /// TCP socket bound to `addr`, until the process ends.
+        fn run_tcp(
+            self,
+            addr: SocketAddr,
+        ) -> impl std::future::Future<Output = Result<(), StdioError>> + Send;
+
+        /// Build this server's dispatcher and serve line-framed JSON-RPC on a
+        /// Unix domain socket bound at `path`, until the process ends.
+        #[cfg(unix)]
+        fn run_unix(
+            self,
+            path: std::path::PathBuf,
+        ) -> impl std::future::Future<Output = Result<(), StdioError>> + Send;
+    }
+
+    impl<S> ServeNet for ServerBuilder<S>
+    where
+        S: McpServerCore + Clone + Send + Sync + 'static,
+    {
+        async fn run_tcp(self, addr: SocketAddr) -> Result<(), StdioError> {
+            let listener = tokio::net::TcpListener::bind(addr).await?;
+            let dispatcher = self.build();
+            serve_tcp(listener, move || {
+                LegacySessionAdapter::new(dispatcher.clone())
+            })
+            .await
+        }
+
+        #[cfg(unix)]
+        async fn run_unix(self, path: std::path::PathBuf) -> Result<(), StdioError> {
+            let listener = tokio::net::UnixListener::bind(path)?;
+            let dispatcher = self.build();
+            serve_unix(listener, move || {
+                LegacySessionAdapter::new(dispatcher.clone())
+            })
+            .await
+        }
+    }
+}
 
 /// OAuth 2.1 resource-server auth: bearer-token validation + RFC 9728 metadata.
 /// Enable with the `auth` feature, then protect an HTTP endpoint with

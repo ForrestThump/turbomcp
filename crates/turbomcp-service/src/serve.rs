@@ -61,6 +61,13 @@ pub struct ServeConfig {
     /// Fire to begin graceful shutdown. Default: a token that is never fired
     /// (the driver runs until the peer closes the stream).
     pub shutdown: CancellationToken,
+    /// The connection's authenticated principal, stamped into every inbound
+    /// message as [`meta::internal::IDENTITY`] after sanitization (the same
+    /// shape the HTTP transport injects: `{ "sub": String, "claims": Object }`).
+    /// Set by transports that authenticate at connection time (e.g. a
+    /// WebSocket bearer check at the upgrade); `None` leaves requests
+    /// anonymous. Default: `None`.
+    pub identity: Option<serde_json::Value>,
 }
 
 impl Default for ServeConfig {
@@ -69,6 +76,7 @@ impl Default for ServeConfig {
             max_in_flight: 1024,
             drain_timeout: Duration::from_secs(30),
             shutdown: CancellationToken::new(),
+            identity: None,
         }
     }
 }
@@ -109,6 +117,7 @@ where
         max_in_flight,
         drain_timeout,
         shutdown,
+        identity,
     } = config;
     let capacity = max_in_flight.max(1);
 
@@ -156,6 +165,13 @@ where
                             meta::internal::CONNECTION_ID,
                             connection_id.clone().into(),
                         );
+                        if let Some(principal) = &identity {
+                            meta::set_request_meta(
+                                &mut msg,
+                                meta::internal::IDENTITY,
+                                principal.clone(),
+                            );
+                        }
                         // Backpressure: park the reader until a slot frees.
                         let Ok(permit) = Arc::clone(&limiter).acquire_owned().await else {
                             break Ok(()); // semaphore closed — shouldn't happen
