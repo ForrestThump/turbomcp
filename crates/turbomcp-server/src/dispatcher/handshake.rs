@@ -1,0 +1,294 @@
+//! Version-agnostic entry points: the legacy `initialize` handshake (version
+//! negotiation + session minting + capability advertisement) and the draft
+//! `server/discover` response, plus the result-`_meta` serverInfo stamp.
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use serde_json::{Map, Value};
+
+use turbomcp_core::{
+    Implementation, JsonRpcMessage, JsonRpcRequest, JsonRpcResponse, McpError, ProtocolVersion,
+    RequestId, meta,
+};
+use turbomcp_protocol::draft::types as draft;
+use turbomcp_protocol::neutral;
+use turbomcp_protocol::v2025_11_25::types as legacy;
+
+use crate::extension::Extension;
+use crate::router::MethodRouter;
+use crate::session::{SessionState, SessionStore};
+use crate::traits::McpServerCore;
+
+use super::{error_response, session_id};
+
+/// Answer the `initialize` handshake (lifecycle spec §Version Negotiation):
+/// echo the requested version when supported, otherwise our latest
+/// `initialize`-speaking version. When the transport supplied a session id,
+/// the negotiated state is stored under it for later context injection.
+pub(super) fn handle_initialize<S: McpServerCore>(
+    server: &S,
+    router: &MethodRouter<S>,
+    supported: &[ProtocolVersion],
+    sessions: &SessionStore,
+    tasks_enabled: bool,
+    req: &JsonRpcRequest,
+) -> JsonRpcMessage {
+    let id = req.id.clone();
+    let Some(params) = req.params.as_ref() else {
+        return error_response(id, &McpError::invalid_params("initialize requires params"));
+    };
+    let params: legacy::InitializeRequestParams = match serde_json::from_value(params.clone()) {
+        Ok(p) => p,
+        Err(e) => {
+            return error_response(
+                id,
+                &McpError::invalid_params(format!("invalid initialize params: {e}")),
+            );
+        }
+    };
+
+    let negotiated = negotiate_initialize_version(&params.protocol_version, supported);
+
+    if let Some(sid) = session_id(req.params.as_ref()) {
+        let client_capabilities = serde_json::to_value(&params.capabilities).unwrap_or(Value::Null);
+        sessions.insert(
+            sid,
+            SessionState {
+                version: negotiated.clone(),
+                client_info: from_legacy_impl(params.client_info),
+                client_capabilities,
+                log_level: None,
+            },
+        );
+    }
+
+    let result = legacy::InitializeResult {
+        capabilities: build_legacy_capabilities(router),
+        instructions: server.instructions(),
+        meta: Map::new(),
+        protocol_version: negotiated.as_str().to_owned(),
+        server_info: to_legacy_impl(server.server_info()),
+    };
+    let mut value = match serde_json::to_value(&result) {
+        Ok(v) => v,
+        Err(e) => {
+            return error_response(id, &McpError::internal(format!("serialize result: {e}")));
+        }
+    };
+    // The generated capability types model presence-markers (`completions: {}`,
+    // the `tasks` sub-objects) as maps that serde skips when empty, so an
+    // advertised-but-empty marker would vanish. Patch them into the serialized
+    // form instead.
+    if let Some(caps) = value.get_mut("capabilities").and_then(Value::as_object_mut) {
+        if router.has_completions() {
+            caps.insert("completions".to_owned(), serde_json::json!({}));
+        }
+        if router.has_logging() {
+            caps.insert("logging".to_owned(), serde_json::json!({}));
+        }
+        if tasks_enabled {
+            caps.insert(
+                "tasks".to_owned(),
+                serde_json::json!({
+                    "list": {},
+                    "cancel": {},
+                    "requests": { "tools": { "call": {} } },
+                }),
+            );
+        }
+    }
+    JsonRpcResponse::success(id, value).into()
+}
+
+/// Pick the version to answer `initialize` with. The spec: echo the requested
+/// version if supported, else "another version [the server] supports … SHOULD
+/// be the latest". Our latest *`initialize`-speaking* version is `2025-11-25`,
+/// so prefer it over the draft (which negotiates per-request instead).
+fn negotiate_initialize_version(requested: &str, supported: &[ProtocolVersion]) -> ProtocolVersion {
+    let requested = ProtocolVersion::from_wire(requested);
+    if supported.contains(&requested) {
+        return requested;
+    }
+    if supported.contains(&ProtocolVersion::V2025_11_25) {
+        return ProtocolVersion::V2025_11_25;
+    }
+    supported
+        .first()
+        .cloned()
+        .unwrap_or(ProtocolVersion::LATEST)
+}
+
+fn build_legacy_capabilities<S: McpServerCore>(
+    router: &MethodRouter<S>,
+) -> legacy::ServerCapabilities {
+    // `listChanged`/`subscribe` are true: the subscription registry delivers
+    // them for every registered capability (`resources/subscribe` + the
+    // session's notification stream).
+    legacy::ServerCapabilities {
+        // `completions` is a presence marker the generated type can't express
+        // (empty map ⇒ skipped); patched post-serialization in
+        // `handle_initialize`.
+        completions: Map::new(),
+        experimental: BTreeMap::new(),
+        logging: Map::new(),
+        prompts: router
+            .has_prompts()
+            .then_some(legacy::ServerCapabilitiesPrompts {
+                list_changed: Some(true),
+            }),
+        resources: router
+            .has_resources()
+            .then_some(legacy::ServerCapabilitiesResources {
+                list_changed: Some(true),
+                subscribe: Some(true),
+            }),
+        tasks: None,
+        tools: router
+            .has_tools()
+            .then_some(legacy::ServerCapabilitiesTools {
+                list_changed: Some(true),
+            }),
+    }
+}
+
+fn to_legacy_impl(i: Implementation) -> legacy::Implementation {
+    legacy::Implementation {
+        description: None,
+        icons: Vec::new(),
+        name: i.name,
+        title: i.title,
+        version: i.version,
+        website_url: None,
+    }
+}
+
+fn from_legacy_impl(i: legacy::Implementation) -> Implementation {
+    let mut out = Implementation::new(i.name, i.version);
+    out.title = i.title;
+    out
+}
+
+// ---- response builders -------------------------------------------------------
+
+/// Build the `server/discover` response, patching each registered extension's
+/// settings into `capabilities.extensions[id]`. The generated `extensions` map
+/// holds the draft `JsonObject` newtype; merging arbitrary settings JSON is
+/// simplest post-serialization (the same presence-marker patch trick
+/// `handle_initialize` uses).
+pub(super) fn discover_response<S: McpServerCore>(
+    id: RequestId,
+    server: &S,
+    router: &MethodRouter<S>,
+    supported: &[ProtocolVersion],
+    extensions: &[Arc<dyn Extension>],
+) -> JsonRpcMessage {
+    let result = build_discover_result(server, router, supported);
+    let mut value = match serde_json::to_value(&result) {
+        Ok(v) => v,
+        Err(e) => return error_response(id, &McpError::internal(format!("serialize result: {e}"))),
+    };
+    if !extensions.is_empty()
+        && let Some(caps) = value.get_mut("capabilities").and_then(Value::as_object_mut)
+    {
+        let ext_map = caps
+            .entry("extensions")
+            .or_insert_with(|| Value::Object(Map::new()));
+        if let Some(ext_map) = ext_map.as_object_mut() {
+            for ext in extensions {
+                ext_map.insert(ext.id().to_owned(), ext.settings());
+            }
+        }
+    }
+    JsonRpcResponse::success(id, value).into()
+}
+
+fn build_discover_result<S: McpServerCore>(
+    server: &S,
+    router: &MethodRouter<S>,
+    supported: &[ProtocolVersion],
+) -> draft::DiscoverResult {
+    // `listChanged`/`subscribe` are true: the subscription registry delivers
+    // these for every registered capability (`subscriptions/listen`).
+    let capabilities = draft::ServerCapabilities {
+        // `completions` is an opaque presence marker (an empty object when the
+        // server supports argument autocompletion).
+        completions: router
+            .has_completions()
+            .then(|| draft::JsonObject(BTreeMap::new())),
+        experimental: BTreeMap::new(),
+        extensions: BTreeMap::new(),
+        logging: router
+            .has_logging()
+            .then(|| draft::JsonObject(BTreeMap::new())),
+        prompts: router
+            .has_prompts()
+            .then_some(draft::ServerCapabilitiesPrompts {
+                list_changed: Some(true),
+            }),
+        resources: router
+            .has_resources()
+            .then_some(draft::ServerCapabilitiesResources {
+                list_changed: Some(true),
+                subscribe: Some(true),
+            }),
+        tools: router
+            .has_tools()
+            .then_some(draft::ServerCapabilitiesTools {
+                list_changed: Some(true),
+            }),
+    };
+    draft::DiscoverResult {
+        // Conservative cache defaults, consistent with the list conversions in
+        // `neutral.rs`: private + immediately stale. A configurable cache
+        // policy is tracked as deferred.
+        cache_scope: draft::DiscoverResultCacheScope::Private,
+        capabilities,
+        instructions: server.instructions(),
+        // The server's identity rides `_meta` (`io.modelcontextprotocol/
+        // serverInfo`) — the dedicated `DiscoverResult.serverInfo` field was
+        // removed from the draft.
+        meta: Some(draft::ResultMetaObject {
+            io_modelcontextprotocol_server_info: Some(to_draft_impl(server.server_info())),
+            extra: serde_json::Map::new(),
+        }),
+        result_type: neutral::result_type::COMPLETE.to_string(),
+        supported_versions: supported.iter().map(|v| v.as_str().to_owned()).collect(),
+        ttl_ms: 0,
+    }
+}
+
+/// Stamp `io.modelcontextprotocol/serverInfo` into a successful result's
+/// `_meta` (draft results only; servers SHOULD identify themselves on every
+/// response). An existing key — e.g. `server/discover`'s own — is left alone;
+/// error responses and non-object results are untouched.
+pub(super) fn stamp_server_info(msg: &mut JsonRpcMessage, info: &Implementation) {
+    let JsonRpcMessage::Response(resp) = msg else {
+        return;
+    };
+    let Some(result) = resp.result.as_mut().and_then(Value::as_object_mut) else {
+        return;
+    };
+    let Ok(info_value) = serde_json::to_value(to_draft_impl(info.clone())) else {
+        return;
+    };
+    let meta = result
+        .entry("_meta")
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if let Some(meta) = meta.as_object_mut()
+        && !meta.contains_key(meta::keys::SERVER_INFO)
+    {
+        meta.insert(meta::keys::SERVER_INFO.to_owned(), info_value);
+    }
+}
+
+fn to_draft_impl(i: Implementation) -> draft::Implementation {
+    draft::Implementation {
+        description: None,
+        icons: Vec::new(),
+        name: i.name,
+        title: i.title,
+        version: i.version,
+        website_url: None,
+    }
+}

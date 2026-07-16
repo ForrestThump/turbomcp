@@ -1,0 +1,397 @@
+//! Capability dispatch: the one generic path both protocol versions share.
+//!
+//! [`WireFamily`] selects the per-version result types; [`dispatch_capability`]
+//! parses the request, builds the per-RPC context (client handle, progress,
+//! logging), awaits the registered handler, and widens the neutral result to
+//! the active wire. MRTR turn handling ([`mrtr_handle`]/[`finish_mrtr`],
+//! SEP-2322) lives here because it is part of that dispatch contract.
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use futures::future::BoxFuture;
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+
+use turbomcp_core::{
+    JsonRpcMessage, JsonRpcRequest, JsonRpcResponse, McpError, RequestContext, RequestId, meta,
+};
+use turbomcp_protocol::draft::types as draft;
+use turbomcp_protocol::v2025_11_25::types as legacy;
+use turbomcp_protocol::{methods, neutral};
+
+use crate::context::{
+    CallToolContext, CompleteContext, GetPromptContext, ListPromptsContext,
+    ListResourceTemplatesContext, ListResourcesContext, ListToolsContext, ReadResourceContext,
+};
+use crate::logging::LogSender;
+use crate::mrtr::{ClientHandle, PendingRequests, StateSigner};
+use crate::progress::ProgressReporter;
+use crate::router::MethodRouter;
+use crate::traits::McpServerCore;
+
+use super::params::{
+    parse_call_tool_params, parse_complete_params, parse_get_prompt_params, parse_list_params,
+    parse_read_resource_params,
+};
+use super::{Shared, connection_id, error_response, ok_value, session_id};
+
+/// Await a registered handler's future and widen its neutral result to the
+/// active wire type `W`. A `None` future means the capability isn't registered
+/// (e.g. `resources/read` on a tools-only server) → `method_not_found`.
+async fn finish<N, W>(
+    id: RequestId,
+    method: &str,
+    fut: Option<BoxFuture<'static, Result<N, McpError>>>,
+) -> JsonRpcMessage
+where
+    W: Serialize + From<N>,
+{
+    match fut {
+        None => error_response(id, &McpError::method_not_found(method)),
+        Some(f) => match f.await {
+            Ok(result) => ok_value(id, &W::from(result)),
+            Err(e) => error_response(id, &e),
+        },
+    }
+}
+
+/// The per-version wire surface: one associated type per capability result.
+/// Both versions dispatch through the same generic path; only the
+/// `From<neutral>` target differs (the conversions live in
+/// `turbomcp_protocol::neutral`).
+pub(super) trait WireFamily {
+    /// Whether this wire family delivers client interaction via MRTR
+    /// (`InputRequiredResult`); the legacy family uses inline bidi instead.
+    const MRTR: bool;
+    type ListTools: Serialize + From<neutral::ListToolsResult>;
+    type CallTool: Serialize + From<neutral::CallToolResult>;
+    type ListResources: Serialize + From<neutral::ListResourcesResult>;
+    type ListResourceTemplates: Serialize + From<neutral::ListResourceTemplatesResult>;
+    type ReadResource: Serialize + From<neutral::ReadResourceResult>;
+    type ListPrompts: Serialize + From<neutral::ListPromptsResult>;
+    type GetPrompt: Serialize + From<neutral::GetPromptResult>;
+    type Complete: Serialize + From<neutral::CompleteResult>;
+}
+
+/// `2026-07-28` (modern, stateless).
+pub(super) struct DraftWire;
+
+impl WireFamily for DraftWire {
+    const MRTR: bool = true;
+    type ListTools = draft::ListToolsResult;
+    type CallTool = draft::CallToolResult;
+    type ListResources = draft::ListResourcesResult;
+    type ListResourceTemplates = draft::ListResourceTemplatesResult;
+    type ReadResource = draft::ReadResourceResult;
+    type ListPrompts = draft::ListPromptsResult;
+    type GetPrompt = draft::GetPromptResult;
+    type Complete = draft::CompleteResult;
+}
+
+/// `2025-11-25` (legacy, stateful).
+pub(super) struct LegacyWire;
+
+impl WireFamily for LegacyWire {
+    const MRTR: bool = false;
+    type ListTools = legacy::ListToolsResult;
+    type CallTool = legacy::CallToolResult;
+    type ListResources = legacy::ListResourcesResult;
+    type ListResourceTemplates = legacy::ListResourceTemplatesResult;
+    type ReadResource = legacy::ReadResourceResult;
+    type ListPrompts = legacy::ListPromptsResult;
+    type GetPrompt = legacy::GetPromptResult;
+    type Complete = legacy::CompleteResult;
+}
+
+pub(super) async fn dispatch_capability<S: McpServerCore, W: WireFamily>(
+    server: S,
+    router: &MethodRouter<S>,
+    req: &JsonRpcRequest,
+    ctx: &RequestContext,
+    shared: &Shared,
+    id: RequestId,
+) -> JsonRpcMessage {
+    let signer = &shared.signer;
+    let pending = &shared.pending;
+    let method = req.method.as_str();
+    let ctx = ctx.clone();
+    let list_params = parse_list_params(req.params.as_ref());
+    match method {
+        methods::request::TOOLS_LIST => {
+            let fut = router.dispatch_list_tools(server, ListToolsContext::new(ctx), list_params);
+            finish::<_, W::ListTools>(id, method, fut).await
+        }
+        methods::request::TOOLS_CALL => {
+            let params = match parse_call_tool_params(req.params.as_ref()) {
+                Ok(p) => p,
+                Err(e) => return error_response(id, &e),
+            };
+            let handle = match mrtr_handle::<W>(
+                req,
+                &ctx,
+                signer,
+                pending,
+                shared.strict_elicitation_keys,
+            ) {
+                Ok(h) => h,
+                Err(e) => return error_response(id, &e),
+            };
+            let fut = router.dispatch_call_tool(
+                server,
+                CallToolContext::new(ctx.clone())
+                    .with_client(handle.clone())
+                    .with_progress(progress_reporter::<W>(req))
+                    .with_log(log_sender::<W>(req, &ctx, router.has_logging())),
+                params,
+            );
+            let subject = ctx.identity.subject().map(str::to_owned);
+            finish_mrtr::<_, W::CallTool>(id, method, subject, fut, &handle, signer, W::MRTR).await
+        }
+        methods::request::RESOURCES_LIST => {
+            let fut =
+                router.dispatch_list_resources(server, ListResourcesContext::new(ctx), list_params);
+            finish::<_, W::ListResources>(id, method, fut).await
+        }
+        methods::request::RESOURCES_TEMPLATES_LIST => {
+            let fut = router.dispatch_list_resource_templates(
+                server,
+                ListResourceTemplatesContext::new(ctx),
+                list_params,
+            );
+            finish::<_, W::ListResourceTemplates>(id, method, fut).await
+        }
+        methods::request::RESOURCES_READ => {
+            let params = match parse_read_resource_params(req.params.as_ref()) {
+                Ok(p) => p,
+                Err(e) => return error_response(id, &e),
+            };
+            let handle = match mrtr_handle::<W>(
+                req,
+                &ctx,
+                signer,
+                pending,
+                shared.strict_elicitation_keys,
+            ) {
+                Ok(h) => h,
+                Err(e) => return error_response(id, &e),
+            };
+            let fut = router.dispatch_read_resource(
+                server,
+                ReadResourceContext::new(ctx.clone())
+                    .with_client(handle.clone())
+                    .with_progress(progress_reporter::<W>(req))
+                    .with_log(log_sender::<W>(req, &ctx, router.has_logging())),
+                params,
+            );
+            let subject = ctx.identity.subject().map(str::to_owned);
+            finish_mrtr::<_, W::ReadResource>(id, method, subject, fut, &handle, signer, W::MRTR)
+                .await
+        }
+        methods::request::PROMPTS_LIST => {
+            let fut =
+                router.dispatch_list_prompts(server, ListPromptsContext::new(ctx), list_params);
+            finish::<_, W::ListPrompts>(id, method, fut).await
+        }
+        methods::request::PROMPTS_GET => {
+            let params = match parse_get_prompt_params(req.params.as_ref()) {
+                Ok(p) => p,
+                Err(e) => return error_response(id, &e),
+            };
+            let handle = match mrtr_handle::<W>(
+                req,
+                &ctx,
+                signer,
+                pending,
+                shared.strict_elicitation_keys,
+            ) {
+                Ok(h) => h,
+                Err(e) => return error_response(id, &e),
+            };
+            let fut = router.dispatch_get_prompt(
+                server,
+                GetPromptContext::new(ctx.clone())
+                    .with_client(handle.clone())
+                    .with_progress(progress_reporter::<W>(req))
+                    .with_log(log_sender::<W>(req, &ctx, router.has_logging())),
+                params,
+            );
+            let subject = ctx.identity.subject().map(str::to_owned);
+            finish_mrtr::<_, W::GetPrompt>(id, method, subject, fut, &handle, signer, W::MRTR).await
+        }
+        methods::request::COMPLETION_COMPLETE => {
+            let params = match parse_complete_params(req.params.as_ref()) {
+                Ok(p) => p,
+                Err(e) => return error_response(id, &e),
+            };
+            let fut = router.dispatch_complete(server, CompleteContext::new(ctx), params);
+            finish::<_, W::Complete>(id, method, fut).await
+        }
+        _ => unreachable!("dispatch_capability called with an unrouted method"),
+    }
+}
+
+// ---- MRTR (SEP-2322) -----------------------------------------------------------
+
+#[derive(Deserialize, Default)]
+struct RawMrtrFields {
+    #[serde(rename = "inputResponses", default)]
+    input_responses: Option<BTreeMap<String, Value>>,
+    #[serde(rename = "requestState", default)]
+    request_state: Option<String>,
+}
+
+/// Build the request's [`ClientHandle`]: on the draft, an MRTR coordinator
+/// seeded with the retry's `inputResponses` and verified `requestState`
+/// (verification failure rejects the request before the handler runs — the
+/// blob is attacker-controlled); on the legacy family, an inline-bidi handle
+/// bound to the request's session.
+fn mrtr_handle<W: WireFamily>(
+    req: &JsonRpcRequest,
+    ctx: &RequestContext,
+    signer: &StateSigner,
+    pending: &Arc<PendingRequests>,
+    strict_keys: bool,
+) -> Result<ClientHandle, McpError> {
+    if !W::MRTR {
+        // The legacy session gate ran before dispatch, so the session id is
+        // present on this path; its absence means no client channel.
+        return Ok(match session_id(req.params.as_ref()) {
+            Some(session) => ClientHandle::bidi(
+                session,
+                connection_id(req.params.as_ref()).unwrap_or_default(),
+                Arc::clone(pending),
+                ctx.client_capabilities.clone(),
+            ),
+            None => ClientHandle::unavailable("no session for inline bidirectional requests"),
+        });
+    }
+    let fields: RawMrtrFields = req
+        .params
+        .as_ref()
+        .and_then(|p| serde_json::from_value(p.clone()).ok())
+        .unwrap_or_default();
+    let state_in = match &fields.request_state {
+        Some(token) => Some(signer.verify(&req.method, ctx.identity.subject(), token)?),
+        None => None,
+    };
+    Ok(ClientHandle::mrtr(
+        ctx.client_capabilities.clone(),
+        fields.input_responses.unwrap_or_default(),
+        state_in,
+        strict_keys,
+    ))
+}
+
+/// [`finish`], plus MRTR-abort interception: when the handler bailed with the
+/// [`McpError::InputRequired`] sentinel on an MRTR-capable wire, answer an
+/// `InputRequiredResult` carrying the recorded input requests and the signed
+/// outbound `requestState` (the spec's MUST: at least one of the two).
+async fn finish_mrtr<N, WIRE>(
+    id: RequestId,
+    method: &str,
+    subject: Option<String>,
+    fut: Option<BoxFuture<'static, Result<N, McpError>>>,
+    handle: &ClientHandle,
+    signer: &StateSigner,
+    mrtr_enabled: bool,
+) -> JsonRpcMessage
+where
+    WIRE: Serialize + From<N>,
+{
+    let Some(f) = fut else {
+        return error_response(id, &McpError::method_not_found(method));
+    };
+    match f.await {
+        Ok(result) => ok_value(id, &WIRE::from(result)),
+        Err(McpError::InputRequired) if mrtr_enabled => {
+            let collected = handle.collected();
+            let state_out = handle.state_out();
+            if collected.is_empty() && state_out.is_none() {
+                // The spec requires at least one of inputRequests/requestState;
+                // a bare sentinel means a handler leaked it manually.
+                return error_response(
+                    id,
+                    &McpError::internal("MRTR abort recorded no input requests"),
+                );
+            }
+            let mut result = Map::new();
+            result.insert(
+                "resultType".to_owned(),
+                serde_json::json!(neutral::result_type::INPUT_REQUIRED),
+            );
+            if !collected.is_empty() {
+                result.insert(
+                    "inputRequests".to_owned(),
+                    Value::Object(collected.into_iter().collect()),
+                );
+            }
+            if let Some(data) = state_out {
+                match signer.sign(method, subject.as_deref(), &data) {
+                    Ok(token) => {
+                        result.insert("requestState".to_owned(), serde_json::json!(token));
+                    }
+                    Err(e) => return error_response(id, &e),
+                }
+            }
+            JsonRpcResponse::success(id, Value::Object(result)).into()
+        }
+        Err(e) => error_response(id, &e),
+    }
+}
+
+/// Build the request's [`LogSender`]: live when the server enabled `logging`
+/// AND the client opted in (the context's `log_level` carries the opt-in from
+/// either the draft `_meta` key or the legacy session's `setLevel`). Routing
+/// mirrors [`progress_reporter`].
+fn log_sender<W: WireFamily>(
+    req: &JsonRpcRequest,
+    ctx: &RequestContext,
+    logging_enabled: bool,
+) -> LogSender {
+    let Some(min) = ctx.log_level.filter(|_| logging_enabled) else {
+        return LogSender::disabled();
+    };
+    let connection = connection_id(req.params.as_ref())
+        .unwrap_or_default()
+        .to_owned();
+    let session = if W::MRTR {
+        String::new()
+    } else {
+        session_id(req.params.as_ref())
+            .unwrap_or_default()
+            .to_owned()
+    };
+    LogSender::new(min, connection, session)
+}
+
+/// Build the request's [`ProgressReporter`]: live when the request carried a
+/// `_meta.progressToken` (string or integer per the progress spec — anything
+/// else is treated as absent, with a warning), inert otherwise. Notifications
+/// route to the request's own stream; the legacy family may fall back to the
+/// session `GET` stream, the draft never does.
+fn progress_reporter<W: WireFamily>(req: &JsonRpcRequest) -> ProgressReporter {
+    let token = req
+        .params
+        .as_ref()
+        .and_then(|p| p.get("_meta"))
+        .and_then(|m| m.get(meta::keys::PROGRESS_TOKEN));
+    let Some(token) = token else {
+        return ProgressReporter::disabled();
+    };
+    if !(token.is_string() || token.is_i64() || token.is_u64()) {
+        tracing::warn!(?token, "progressToken must be a string or integer; ignored");
+        return ProgressReporter::disabled();
+    }
+    let connection = connection_id(req.params.as_ref())
+        .unwrap_or_default()
+        .to_owned();
+    let session = if W::MRTR {
+        String::new()
+    } else {
+        session_id(req.params.as_ref())
+            .unwrap_or_default()
+            .to_owned()
+    };
+    ProgressReporter::new(token.clone(), connection, session)
+}
