@@ -123,9 +123,10 @@ async fn listen_answers_sse_with_ack_first_then_events() {
     // First message on the stream: the acknowledgment.
     let ack = event_json(&next_sse_chunk(&mut body, &mut buffer).await);
     assert_eq!(ack["method"], "notifications/subscriptions/acknowledged");
+    // Verbatim JSON-RPC id: a numeric listen id rides as a number.
     assert_eq!(
         ack["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"],
-        "7"
+        serde_json::json!(7)
     );
     assert_eq!(ack["params"]["notifications"]["toolsListChanged"], true);
 
@@ -135,7 +136,48 @@ async fn listen_answers_sse_with_ack_first_then_events() {
     assert_eq!(event["method"], "notifications/tools/list_changed");
     assert_eq!(
         event["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"],
-        "7"
+        serde_json::json!(7)
+    );
+}
+
+/// Graceful teardown (subscriptions spec): `close_subscriptions` answers the
+/// listen request with a `SubscriptionsListenResult` — `_meta` names the
+/// subscription verbatim — and the response ends the SSE stream.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn close_subscriptions_answers_listen_and_ends_the_stream() {
+    let dispatcher = VersionDispatcher::new(Watched, MethodRouter::new().with_tools());
+    let closer = dispatcher.clone();
+    let app = router(dispatcher, HttpConfig::new());
+
+    let resp = app
+        .oneshot(listen_request(7, json!({ "toolsListChanged": true })))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let mut body = resp.into_body();
+    let mut buffer = String::new();
+
+    let ack = event_json(&next_sse_chunk(&mut body, &mut buffer).await);
+    assert_eq!(ack["method"], "notifications/subscriptions/acknowledged");
+
+    closer.close_subscriptions().await;
+
+    let closed = event_json(&next_sse_chunk(&mut body, &mut buffer).await);
+    assert_eq!(
+        closed["id"], 7,
+        "the close result answers the listen request"
+    );
+    assert_eq!(closed["result"]["resultType"], "complete");
+    assert_eq!(
+        closed["result"]["_meta"]["io.modelcontextprotocol/subscriptionId"],
+        json!(7)
+    );
+
+    // The final response ends the long-lived stream.
+    let end = tokio::time::timeout(Duration::from_secs(5), body.frame()).await;
+    assert!(
+        matches!(end, Ok(None)),
+        "stream should end after the close result, got {end:?}"
     );
 }
 
@@ -214,7 +256,7 @@ async fn dropped_stream_is_pruned_and_later_streams_keep_working() {
     assert_eq!(event["method"], "notifications/tools/list_changed");
     assert_eq!(
         event["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"],
-        "2"
+        serde_json::json!(2)
     );
 }
 

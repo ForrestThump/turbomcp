@@ -247,6 +247,7 @@ impl Extension for TasksExtension {
     fn on_subscribe(
         &self,
         connection_id: &str,
+        subscription_id: &turbomcp_core::RequestId,
         notifications: &serde_json::Value,
         client_declared: bool,
     ) -> SubscribeOutcome {
@@ -264,7 +265,7 @@ impl Extension for TasksExtension {
             .iter()
             .filter_map(|v| v.as_str().map(str::to_owned))
             .collect();
-        self.subs.subscribe(connection_id, &ids);
+        self.subs.subscribe(connection_id, subscription_id, &ids);
         SubscribeOutcome::Subscribed(json!({ "taskIds": ids }))
     }
 

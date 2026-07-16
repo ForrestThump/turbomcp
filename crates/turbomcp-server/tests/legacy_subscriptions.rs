@@ -315,9 +315,11 @@ async fn one_publish_reaches_legacy_and_draft_subscribers_on_their_own_wires() {
     assert_eq!(n.method, "notifications/resources/updated");
     let params = n.params.as_ref().unwrap();
     assert_eq!(params["uri"], "file://a");
+    // The subscription id is the listen request's JSON-RPC id VERBATIM — a
+    // number here, never a stringified copy.
     assert_eq!(
         params["_meta"]["io.modelcontextprotocol/subscriptionId"],
-        "7"
+        serde_json::json!(7)
     );
 
     // Legacy wire: bare uri, no meta.

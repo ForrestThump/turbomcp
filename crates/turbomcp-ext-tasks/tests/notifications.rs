@@ -166,6 +166,12 @@ async fn listen_then_cancel_pushes_notifications_tasks() {
     assert_eq!(params["status"], "cancelled");
     // The notification is not a result — no `resultType`.
     assert!(params.get("resultType").is_none());
+    // Every notification delivered on a listen stream MUST carry the
+    // originating subscription's id verbatim (the listen request's id, 2).
+    assert_eq!(
+        params["_meta"]["io.modelcontextprotocol/subscriptionId"],
+        json!(2)
+    );
 }
 
 #[tokio::test]

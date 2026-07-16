@@ -251,6 +251,27 @@ impl SubscriptionRegistry {
         }
     }
 
+    /// Gracefully close every live draft subscription: answer each listen
+    /// request with a [`SubscriptionsListenResult`]-shaped response (the
+    /// subscription ended; `_meta` carries its id verbatim) and clear the
+    /// registry. The subscriptions spec sends this response only at graceful
+    /// teardown — e.g. server shutdown; an abrupt transport close carries no
+    /// response. On HTTP the response also ends the listen SSE stream.
+    pub(crate) async fn close_all(&self) {
+        let targets: Vec<(String, RequestId)> = self.lock().drain().map(|(key, _)| key).collect();
+        for (connection, id) in targets {
+            let Some(writer) = outbound::writer(&connection) else {
+                continue; // connection already gone — the abrupt-close case
+            };
+            let result = json!({
+                "resultType": "complete",
+                "_meta": { meta::keys::SUBSCRIPTION_ID: subscription_id_value(&id) },
+            });
+            let response = turbomcp_core::JsonRpcResponse::success(id, result);
+            let _ = writer.send(response.into()).await;
+        }
+    }
+
     fn lock(
         &self,
     ) -> std::sync::MutexGuard<'_, HashMap<(String, RequestId), draft::SubscriptionFilter>> {
@@ -297,12 +318,13 @@ pub(crate) fn request_writer(
         })
 }
 
-/// The `_meta.subscriptionId` value for a listen request id. The spec's
-/// examples stringify numeric ids (`id: 1` → `"1"`).
-pub(crate) fn subscription_id_value(id: &RequestId) -> String {
+/// The `_meta.subscriptionId` value for a listen request id: the JSON-RPC ID
+/// **verbatim** (string or number — the spec pins the value to the ID itself,
+/// never a stringified copy).
+pub(crate) fn subscription_id_value(id: &RequestId) -> Value {
     match id {
-        RequestId::Number(n) => n.to_string(),
-        RequestId::String(s) => s.clone(),
+        RequestId::Number(n) => json!(n),
+        RequestId::String(s) => json!(s),
     }
 }
 
@@ -401,8 +423,8 @@ mod tests {
             let meta = &n.params.as_ref().unwrap()["_meta"];
             assert_eq!(
                 meta[meta::keys::SUBSCRIPTION_ID],
-                "1",
-                "only subscription 1 opted in to anything"
+                json!(1),
+                "only subscription 1 opted in to anything — and the id rides verbatim (a number, not \"1\")"
             );
             methods_seen.push(n.method);
         }
@@ -413,6 +435,43 @@ mod tests {
                 methods::notification::TOOLS_LIST_CHANGED.to_owned(),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn close_all_answers_each_listen_request_and_clears() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let _guard = outbound::register("close-conn", tx);
+        let reg = Arc::new(SubscriptionRegistry::default());
+        reg.insert("close-conn", &RequestId::from(7i64), filter(true, &[]));
+        reg.insert(
+            "close-conn",
+            &RequestId::String("listen-a".into()),
+            filter(true, &[]),
+        );
+
+        reg.close_all().await;
+
+        let mut ids_seen = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            let JsonRpcMessage::Response(r) = msg else {
+                panic!("close_all sends responses, got {msg:?}");
+            };
+            let result = r.result.expect("a SubscriptionsListenResult");
+            assert_eq!(result["resultType"], "complete");
+            // `_meta.subscriptionId` mirrors the response's own id, verbatim.
+            assert_eq!(
+                result["_meta"][meta::keys::SUBSCRIPTION_ID],
+                serde_json::to_value(&r.id).unwrap()
+            );
+            ids_seen.push(r.id);
+        }
+        ids_seen.sort_by_key(|id| format!("{id:?}"));
+        assert_eq!(ids_seen.len(), 2, "one close result per subscription");
+
+        // The registry is empty: a publish reaches nobody.
+        reg.publish(methods::notification::TOOLS_LIST_CHANGED, None, |_| true)
+            .await;
+        assert!(rx.try_recv().is_err(), "no subscriptions remain");
     }
 
     #[tokio::test]

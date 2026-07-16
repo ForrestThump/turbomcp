@@ -176,6 +176,17 @@ impl<S: McpServerCore> VersionDispatcher<S> {
         }
     }
 
+    /// Gracefully close every live `subscriptions/listen` subscription: each
+    /// listen request is answered with a `SubscriptionsListenResult` (its
+    /// `_meta` names the subscription), which on HTTP also ends the listen SSE
+    /// stream. Call this at the start of a graceful shutdown, **before** the
+    /// transport drains — the subscriptions spec sends this response only at
+    /// graceful teardown (an abrupt transport close carries no response).
+    /// `run_http` wires it to the configured shutdown token automatically.
+    pub async fn close_subscriptions(&self) {
+        self.shared.subs.close_all().await;
+    }
+
     /// Opt in to strict elicitation keys: reusing an `elicit` key with a
     /// different request shape within one handler execution becomes an error
     /// (an idempotency lint) instead of a warning.
@@ -1099,7 +1110,7 @@ async fn handle_subscriptions_listen<S: McpServerCore>(
         let ctx = build_context(req);
         for ext in extensions {
             let declared = context_declares_extension(&ctx, ext.id());
-            match ext.on_subscribe(&conn, &raw_notifications, declared) {
+            match ext.on_subscribe(&conn, &id, &raw_notifications, declared) {
                 SubscribeOutcome::NotApplicable => {}
                 SubscribeOutcome::MissingCapability => {
                     return Ok(Some(missing_capability_response(id, ext.id())));

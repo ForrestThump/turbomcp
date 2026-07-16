@@ -304,6 +304,14 @@ impl HttpConfig {
         self
     }
 
+    /// A clone of the configured shutdown token (a fresh, never-fired token by
+    /// default). Lets callers coordinate their own teardown — e.g. `run_http`
+    /// gracefully closes `subscriptions/listen` subscriptions when it fires.
+    #[must_use]
+    pub fn shutdown_token(&self) -> CancellationToken {
+        self.shutdown.clone()
+    }
+
     /// Set the SSE keep-alive comment interval (default 15s). Keep it shorter
     /// than the idle timeout of any proxy in front of the server.
     #[must_use]
@@ -852,11 +860,22 @@ fn sse_response(
     keepalive: Duration,
 ) -> Response {
     let stream = futures::stream::unfold(
-        (rx, registration, codec),
-        |(mut rx, registration, codec)| async move {
+        (Some((rx, registration)), codec),
+        |(live, codec)| async move {
+            let (mut rx, registration) = live?;
             let msg = rx.recv().await?;
             let event = sse_event(&codec, &msg);
-            Some((Ok::<_, Infallible>(event), (rx, registration, codec)))
+            // A JSON-RPC *response* ends the stream: on the listen stream the
+            // only response ever delivered is the graceful-close
+            // `SubscriptionsListenResult` answering the listen request itself
+            // (subscriptions spec). Emitting it and closing mirrors the
+            // per-POST stream contract ("the final response ends the stream").
+            let next = if matches!(msg, JsonRpcMessage::Response(_)) {
+                None
+            } else {
+                Some((rx, registration))
+            };
+            Some((Ok::<_, Infallible>(event), (next, codec)))
         },
     );
 

@@ -175,13 +175,17 @@ pub trait Extension: Send + Sync + 'static {
 
     /// Offer a `subscriptions/listen` request to the extension. `notifications`
     /// is the raw filter object from the request (so the extension reads its own
-    /// fields, e.g. the Tasks extension's `taskIds`); `client_declared` is
+    /// fields, e.g. the Tasks extension's `taskIds`); `subscription_id` is the
+    /// listen request's JSON-RPC id — every notification the extension later
+    /// pushes on this subscription MUST carry it verbatim in
+    /// `_meta["io.modelcontextprotocol/subscriptionId"]`; `client_declared` is
     /// whether the client declared this extension's capability. The extension
     /// records the subscription against `connection_id` and returns a
     /// [`SubscribeOutcome`]. Defaults to [`SubscribeOutcome::NotApplicable`].
     fn on_subscribe(
         &self,
         _connection_id: &str,
+        _subscription_id: &turbomcp_core::RequestId,
         _notifications: &Value,
         _client_declared: bool,
     ) -> SubscribeOutcome {

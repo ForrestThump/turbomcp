@@ -14,7 +14,8 @@ homepage = "https://turbomcp.org"
 # stdio is the default transport and is always linked; http is opt-in.
 default = []
 # Also lights up the client's Streamable HTTP transport when `client` is on.
-http = ["dep:turbomcp-transport-http", "turbomcp-client?/http"]
+# (tokio: `run_http` spawns the graceful subscription-close watcher.)
+http = ["dep:turbomcp-transport-http", "turbomcp-client?/http", "dep:tokio"]
 # OAuth 2.1 resource-server auth (bearer validation, RFC 9728). Most useful
 # with `http`; the metadata endpoint + challenges are HTTP-level.
 auth = ["dep:turbomcp-auth"]
@@ -44,6 +45,7 @@ turbomcp-telemetry = { workspace = true, optional = true }
 turbomcp-client = { workspace = true, optional = true }
 turbomcp-ext-tasks = { workspace = true, optional = true }
 turbomcp-macros = { workspace = true }
+tokio = { workspace = true, features = ["rt"], optional = true }
 
 # Re-exported for `#[server]`-generated code (schema derivation + (de)serialization).
 schemars = { workspace = true }

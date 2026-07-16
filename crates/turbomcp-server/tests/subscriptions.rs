@@ -140,10 +140,12 @@ async fn recv_notification(
 }
 
 fn subscription_id(n: &JsonRpcNotification) -> String {
+    // The id rides verbatim (string or number); these tests use numeric
+    // listen ids, so render for comparison.
     n.params.as_ref().unwrap()["_meta"]["io.modelcontextprotocol/subscriptionId"]
-        .as_str()
-        .expect("every stream message carries its subscription id")
-        .to_owned()
+        .as_i64()
+        .expect("every stream message carries its numeric subscription id")
+        .to_string()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
