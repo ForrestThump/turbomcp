@@ -231,12 +231,11 @@ async fn actor<T>(
             frame = transport.recv() => {
                 match frame {
                     Ok(Some(msg)) => {
-                        if let Some(reply) = route_inbound(msg, &pending, &handler, &weak_out) {
-                            if let Err(e) = transport.send(reply).await {
+                        if let Some(reply) = route_inbound(msg, &pending, &handler, &weak_out)
+                            && let Err(e) = transport.send(reply).await {
                                 tracing::debug!(error = %e, "client reply send failed; closing");
                                 break;
                             }
-                        }
                     }
                     Ok(None) => break, // clean EOF
                     Err(e) => {

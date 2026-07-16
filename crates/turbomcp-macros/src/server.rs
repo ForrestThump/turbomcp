@@ -968,10 +968,10 @@ fn doc_comment(attrs: &[Attribute]) -> Option<String> {
         if !a.path().is_ident("doc") {
             continue;
         }
-        if let Meta::NameValue(nv) = &a.meta {
-            if let Some(s) = lit_str(&nv.value) {
-                lines.push(s.trim().to_string());
-            }
+        if let Meta::NameValue(nv) = &a.meta
+            && let Some(s) = lit_str(&nv.value)
+        {
+            lines.push(s.trim().to_string());
         }
     }
     if lines.is_empty() {
@@ -1006,20 +1006,20 @@ fn strip_param_attrs(f: &mut ImplItemFn) {
 /// Whether a type is a reference to something named `…Context`.
 fn is_ctx_type(ty: &Type) -> bool {
     let Type::Reference(r) = ty else { return false };
-    if let Type::Path(p) = &*r.elem {
-        if let Some(seg) = p.path.segments.last() {
-            return seg.ident.to_string().ends_with("Context");
-        }
+    if let Type::Path(p) = &*r.elem
+        && let Some(seg) = p.path.segments.last()
+    {
+        return seg.ident.to_string().ends_with("Context");
     }
     false
 }
 
 /// Whether a type is `Option<…>`.
 fn type_is_option(ty: &Type) -> bool {
-    if let Type::Path(p) = ty {
-        if let Some(seg) = p.path.segments.last() {
-            return seg.ident == "Option";
-        }
+    if let Type::Path(p) = ty
+        && let Some(seg) = p.path.segments.last()
+    {
+        return seg.ident == "Option";
     }
     false
 }

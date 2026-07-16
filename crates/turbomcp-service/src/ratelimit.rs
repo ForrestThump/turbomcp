@@ -95,7 +95,7 @@ impl RateLimiter for GovernorRateLimiter {
     fn check(&self, key: &RateKey) -> Result<(), Duration> {
         // Bound the keyed state map: `governor` doesn't evict, so periodically
         // reclaim keys whose buckets have refilled (idle clients).
-        if self.checks.fetch_add(1, Ordering::Relaxed) % SHRINK_EVERY == 0 {
+        if (self.checks.fetch_add(1, Ordering::Relaxed)).is_multiple_of(SHRINK_EVERY) {
             self.inner.retain_recent();
         }
         match self.inner.check_key(key) {

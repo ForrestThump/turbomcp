@@ -136,10 +136,8 @@ mod http {
         }
 
         async fn key_set(&self, force: bool) -> Result<JwkSet, AuthError> {
-            if !force {
-                if let Some(set) = self.cached_fresh() {
-                    return Ok(set);
-                }
+            if !force && let Some(set) = self.cached_fresh() {
+                return Ok(set);
             }
             self.fetch().await
         }
