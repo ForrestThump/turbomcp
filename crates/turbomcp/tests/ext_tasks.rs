@@ -29,6 +29,30 @@ impl Workshop {
         Ok(format!("Report: {topic}"))
     }
 
+    /// A report generator that confirms mid-task — run as a task AND elicits
+    /// while executing (SEP-2663 in-execution `input_required`).
+    #[tool(description = "Generate a report after confirming")]
+    async fn guarded_report(&self, ctx: &CallToolContext, topic: String) -> McpResult<String> {
+        let outcome = ctx
+            .client
+            .elicit(
+                "confirm_report",
+                neutral::ElicitParams::new(
+                    format!("Generate a report on {topic}?"),
+                    json!({
+                        "type": "object",
+                        "properties": { "ok": { "type": "boolean" } },
+                    }),
+                ),
+            )
+            .await?;
+        Ok(if outcome.accepted() {
+            format!("Confirmed report: {topic}")
+        } else {
+            "declined".to_owned()
+        })
+    }
+
     /// Delete a path after eliciting confirmation (MRTR) — NOT a task.
     #[tool(description = "Delete a path after confirmation")]
     async fn delete(&self, ctx: &CallToolContext, path: String) -> McpResult<String> {
@@ -77,7 +101,7 @@ async fn connect() -> Client {
         .into_server()
         .with_extension(Arc::new(
             TasksExtension::new()
-                .task_tools(["generate_report"])
+                .task_tools(["generate_report", "guarded_report"])
                 .poll_interval_ms(Some(10)),
         ))
         .build();
@@ -143,6 +167,65 @@ async fn tasked_tool_returns_a_task_handle_polled_to_completion() {
     assert_eq!(terminal["resultType"], "complete");
     assert_eq!(terminal["result"]["content"][0]["text"], "Report: uptime");
     assert_eq!(terminal["result"]["isError"], false);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn call_tool_transparently_drives_a_task_to_completion() {
+    // The typed `call_tool` keeps its fixed CallToolResult contract even when
+    // the server answers with a task handle: it drives the polling flow
+    // internally (SEP-2663 §Polymorphic Results guidance).
+    let client = connect().await;
+    let mut args = Map::new();
+    args.insert("topic".into(), json!("latency"));
+    let result = client
+        .call_tool("generate_report", args)
+        .await
+        .expect("call_tool auto-drives the task");
+    match &result.content[0] {
+        neutral::Content::Text(t) => assert_eq!(t, "Report: latency"),
+        other => panic!("unexpected content {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mid_task_elicitation_flows_through_tasks_update() {
+    // The Phase-12 exit: a taskified tool elicits WHILE EXECUTING. The typed
+    // client observes `input_required` on a poll, answers through its
+    // ClientHandler via tasks/update, and the task completes.
+    let client = connect().await;
+    let mut args = Map::new();
+    args.insert("topic".into(), json!("throughput"));
+    let result = client
+        .call_tool("guarded_report", args)
+        .await
+        .expect("mid-task elicitation should round-trip");
+    match &result.content[0] {
+        neutral::Content::Text(t) => assert_eq!(t, "Confirmed report: throughput"),
+        other => panic!("unexpected content {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn typed_task_cancel_reaches_the_server() {
+    let client = connect().await;
+
+    // Create the task via the raw escape hatch (keeping the handle instead of
+    // auto-driving it).
+    let created = client
+        .request("tools/call", {
+            let mut p = Map::new();
+            p.insert("name".into(), json!("guarded_report"));
+            p.insert("arguments".into(), json!({ "topic": "never" }));
+            p
+        })
+        .await
+        .expect("tools/call");
+    assert_eq!(created["resultType"], "task");
+    let task_id = created["taskId"].as_str().expect("taskId").to_owned();
+
+    client.task_cancel(&task_id).await.expect("tasks/cancel");
+    let got = client.task_get(&task_id).await.expect("tasks/get");
+    assert_eq!(got["status"], "cancelled");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

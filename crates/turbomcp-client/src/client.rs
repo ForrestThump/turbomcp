@@ -38,6 +38,17 @@ use crate::handler::{ClientHandler, dispatch_server_request};
 /// `input_required` forever.
 const MAX_MRTR_ROUNDS: usize = 16;
 
+/// The SEP-2663 Tasks-extension methods the typed task surface speaks.
+const TASKS_GET: &str = "tasks/get";
+const TASKS_UPDATE: &str = "tasks/update";
+const TASKS_CANCEL: &str = "tasks/cancel";
+/// `resultType: "task"` marks a `CreateTaskResult` (SEP-2663).
+const RESULT_TYPE_TASK: &str = "task";
+/// Poll cadence when the server suggests none, and the floor applied to a
+/// server-suggested `pollIntervalMs` (protects the server from a zero value).
+const DEFAULT_TASK_POLL_MS: u64 = 500;
+const MIN_TASK_POLL_MS: u64 = 10;
+
 /// Internal `_meta` key carrying the `#[mcp_header]` mirror map — header-name
 /// portion → already-encoded header value — to emit as `Mcp-Param-*` headers.
 /// Consumed and stripped by the HTTP transport (and sanitized server-side as
@@ -382,7 +393,7 @@ impl Client {
     ) -> ClientResult<neutral::CallToolResult> {
         let name = name.into();
         let params = self.tool_call_params(&name, &arguments);
-        let v = match self.mrtr_request(request::TOOLS_CALL, params).await {
+        let mut v = match self.mrtr_request(request::TOOLS_CALL, params).await {
             // `-32020` HeaderMismatch: our mirror headers may be built from a
             // stale schema. Per the transports spec, refresh `tools/list`
             // (which rebuilds the header cache) and retry once.
@@ -397,6 +408,16 @@ impl Client {
             }
             other => other?,
         };
+        // A server MAY answer with a task handle instead of the result
+        // (`resultType: "task"`, SEP-2663 — only ever sent to clients that
+        // declared the Tasks extension capability). Per the SEP's guidance
+        // for fixed-shape APIs, drive the polling flow transparently and
+        // surface only the final result; use [`task_get`](Self::task_get) /
+        // [`task_cancel`](Self::task_cancel) directly to manage the
+        // lifecycle yourself.
+        if v.get("resultType").and_then(Value::as_str) == Some(RESULT_TYPE_TASK) {
+            v = self.drive_task(v).await?;
+        }
         self.decode::<draft::CallToolResult, legacy::CallToolResult, _>(v)
     }
 
@@ -534,6 +555,155 @@ impl Client {
             .versioned_request(request::COMPLETION_COMPLETE, params)
             .await?;
         self.decode::<draft::CompleteResult, legacy::CompleteResult, _>(v)
+    }
+
+    /// Poll a task's current state (`tasks/get`, SEP-2663 Tasks extension).
+    ///
+    /// Returns the raw task object (the extension owns its wire types): a
+    /// `Task` with status-specific fields inlined — `inputRequests` when
+    /// `input_required`, `result` when `completed`, `error` when `failed`.
+    ///
+    /// # Errors
+    /// Propagates RPC failures (`-32602` for an unknown task).
+    pub async fn task_get(&self, task_id: &str) -> ClientResult<Value> {
+        let mut params = Map::new();
+        params.insert("taskId".into(), json!(task_id));
+        self.versioned_request(TASKS_GET, params).await
+    }
+
+    /// Answer a task's outstanding `inputRequests` (`tasks/update`). Each key
+    /// must name a currently-outstanding request from `tasks/get`; the server
+    /// ignores unknown/already-answered keys and accepts partial sets.
+    ///
+    /// # Errors
+    /// Propagates RPC failures (`-32602` for an unknown task).
+    pub async fn task_update(
+        &self,
+        task_id: &str,
+        input_responses: Map<String, Value>,
+    ) -> ClientResult<Value> {
+        let mut params = Map::new();
+        params.insert("taskId".into(), json!(task_id));
+        params.insert("inputResponses".into(), Value::Object(input_responses));
+        self.versioned_request(TASKS_UPDATE, params).await
+    }
+
+    /// Request cooperative cancellation of a task (`tasks/cancel`). The ack is
+    /// eventually consistent — the task MAY still finish, and client-side task
+    /// state can be dropped immediately after this returns.
+    ///
+    /// # Errors
+    /// Propagates RPC failures (`-32602` for an unknown task).
+    pub async fn task_cancel(&self, task_id: &str) -> ClientResult<()> {
+        let mut params = Map::new();
+        params.insert("taskId".into(), json!(task_id));
+        self.versioned_request(TASKS_CANCEL, params)
+            .await
+            .map(|_| ())
+    }
+
+    /// Drive a `CreateTaskResult` to its terminal state (SEP-2663): poll
+    /// `tasks/get` at the server's suggested interval, answer `input_required`
+    /// requests through the [`ClientHandler`] (deduplicating keys across
+    /// polls, per spec) via `tasks/update`, and return the task's final
+    /// `result` value. A `failed` task surfaces its JSON-RPC error; a
+    /// `cancelled` task is a protocol error; a finite `ttlMs` acts as the
+    /// spec's polling backstop.
+    async fn drive_task(&self, mut current: Value) -> ClientResult<Value> {
+        let task_id = current
+            .get("taskId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ClientError::Decode("CreateTaskResult without a taskId".into()))?
+            .to_owned();
+        // TTL backstop (spec: the client MAY consider the task unusable after
+        // `createdAt + ttlMs`). Measured from now — at or after `createdAt`,
+        // so never stricter than the spec allows. `null` ⇒ poll indefinitely.
+        let deadline = current
+            .get("ttlMs")
+            .and_then(Value::as_u64)
+            .map(|ms| std::time::Instant::now() + Duration::from_millis(ms));
+        let mut answered: std::collections::HashSet<String> = std::collections::HashSet::new();
+        loop {
+            match current.get("status").and_then(Value::as_str) {
+                Some("completed") => {
+                    return current.get("result").cloned().ok_or_else(|| {
+                        ClientError::Decode("completed task without a result".into())
+                    });
+                }
+                Some("failed") => {
+                    let err = current.get("error");
+                    return Err(ClientError::Rpc(turbomcp_core::JsonRpcError {
+                        code: err
+                            .and_then(|e| e.get("code"))
+                            .and_then(Value::as_i64)
+                            .and_then(|c| i32::try_from(c).ok())
+                            .unwrap_or(-32603),
+                        message: err
+                            .and_then(|e| e.get("message"))
+                            .and_then(Value::as_str)
+                            .unwrap_or("task failed")
+                            .to_owned(),
+                        data: err.and_then(|e| e.get("data")).cloned(),
+                    }));
+                }
+                Some("cancelled") => {
+                    return Err(ClientError::Protocol(format!(
+                        "task {task_id} was cancelled"
+                    )));
+                }
+                Some("input_required") => {
+                    let handler = self.handler.as_deref().ok_or_else(|| {
+                        ClientError::Protocol(
+                            "task requires input but the client has no handler".into(),
+                        )
+                    })?;
+                    // Answer each outstanding request exactly once (the spec
+                    // has clients dedup keys across consecutive polls; keys
+                    // are unique over the task's lifetime).
+                    let mut responses = Map::new();
+                    if let Some(requests) = current.get("inputRequests").and_then(Value::as_object)
+                    {
+                        for (key, req) in requests {
+                            if answered.contains(key) {
+                                continue;
+                            }
+                            let req_method = req
+                                .get("method")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default();
+                            let req_params = req.get("params").cloned();
+                            let answer = dispatch_server_request(handler, req_method, req_params)
+                                .await
+                                .map_err(|e| {
+                                    ClientError::Protocol(format!(
+                                        "input handler failed: {}",
+                                        e.message
+                                    ))
+                                })?;
+                            answered.insert(key.clone());
+                            responses.insert(key.clone(), answer);
+                        }
+                    }
+                    if !responses.is_empty() {
+                        self.task_update(&task_id, responses).await?;
+                    }
+                }
+                // `working` (or a status from a newer revision) → keep polling.
+                _ => {}
+            }
+            if let Some(deadline) = deadline
+                && std::time::Instant::now() >= deadline
+            {
+                return Err(ClientError::Timeout);
+            }
+            let interval = current
+                .get("pollIntervalMs")
+                .and_then(Value::as_u64)
+                .unwrap_or(DEFAULT_TASK_POLL_MS)
+                .max(MIN_TASK_POLL_MS);
+            tokio::time::sleep(Duration::from_millis(interval)).await;
+            current = self.task_get(&task_id).await?;
+        }
     }
 
     /// Issue an MRTR-capable request (`tools/call`, `resources/read`,
