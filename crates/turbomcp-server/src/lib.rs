@@ -61,12 +61,14 @@ pub use traits::{McpServerCore, WithCompletions, WithPrompts, WithResources, Wit
 pub mod __macro_support {
     use serde_json::Value;
 
-    /// Strip schemars bookkeeping (`$schema`, `title`) so a generated argument
-    /// schema reads as a clean MCP tool input schema.
+    /// Strip the schemars `title` bookkeeping (the arg-struct's Rust name, which
+    /// is noise on a tool input schema). The `$schema` dialect declaration is
+    /// **kept** — the MCP spec (and the official conformance suite) expect a tool
+    /// `inputSchema` to advertise its JSON Schema dialect
+    /// (`https://json-schema.org/draft/2020-12/schema`).
     #[must_use]
     pub fn normalize_input_schema(mut v: Value) -> Value {
         if let Some(obj) = v.as_object_mut() {
-            obj.remove("$schema");
             obj.remove("title");
         }
         v

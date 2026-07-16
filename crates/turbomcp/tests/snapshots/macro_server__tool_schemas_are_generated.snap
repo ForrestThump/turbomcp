@@ -6,6 +6,7 @@ expression: tools
   {
     "description": "Add two numbers (the second is optional).",
     "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
       "required": [
         "a"
@@ -29,6 +30,7 @@ expression: tools
   {
     "description": "Say hello to someone",
     "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
       "required": [
         "name"
@@ -44,6 +46,7 @@ expression: tools
   {
     "description": "Run a query, mirroring `region` into a request header.",
     "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
       "required": [
         "region",
