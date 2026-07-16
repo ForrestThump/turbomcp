@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.0-alpha.1] - 2026-07-16
+
+**v4 is a ground-up rewrite of TurboMCP**, shipped as the same `turbomcp` crate
+at a new major version. This is a **prerelease for community testing** — the
+API can still change before `4.0.0`. The stable line remains `3.x` (branch
+`main`); v4 lives on `v4-rewrite`. Edition 2024, MSRV 1.88.
+
+> **Draft-protocol caveat:** alongside stable `2025-11-25`, this alpha speaks
+> the MCP **draft** revision (wire string `2026-07-28`, exposed as the
+> `ProtocolVersion::Draft` channel) as of spec commit `26897cc3` — the freeze
+> candidate. If the spec moves before its ~2026-07-28 freeze, draft wire
+> details may change; the dated re-pin (a frozen `V2026_07_28` variant) lands
+> in the next prerelease.
+
+### Highlights
+
+- **One macro defines a server.** `#[server]` + `#[tool]` / `#[resource]`
+  (fixed or RFC 6570 templated URIs) / `#[prompt]` / `#[completion]`. JSON
+  schemas are generated from signatures at compile time; advertised
+  capabilities are *derived* from the markers present, so they cannot drift.
+  `Json<T>` returns produce `structuredContent` plus a generated
+  `outputSchema`; `Image` / `Audio` returns produce media content blocks.
+- **Two protocol versions, one handler.** The same server answers `2025-11-25`
+  and the `2026-07-28` draft. Handlers speak version-neutral types
+  (`turbomcp::neutral`); wire shapes are conversions at the edges — including
+  the draft's Streamable HTTP request-metadata headers (`MCP-Protocol-Version`
+  mirror, `Mcp-Method` / `Mcp-Name` / `Mcp-Param-*` validation) and
+  result-`_meta` `serverInfo`.
+- **Transports:** stdio (always linked), Streamable HTTP on axum 0.8
+  (per-POST SSE upgrade, sessions + DELETE termination, Origin/Host
+  DNS-rebinding guards, trusted-proxy `X-Forwarded-For`), and WebSocket —
+  `run_stdio()` / `run_http(addr, cfg)` / `ws::serve_websocket`.
+- **A typed client** (`feature = "client"`): handshake + version negotiation
+  (`ConnectMode`), the server-turn loop for elicitation/sampling, an HTTP
+  transport, and a task-aware `call_tool` that transparently drives
+  `resultType: "task"` answers to completion (with `task_get` / `task_update`
+  / `task_cancel` escape hatches).
+- **Tasks, both generations:** core Tasks on `2025-11-25`
+  (`ServerBuilder::with_tasks()`, per-tool `#[tool(task)]`) and the draft
+  Tasks extension (`feature = "ext-tasks"`, SEP-2663 **Final**) including
+  in-execution `input_required` — a running tool can elicit through
+  `ctx.client` and receive the answer via `tasks/update`.
+- **Enterprise seams:** OAuth 2.1 resource-server auth (JWKS bearer
+  validation, RFC 8707 `aud` binding, RFC 9728 metadata, per-tool
+  `#[tool(scopes(…))]`), identity-keyed rate limiting, OpenTelemetry tracing
+  with W3C `_meta` propagation and PII-safe spans, session idle timeout and
+  termination.
+- **Bidirectional + realtime:** `subscriptions/listen` (draft) and legacy
+  resource subscriptions, elicitation (MRTR request-state model + legacy
+  inline), sampling, roots, progress, and logging.
+- **`no_std` foundation:** `turbomcp-core` / `-codec` / `-protocol` build for
+  `wasm32-unknown-unknown`.
+- **Verified:** official `@modelcontextprotocol/conformance` suite — 47
+  checks, 43 pass, 0 fail (4 info); cross-SDK interop with the official Rust
+  SDK (rmcp) in both directions.
+
+### Compatibility
+
+- The macro surface is intentionally source-compatible with v3 for the common
+  case; see `crates/turbomcp/MIGRATION.md` for the deltas (error constructors,
+  per-RPC contexts, derived capabilities, Tasks split).
+- Not yet ported from v3: server composition (`CompositeHandler`), visibility
+  layers, TCP/Unix-socket transports.
+
 ## [3.1.5] - 2026-05-11
 
 Patch release: Streamable HTTP interoperability hardening for RMCP/Codex

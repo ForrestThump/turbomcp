@@ -4,8 +4,10 @@ A ground-up Rust SDK for the [Model Context Protocol](https://modelcontextprotoc
 both halves of the protocol — server **and** client — with a macro-driven,
 zero-boilerplate surface and strict spec compliance as a feature.
 
-> **Status: `4.0.0-alpha.1`.** A ground-up rewrite of `turbomcp` for the v4
-> major version; the stable line is `3.x`. Edition 2024, MSRV 1.88.
+> **Status: `4.0.0-alpha.1` — a prerelease for community testing.** A
+> ground-up rewrite of `turbomcp` for the v4 major version; the stable line is
+> `3.x`. Edition 2024, MSRV 1.88. The draft protocol revision (`2026-07-28`)
+> tracks the pre-freeze spec; `2025-11-25` support is stable.
 
 ## What you get
 
@@ -18,11 +20,13 @@ zero-boilerplate surface and strict spec compliance as a feature.
   `2025-11-25` and the `2026-07-28` draft. Your handlers speak
   version-neutral types; the version-specific wire shapes are conversions, not
   signature changes.
-- **Transports behind one builder.** stdio (default) and Streamable HTTP
-  (axum). `MyServer.run_stdio()` or `MyServer.into_server().run_http(addr, cfg)`.
+- **Transports behind one builder.** stdio (default), Streamable HTTP (axum),
+  and WebSocket. `MyServer.run_stdio()`, `MyServer.into_server().run_http(addr,
+  cfg)`, or `turbomcp::ws::serve_websocket(listener, dispatcher)`.
 - **The client too.** A typed `Client` runs the handshake, negotiates the
   version, and speaks the same neutral API — interoperating with the official
-  Rust SDK (rmcp) both directions.
+  Rust SDK (rmcp) both directions. `call_tool` transparently drives task-shaped
+  results (including mid-task `input_required`) to completion.
 - **Production seams.** OAuth 2.1 resource-server auth, identity-keyed rate
   limiting, OpenTelemetry tracing, progress/logging, subscriptions, and
   bidirectional elicitation (MRTR) — each opt-in behind a feature flag.
@@ -109,6 +113,7 @@ async fn stats(&self) -> Json<Stats> { Json(Stats { count: 3, mean: 1.5 }) }
 |---|---|
 | *(default)* | stdio transport (always linked) |
 | `http` | Streamable HTTP transport (axum); the client's HTTP transport when `client` is on |
+| `websocket` | WebSocket transport (bidirectional, non-spec) → `turbomcp::ws` |
 | `client` | the typed `Client` + `ConnectMode` negotiation |
 | `auth` | OAuth 2.1 resource-server auth (bearer validation, RFC 9728 metadata) |
 | `telemetry` | OpenTelemetry tracing (`TraceContextLayer`, W3C `_meta` propagation, PII-safe spans) |
