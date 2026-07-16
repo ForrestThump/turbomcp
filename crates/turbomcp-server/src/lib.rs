@@ -74,6 +74,24 @@ pub mod __macro_support {
         v
     }
 
+    /// Close a generated object schema to additional properties. A tool
+    /// `inputSchema` forbids unknown arguments — the function-calling norm (it
+    /// keeps models from inventing parameters) and what the official MCP
+    /// conformance suite's json-schema-2020-12 scenario checks. Schema-only:
+    /// deserialization stays lenient (unknown args are still ignored, not an
+    /// error). No-op unless the root is an `object` that hasn't already set
+    /// `additionalProperties`.
+    #[must_use]
+    pub fn close_object_schema(mut v: Value) -> Value {
+        if let Some(obj) = v.as_object_mut()
+            && obj.get("type").and_then(Value::as_str) == Some("object")
+            && !obj.contains_key("additionalProperties")
+        {
+            obj.insert("additionalProperties".into(), Value::Bool(false));
+        }
+        v
+    }
+
     /// Mark a property as an MCP header parameter (SEP-2243). Transport-side
     /// mirroring lands in Phase 4; here we annotate the input schema so the
     /// information is present and snapshot-tested.

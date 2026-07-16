@@ -573,12 +573,14 @@ fn gen_tool_list_entry(t: &Handler) -> TokenStream {
         .then(|| quote!(.with_task_support(::turbomcp::neutral::TaskSupport::Optional)));
     quote! {
         {
-            let mut __schema = ::turbomcp::__macros::normalize_input_schema(
-                ::turbomcp::__macros::serde_json::to_value(
-                    ::turbomcp::__macros::schemars::schema_for!(#ident)
-                ).unwrap_or_else(|_| ::turbomcp::__macros::serde_json::Value::Object(
-                    ::core::default::Default::default()
-                ))
+            let mut __schema = ::turbomcp::__macros::close_object_schema(
+                ::turbomcp::__macros::normalize_input_schema(
+                    ::turbomcp::__macros::serde_json::to_value(
+                        ::turbomcp::__macros::schemars::schema_for!(#ident)
+                    ).unwrap_or_else(|_| ::turbomcp::__macros::serde_json::Value::Object(
+                        ::core::default::Default::default()
+                    ))
+                )
             );
             #(#header_marks)*
             ::turbomcp::neutral::Tool::new(#name, __schema) #desc #output_schema #task_support

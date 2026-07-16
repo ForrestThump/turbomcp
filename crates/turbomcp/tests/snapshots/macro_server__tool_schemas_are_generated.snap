@@ -23,7 +23,8 @@ expression: tools
           ],
           "format": "double"
         }
-      }
+      },
+      "additionalProperties": false
     },
     "name": "add"
   },
@@ -39,7 +40,8 @@ expression: tools
         "name": {
           "type": "string"
         }
-      }
+      },
+      "additionalProperties": false
     },
     "name": "hello"
   },
@@ -61,7 +63,8 @@ expression: tools
           "description": "The SQL to run",
           "type": "string"
         }
-      }
+      },
+      "additionalProperties": false
     },
     "name": "query"
   }
