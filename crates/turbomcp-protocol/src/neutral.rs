@@ -56,6 +56,12 @@ pub enum Content {
         /// The audio MIME type.
         mime_type: String,
     },
+    /// An embedded resource: the resource's contents inline (text or a base64
+    /// blob), carried in a message rather than referenced by URI.
+    Resource(ResourceContents),
+    /// A link to a resource by URI + descriptor (name/title/MIME/size), without
+    /// its contents — the client can `resources/read` it.
+    ResourceLink(Resource),
 }
 
 impl Content {
@@ -78,6 +84,16 @@ impl Content {
             data: data.into(),
             mime_type: mime_type.into(),
         }
+    }
+
+    /// An embedded-resource content block carrying the resource contents inline.
+    pub fn resource(contents: ResourceContents) -> Self {
+        Self::Resource(contents)
+    }
+
+    /// A resource-link content block referencing a resource by URI.
+    pub fn resource_link(resource: Resource) -> Self {
+        Self::ResourceLink(resource)
     }
 }
 
@@ -272,7 +288,7 @@ impl ListParams {
 // ---- resources ----------------------------------------------------------------
 
 /// A resource descriptor (`resources/list`).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Resource {
     /// The resource URI (what `resources/read` references).
@@ -326,7 +342,7 @@ impl Resource {
 
 /// The contents of a read resource (`resources/read`): UTF-8 text or a
 /// base64-encoded binary blob. `#[non_exhaustive]` so future kinds slot in.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ResourceContents {
     /// Text contents.
@@ -938,6 +954,26 @@ impl From<Content> for draft::ContentBlock {
                     type_: "audio".to_string(),
                 })
             }
+            Content::Resource(contents) => {
+                draft::ContentBlock::EmbeddedResource(draft::EmbeddedResource {
+                    annotations: None,
+                    meta: None,
+                    resource: contents.into(),
+                    type_: "resource".to_string(),
+                })
+            }
+            Content::ResourceLink(r) => draft::ContentBlock::ResourceLink(draft::ResourceLink {
+                annotations: None,
+                description: r.description,
+                icons: alloc::vec::Vec::new(),
+                meta: None,
+                mime_type: r.mime_type,
+                name: r.name,
+                size: r.size.and_then(|s| i64::try_from(s).ok()),
+                title: r.title,
+                type_: "resource_link".to_string(),
+                uri: r.uri,
+            }),
         }
     }
 }
@@ -1038,6 +1074,37 @@ impl From<ResourceContents> for draft::ReadResourceResultContentsItem {
                     uri,
                 },
             ),
+        }
+    }
+}
+
+impl From<ResourceContents> for draft::EmbeddedResourceResource {
+    fn from(c: ResourceContents) -> Self {
+        match c {
+            ResourceContents::Text {
+                uri,
+                mime_type,
+                text,
+            } => {
+                draft::EmbeddedResourceResource::TextResourceContents(draft::TextResourceContents {
+                    meta: None,
+                    mime_type,
+                    text,
+                    uri,
+                })
+            }
+            ResourceContents::Blob {
+                uri,
+                mime_type,
+                blob,
+            } => {
+                draft::EmbeddedResourceResource::BlobResourceContents(draft::BlobResourceContents {
+                    blob,
+                    meta: None,
+                    mime_type,
+                    uri,
+                })
+            }
         }
     }
 }
@@ -1220,6 +1287,26 @@ impl From<Content> for legacy::ContentBlock {
                     type_: "audio".to_string(),
                 })
             }
+            Content::Resource(contents) => {
+                legacy::ContentBlock::EmbeddedResource(legacy::EmbeddedResource {
+                    annotations: None,
+                    meta: Map::new(),
+                    resource: contents.into(),
+                    type_: "resource".to_string(),
+                })
+            }
+            Content::ResourceLink(r) => legacy::ContentBlock::ResourceLink(legacy::ResourceLink {
+                annotations: None,
+                description: r.description,
+                icons: alloc::vec::Vec::new(),
+                meta: Map::new(),
+                mime_type: r.mime_type,
+                name: r.name,
+                size: r.size.and_then(|s| i64::try_from(s).ok()),
+                title: r.title,
+                type_: "resource_link".to_string(),
+                uri: r.uri,
+            }),
         }
     }
 }
@@ -1343,6 +1430,37 @@ impl From<ResourceContents> for legacy::ReadResourceResultContentsItem {
                 mime_type,
                 blob,
             } => legacy::ReadResourceResultContentsItem::BlobResourceContents(
+                legacy::BlobResourceContents {
+                    blob,
+                    meta: Map::new(),
+                    mime_type,
+                    uri,
+                },
+            ),
+        }
+    }
+}
+
+impl From<ResourceContents> for legacy::EmbeddedResourceResource {
+    fn from(c: ResourceContents) -> Self {
+        match c {
+            ResourceContents::Text {
+                uri,
+                mime_type,
+                text,
+            } => legacy::EmbeddedResourceResource::TextResourceContents(
+                legacy::TextResourceContents {
+                    meta: Map::new(),
+                    mime_type,
+                    text,
+                    uri,
+                },
+            ),
+            ResourceContents::Blob {
+                uri,
+                mime_type,
+                blob,
+            } => legacy::EmbeddedResourceResource::BlobResourceContents(
                 legacy::BlobResourceContents {
                     blob,
                     meta: Map::new(),
@@ -1485,20 +1603,9 @@ impl From<CompleteResult> for legacy::CompleteResult {
 // (`resultType` / `cacheScope` / `ttlMs` / `_meta` / annotations / icons) are
 // dropped — they aren't part of the cross-version surface a client consumes.
 //
-// **Content narrowing is lossy.** Neutral `Content` models only text (Phase 9
-// adds the image/audio/resource typing pass — PLAN §6). A non-text wire block
-// is preserved as its JSON serialization wrapped in `Content::Text` rather than
-// silently dropped, so no information is lost even though the kind is flattened.
-
-/// Wrap a non-text wire content block as text by serializing it — lossy on the
-/// content *kind*, lossless on the payload. Shared by both versions.
-fn content_block_json_fallback<T: serde::Serialize>(block: &T) -> Content {
-    let json = serde_json::to_value(block).ok().map_or_else(
-        || "<unrepresentable content>".to_string(),
-        |v| v.to_string(),
-    );
-    Content::Text(json)
-}
+// **Content is fully modeled.** Neutral `Content` covers every wire content
+// block kind — text, image, audio, embedded resource, and resource link — so
+// inbound conversion is total (no lossy JSON-text fallback).
 
 impl From<draft::ContentBlock> for Content {
     fn from(c: draft::ContentBlock) -> Self {
@@ -1512,7 +1619,8 @@ impl From<draft::ContentBlock> for Content {
                 data: a.data,
                 mime_type: a.mime_type,
             },
-            other => content_block_json_fallback(&other),
+            draft::ContentBlock::EmbeddedResource(e) => Content::Resource(e.resource.into()),
+            draft::ContentBlock::ResourceLink(l) => Content::ResourceLink(l.into()),
         }
     }
 }
@@ -1561,6 +1669,36 @@ impl From<draft::Resource> for Resource {
             description: r.description,
             mime_type: r.mime_type,
             size: r.size.map(|s| u64::try_from(s).unwrap_or(0)),
+        }
+    }
+}
+
+impl From<draft::ResourceLink> for Resource {
+    fn from(l: draft::ResourceLink) -> Self {
+        Resource {
+            uri: l.uri,
+            name: l.name,
+            title: l.title,
+            description: l.description,
+            mime_type: l.mime_type,
+            size: l.size.map(|s| u64::try_from(s).unwrap_or(0)),
+        }
+    }
+}
+
+impl From<draft::EmbeddedResourceResource> for ResourceContents {
+    fn from(r: draft::EmbeddedResourceResource) -> Self {
+        match r {
+            draft::EmbeddedResourceResource::TextResourceContents(t) => ResourceContents::Text {
+                uri: t.uri,
+                mime_type: t.mime_type,
+                text: t.text,
+            },
+            draft::EmbeddedResourceResource::BlobResourceContents(b) => ResourceContents::Blob {
+                uri: b.uri,
+                mime_type: b.mime_type,
+                blob: b.blob,
+            },
         }
     }
 }
@@ -1709,7 +1847,8 @@ impl From<legacy::ContentBlock> for Content {
                 data: a.data,
                 mime_type: a.mime_type,
             },
-            other => content_block_json_fallback(&other),
+            legacy::ContentBlock::EmbeddedResource(e) => Content::Resource(e.resource.into()),
+            legacy::ContentBlock::ResourceLink(l) => Content::ResourceLink(l.into()),
         }
     }
 }
@@ -1760,6 +1899,36 @@ impl From<legacy::Resource> for Resource {
             description: r.description,
             mime_type: r.mime_type,
             size: r.size.map(|s| u64::try_from(s).unwrap_or(0)),
+        }
+    }
+}
+
+impl From<legacy::ResourceLink> for Resource {
+    fn from(l: legacy::ResourceLink) -> Self {
+        Resource {
+            uri: l.uri,
+            name: l.name,
+            title: l.title,
+            description: l.description,
+            mime_type: l.mime_type,
+            size: l.size.map(|s| u64::try_from(s).unwrap_or(0)),
+        }
+    }
+}
+
+impl From<legacy::EmbeddedResourceResource> for ResourceContents {
+    fn from(r: legacy::EmbeddedResourceResource) -> Self {
+        match r {
+            legacy::EmbeddedResourceResource::TextResourceContents(t) => ResourceContents::Text {
+                uri: t.uri,
+                mime_type: t.mime_type,
+                text: t.text,
+            },
+            legacy::EmbeddedResourceResource::BlobResourceContents(b) => ResourceContents::Blob {
+                uri: b.uri,
+                mime_type: b.mime_type,
+                blob: b.blob,
+            },
         }
     }
 }
@@ -2209,17 +2378,26 @@ mod tests {
     }
 
     #[test]
-    fn unmodeled_content_block_falls_back_to_json_text() {
-        // A block the neutral `Content` enum doesn't model (a resource link) is
-        // preserved as its JSON serialization rather than dropped.
-        let link: draft::ResourceLink = serde_json::from_value(json!({
-            "type": "resource_link", "uri": "file://x", "name": "x"
-        }))
-        .expect("resource link");
-        let neutral: Content = draft::ContentBlock::ResourceLink(link).into();
-        let Content::Text(json) = neutral else {
-            panic!("expected JSON text fallback")
-        };
-        assert!(json.contains("file://x"));
+    fn resource_and_resource_link_content_round_trip() {
+        for content in [
+            Content::resource(
+                ResourceContents::text("file://x", "hi").with_mime_type("text/plain"),
+            ),
+            Content::resource(
+                ResourceContents::blob("file://y", "Zm9v").with_mime_type("image/png"),
+            ),
+            Content::resource_link(
+                Resource::new("file://x", "x")
+                    .with_title("X")
+                    .with_mime_type("text/plain"),
+            ),
+        ] {
+            // draft
+            let draft_block: draft::ContentBlock = content.clone().into();
+            assert_eq!(Content::from(draft_block), content);
+            // legacy
+            let legacy_block: legacy::ContentBlock = content.clone().into();
+            assert_eq!(Content::from(legacy_block), content);
+        }
     }
 }
