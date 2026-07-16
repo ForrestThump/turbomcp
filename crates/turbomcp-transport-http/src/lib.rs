@@ -58,7 +58,10 @@
 //!   isn't on the allowlist is rejected with `403`. The default allowlist is
 //!   empty, so only `Origin`-less (non-browser) clients pass — the secure default
 //!   for a local server. Use [`HttpConfig::allow_origin`] /
-//!   [`HttpConfig::allow_any_origin`] to widen it.
+//!   [`HttpConfig::allow_any_origin`] to widen it. For defense in depth against
+//!   non-browser clients (which can spoof `Host` and send no `Origin`),
+//!   [`HttpConfig::allow_host`] pins the server's expected `Host`(s) and rejects
+//!   others with `403`.
 //! - **Body limit:** `POST` bodies above [`HttpConfig::max_body_bytes`] (default
 //!   1 MiB) are rejected with `413`.
 //! - **CORS:** off by default; [`HttpConfig::enable_cors`] adds a permissive
@@ -163,6 +166,19 @@ enum OriginPolicy {
     Any,
 }
 
+/// Where a request's `Host` header is checked against — DNS-rebinding defense in
+/// depth, complementing [`OriginPolicy`] for non-browser clients that can spoof
+/// `Host` (the `Origin` guard only covers browsers).
+#[derive(Clone, Debug)]
+enum HostPolicy {
+    /// Accept any `Host` (the default — suited to deployments behind a proxy or
+    /// load balancer that rewrites `Host`).
+    Any,
+    /// Reject any request whose `Host` isn't in this list. Lets a server that
+    /// knows its expected host(s) refuse a spoofed `Host`.
+    Allowlist(Vec<String>),
+}
+
 /// The well-known path RFC 9728 Protected Resource Metadata is served at.
 const RESOURCE_METADATA_PATH: &str = "/.well-known/oauth-protected-resource";
 
@@ -173,6 +189,7 @@ pub struct HttpConfig {
     path: String,
     max_body_bytes: usize,
     origins: OriginPolicy,
+    hosts: HostPolicy,
     cors: bool,
     shutdown: CancellationToken,
     sse_keepalive: Duration,
@@ -188,6 +205,7 @@ impl core::fmt::Debug for HttpConfig {
             .field("path", &self.path)
             .field("max_body_bytes", &self.max_body_bytes)
             .field("origins", &self.origins)
+            .field("hosts", &self.hosts)
             .field("cors", &self.cors)
             .field("sse_keepalive", &self.sse_keepalive)
             .field("authenticator", &self.authenticator.is_some())
@@ -204,6 +222,7 @@ impl Default for HttpConfig {
             path: "/mcp".to_owned(),
             max_body_bytes: 1 << 20, // 1 MiB
             origins: OriginPolicy::Allowlist(Vec::new()),
+            hosts: HostPolicy::Any,
             cors: false,
             shutdown: CancellationToken::new(),
             sse_keepalive: DEFAULT_SSE_KEEPALIVE,
@@ -252,6 +271,22 @@ impl HttpConfig {
     pub fn allow_any_origin(mut self) -> Self {
         self.origins = OriginPolicy::Any;
         self.cors = true;
+        self
+    }
+
+    /// Add an allowed `Host` (exact match, e.g. `localhost:8080` or
+    /// `mcp.example.com`). By default any `Host` is accepted; once at least one
+    /// host is allow-listed, a request whose `Host` isn't listed is rejected
+    /// with `403`. Combined with [`allow_origin`](Self::allow_origin) this
+    /// hardens the server against DNS-rebinding (a spoofed `Host`/`Origin` from
+    /// a non-browser client is refused). Leave unset behind a trusted proxy that
+    /// rewrites `Host`.
+    #[must_use]
+    pub fn allow_host(mut self, host: impl Into<String>) -> Self {
+        match &mut self.hosts {
+            HostPolicy::Allowlist(list) => list.push(host.into()),
+            HostPolicy::Any => self.hosts = HostPolicy::Allowlist(vec![host.into()]),
+        }
         self
     }
 
@@ -346,6 +381,7 @@ struct HttpState<S> {
     service: S,
     codec: DefaultCodec,
     origins: OriginPolicy,
+    hosts: HostPolicy,
     sse_keepalive: Duration,
     authenticator: Option<Arc<dyn HttpAuthenticator>>,
     rate_limiter: Option<Arc<dyn RateLimiter>>,
@@ -365,6 +401,7 @@ where
         service,
         codec: DefaultCodec::default(),
         origins: config.origins.clone(),
+        hosts: config.hosts.clone(),
         sse_keepalive: config.sse_keepalive,
         authenticator: config.authenticator.clone(),
         rate_limiter: config.rate_limiter.clone(),
@@ -436,6 +473,9 @@ where
     S::Future: Send + 'static,
 {
     if let Some(rejection) = check_origin(&state.origins, &headers) {
+        return rejection;
+    }
+    if let Some(rejection) = check_host(&state.hosts, &headers) {
         return rejection;
     }
 
@@ -850,6 +890,9 @@ where
     if let Some(rejection) = check_origin(&state.origins, &headers) {
         return rejection;
     }
+    if let Some(rejection) = check_host(&state.hosts, &headers) {
+        return rejection;
+    }
     // The GET stream is part of the protected resource; require auth too.
     let subject = match enforce_auth(&state, &headers, None).await {
         Ok(subject) => subject,
@@ -891,6 +934,9 @@ where
     S::Future: Send + 'static,
 {
     if let Some(rejection) = check_origin(&state.origins, &headers) {
+        return rejection;
+    }
+    if let Some(rejection) = check_host(&state.hosts, &headers) {
         return rejection;
     }
     if let Err(rejection) = enforce_auth(&state, &headers, None).await {
@@ -1126,6 +1172,23 @@ fn check_origin(policy: &OriginPolicy, headers: &HeaderMap) -> Option<Response> 
             let origin = origin.to_str().unwrap_or_default();
             (!list.iter().any(|allowed| allowed == origin))
                 .then(|| (StatusCode::FORBIDDEN, "origin not allowed").into_response())
+        }
+    }
+}
+
+/// Returns `Some(rejection)` if the request's `Host` is disallowed, else `None`.
+/// Unlike `Origin`, `Host` is always present, so `Allowlist` mode rejects a
+/// missing/unmatched `Host` — the point is to pin the server's expected host(s).
+fn check_host(policy: &HostPolicy, headers: &HeaderMap) -> Option<Response> {
+    match policy {
+        HostPolicy::Any => None,
+        HostPolicy::Allowlist(list) => {
+            let host = headers
+                .get(header::HOST)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default();
+            (!list.iter().any(|allowed| allowed == host))
+                .then(|| (StatusCode::FORBIDDEN, "host not allowed").into_response())
         }
     }
 }

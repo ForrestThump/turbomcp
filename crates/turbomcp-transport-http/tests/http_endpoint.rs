@@ -188,6 +188,40 @@ async fn allowlisted_origin_passes() {
 }
 
 #[tokio::test]
+async fn disallowed_host_is_rejected() {
+    // With a Host allowlist, a spoofed Host is forbidden — DNS-rebinding defense
+    // in depth (covers non-browser clients that don't send an Origin).
+    let req = Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::HOST, "evil.example.com")
+        .body(Body::from(
+            r#"{"jsonrpc":"2.0","id":1,"method":"server/discover"}"#,
+        ))
+        .unwrap();
+    let config = HttpConfig::new().allow_host("mcp.example.com");
+    let resp = app(config).oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn allowlisted_host_passes() {
+    let req = Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::HOST, "mcp.example.com")
+        .body(Body::from(
+            r#"{"jsonrpc":"2.0","id":1,"method":"server/discover"}"#,
+        ))
+        .unwrap();
+    let config = HttpConfig::new().allow_host("mcp.example.com");
+    let resp = app(config).oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
 async fn oversized_body_is_413() {
     let big = "x".repeat(2048);
     let body = format!(
