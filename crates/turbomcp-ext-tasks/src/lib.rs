@@ -256,7 +256,7 @@ impl Extension for TasksExtension {
             return SubscribeOutcome::NotApplicable;
         };
         // SEP-2663: a client requesting task notifications without declaring the
-        // extension capability is `-32003`.
+        // extension capability is `-32021`.
         if !client_declared {
             return SubscribeOutcome::MissingCapability;
         }

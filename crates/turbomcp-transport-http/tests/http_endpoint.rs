@@ -94,7 +94,10 @@ async fn discover_list_and_call_over_http() {
         "application/json"
     );
     let v = body_json(resp).await;
-    assert_eq!(v["result"]["serverInfo"]["name"], "calculator");
+    assert_eq!(
+        v["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+        "calculator"
+    );
 
     // tools/list (modern, version in _meta)
     let resp = app(HttpConfig::new())

@@ -1088,7 +1088,7 @@ async fn handle_subscriptions_listen<S: McpServerCore>(
         serde_json::to_value(&agreed).unwrap_or_else(|_| Value::Object(Map::new()));
     // Offer the raw `notifications` filter to each extension (it reads its own
     // fields). A non-declaring client requesting an extension's notifications
-    // is `-32003` (SEP-2663); accepted filters are merged into the ack.
+    // is `-32021` (SEP-2663); accepted filters are merged into the ack.
     if !extensions.is_empty() {
         let raw_notifications = req
             .params
@@ -1780,9 +1780,14 @@ fn build_discover_result<S: McpServerCore>(
         cache_scope: draft::DiscoverResultCacheScope::Private,
         capabilities,
         instructions: server.instructions(),
-        meta: None,
+        // The server's identity rides `_meta` (`io.modelcontextprotocol/
+        // serverInfo`) — the dedicated `DiscoverResult.serverInfo` field was
+        // removed from the draft.
+        meta: Some(draft::ResultMetaObject {
+            io_modelcontextprotocol_server_info: Some(to_draft_impl(server.server_info())),
+            extra: serde_json::Map::new(),
+        }),
         result_type: neutral::result_type::COMPLETE.to_string(),
-        server_info: to_draft_impl(server.server_info()),
         supported_versions: supported.iter().map(|v| v.as_str().to_owned()).collect(),
         ttl_ms: 0,
     }
@@ -2003,12 +2008,12 @@ fn error_response(id: RequestId, err: &McpError) -> JsonRpcMessage {
     JsonRpcResponse::error(id, mcp_to_jsonrpc_error(err)).into()
 }
 
-/// `-32003` Missing Required Client Capability (SEP-2663): the client requested
+/// `-32021` Missing Required Client Capability (SEP-2663): the client requested
 /// an extension's behavior without declaring its capability. The `data` names
 /// the required extension so the client can re-declare and retry.
 fn missing_capability_response(id: RequestId, extension_id: &str) -> JsonRpcMessage {
     let err = JsonRpcError {
-        code: -32003,
+        code: -32021,
         message: "missing required client capability".to_owned(),
         data: Some(serde_json::json!({
             "requiredCapabilities": { "extensions": { extension_id: {} } }

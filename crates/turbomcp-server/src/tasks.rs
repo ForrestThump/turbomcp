@@ -203,9 +203,12 @@ impl TaskStore {
         entry.status = TaskStatus::Cancelled;
         entry.status_message = Some("the task was cancelled by request".to_owned());
         // The underlying request never finished; its "result" is the
-        // cancellation error (implementation-defined code, LSP convention).
+        // cancellation error. The code is implementation-defined: MCP's
+        // error-code allocation policy reserves `-32000..-32019` for
+        // implementations (`-32800`, the LSP convention, sits inside
+        // JSON-RPC's *reserved* band and must not be used).
         entry.outcome = Some(Err(JsonRpcError {
-            code: -32800,
+            code: -32010,
             message: "task cancelled".to_owned(),
             data: None,
         }));
@@ -373,7 +376,7 @@ mod tests {
         );
 
         let outcome = s.wait_result("sess", &snap.task_id).await.unwrap();
-        assert_eq!(outcome.unwrap_err().code, -32800);
+        assert_eq!(outcome.unwrap_err().code, -32010);
     }
 
     #[tokio::test]

@@ -17,7 +17,7 @@ pub enum ProtocolError {
     /// A frame could not be parsed (JSON-RPC `-32700`).
     #[error("parse error: {0}")]
     Parse(String),
-    /// The request's protocol version is absent or unsupported (`-32004`).
+    /// The request's protocol version is absent or unsupported (`-32022`).
     #[error("unsupported protocol version (requested {requested:?}; supported {supported:?})")]
     UnsupportedVersion {
         /// The version the client asked for, if any.
@@ -25,7 +25,7 @@ pub enum ProtocolError {
         /// The versions this server accepts.
         supported: Vec<String>,
     },
-    /// A required capability for the requested method is not available (`-32003`).
+    /// A required capability for the requested method is not available (`-32021`).
     #[error("missing required capability: {0}")]
     MissingCapability(String),
     /// The request referenced a session this server does not know — expired,
@@ -51,8 +51,9 @@ impl ProtocolError {
     pub fn jsonrpc_code(&self) -> i32 {
         match self {
             Self::Parse(_) => -32700,
-            Self::UnsupportedVersion { .. } => -32004,
-            Self::MissingCapability(_) => -32003,
+            // Spec-allocated codes (draft error-code allocation policy).
+            Self::UnsupportedVersion { .. } => -32022,
+            Self::MissingCapability(_) => -32021,
             Self::UnknownSession(_) => -32002,
             Self::Transport(_) | Self::ServerShuttingDown => -32001,
             Self::Internal(_) => -32603,

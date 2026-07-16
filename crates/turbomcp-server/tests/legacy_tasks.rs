@@ -218,7 +218,7 @@ async fn cancel_transitions_and_terminal_cancel_is_rejected() {
         JsonRpcRequest::new(3, "tasks/result", Some(json!({ "taskId": task_id }))),
     )
     .await;
-    assert_eq!(r.error.expect("cancelled outcome").code, -32800);
+    assert_eq!(r.error.expect("cancelled outcome").code, -32010);
 
     // Cancelling a terminal task → -32602 (spec §Error Handling).
     let r = raw(

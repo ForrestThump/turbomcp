@@ -47,7 +47,7 @@ pub(crate) const HEADER_PARAMS_META_KEY: &str = "io.turbomcp.internal/headerPara
 /// How a [`Client`] decides which protocol version to speak.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ConnectMode {
-    /// Probe the modern (`server/discover`) path first; on `-32601`/`-32004`
+    /// Probe the modern (`server/discover`) path first; on `-32601`/`-32022`
     /// fall back to the legacy `initialize` handshake. The default.
     #[default]
     Auto,
@@ -133,9 +133,14 @@ impl ClientBuilder {
             ConnectMode::Legacy => self.legacy_handshake(&conn).await?,
             ConnectMode::Auto => match self.modern_handshake(&conn).await {
                 Ok(o) => o,
-                // -32601 method-not-found (no discover) / -32004 unsupported
-                // version → the server only speaks legacy.
-                Err(ClientError::Rpc(e)) if e.code == -32601 || e.code == -32004 => {
+                // -32601 method-not-found (no discover) / unsupported version
+                // → the server only speaks legacy. `-32022` is the current
+                // UnsupportedProtocolVersionError code; `-32004` is the
+                // pre-renumber value, tolerated for peers tracking an older
+                // draft.
+                Err(ClientError::Rpc(e))
+                    if e.code == -32601 || e.code == -32022 || e.code == -32004 =>
+                {
                     self.legacy_handshake(&conn).await?
                 }
                 Err(other) => return Err(other),
@@ -209,13 +214,23 @@ struct Handshake {
 
 impl Handshake {
     /// Pull `serverInfo` / `capabilities` / `instructions` out of an
-    /// `initialize` or `server/discover` result (both share these field names);
-    /// missing fields degrade gracefully rather than fail the handshake.
+    /// `initialize` or `server/discover` result; missing fields degrade
+    /// gracefully rather than fail the handshake.
+    ///
+    /// The server identity lives at the top level on legacy `initialize`
+    /// (`serverInfo`) and in the result `_meta` on the draft
+    /// (`io.modelcontextprotocol/serverInfo` — the dedicated `DiscoverResult`
+    /// field was removed upstream).
     fn from_result(version: ProtocolVersion, result: &Value) -> Self {
         Self {
             version,
             server_info: result
                 .get("serverInfo")
+                .or_else(|| {
+                    result
+                        .get("_meta")
+                        .and_then(|m| m.get("io.modelcontextprotocol/serverInfo"))
+                })
                 .and_then(|v| serde_json::from_value(v.clone()).ok()),
             server_capabilities: result
                 .get("capabilities")

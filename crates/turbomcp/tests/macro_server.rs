@@ -80,8 +80,11 @@ async fn call(req: JsonRpcRequest) -> serde_json::Value {
 #[tokio::test]
 async fn discover_derives_capabilities_from_impls() {
     let result = call(JsonRpcRequest::new(1, "server/discover", None)).await;
-    assert_eq!(result["serverInfo"]["name"], "demo");
-    assert_eq!(result["serverInfo"]["title"], "Demo Server");
+    // The draft carries the server identity in the result `_meta` (the
+    // dedicated `DiscoverResult.serverInfo` field was removed upstream).
+    let server_info = &result["_meta"]["io.modelcontextprotocol/serverInfo"];
+    assert_eq!(server_info["name"], "demo");
+    assert_eq!(server_info["title"], "Demo Server");
     assert_eq!(
         result["instructions"],
         "A demo server exercising every macro."

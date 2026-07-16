@@ -184,6 +184,66 @@ pub fn open_embedded_schemas(schema: &mut Value) {
     }
 }
 
+/// Open every `_meta` object definition so typify keeps arbitrary keys.
+///
+/// `_meta` is an open map by spec — `MetaObject` carries arbitrary
+/// reverse-DNS-namespaced keys, and the specialized shapes
+/// (`RequestMetaObject`, `ResultMetaObject`, `NotificationMetaObject`,
+/// `SubscriptionsListenResultMeta`) extend it with *reserved* keys while
+/// keeping the map open. JSON Schema treats a `properties`-only object as
+/// open, but typify emits a CLOSED struct for it, so round-tripping a message
+/// through the typed structs would silently drop every non-reserved `_meta`
+/// key (trace context, user metadata). Inject `additionalProperties: {}` into
+/// every definition referenced by a `_meta` property so typify emits a
+/// flattened `extra` catch-all map, mirroring `open_embedded_schemas`.
+pub fn open_meta_objects(schema: &mut Value) {
+    let mut targets: Vec<String> = Vec::new();
+    collect_meta_refs(schema, &mut targets);
+
+    let defs_key = if schema.get("$defs").is_some() {
+        "$defs"
+    } else {
+        "definitions"
+    };
+    let Some(defs) = schema.get_mut(defs_key).and_then(Value::as_object_mut) else {
+        return;
+    };
+    for name in targets {
+        if let Some(Value::Object(def)) = defs.get_mut(&name)
+            && def.get("type").and_then(Value::as_str) == Some("object")
+            && def.contains_key("properties")
+            && !def.contains_key("additionalProperties")
+        {
+            def.insert("additionalProperties".into(), Value::Object(Map::new()));
+        }
+    }
+
+    /// Collect the local `$ref` targets of every property named `_meta`.
+    fn collect_meta_refs(value: &Value, targets: &mut Vec<String>) {
+        match value {
+            Value::Object(map) => {
+                if let Some(Value::Object(props)) = map.get("properties")
+                    && let Some(meta) = props.get("_meta")
+                    && let Some(reference) = meta.get("$ref").and_then(Value::as_str)
+                    && let Some(name) = reference.rsplit('/').next()
+                    && !targets.iter().any(|t| t == name)
+                {
+                    targets.push(name.to_owned());
+                }
+                for child in map.values() {
+                    collect_meta_refs(child, targets);
+                }
+            }
+            Value::Array(items) => {
+                for child in items {
+                    collect_meta_refs(child, targets);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,6 +310,45 @@ mod tests {
         assert!(
             name.get("additionalProperties").is_none(),
             "a non-schema object stays closed"
+        );
+    }
+
+    #[test]
+    fn opens_meta_object_definitions() {
+        let mut schema = json!({
+            "$defs": {
+                "ResultMetaObject": {
+                    "type": "object",
+                    "properties": {
+                        "io.modelcontextprotocol/serverInfo": { "type": "object" }
+                    }
+                },
+                // Same shape but never referenced from a `_meta` property —
+                // must stay closed.
+                "NotMeta": {
+                    "type": "object",
+                    "properties": { "x": { "type": "string" } }
+                },
+                "SomeResult": {
+                    "type": "object",
+                    "properties": {
+                        "_meta": { "$ref": "#/$defs/ResultMetaObject" },
+                        "other": { "$ref": "#/$defs/NotMeta" }
+                    }
+                }
+            }
+        });
+        open_meta_objects(&mut schema);
+        assert_eq!(
+            schema["$defs"]["ResultMetaObject"]["additionalProperties"],
+            json!({}),
+            "meta object opened"
+        );
+        assert!(
+            schema["$defs"]["NotMeta"]
+                .get("additionalProperties")
+                .is_none(),
+            "non-meta object stays closed"
         );
     }
 

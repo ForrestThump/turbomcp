@@ -1137,13 +1137,14 @@ fn message_has_version(msg: &JsonRpcMessage) -> bool {
         .is_some()
 }
 
-/// `400` for an explicit but unsupported `MCP-Protocol-Version` header.
+/// `400` for an explicit but unsupported `MCP-Protocol-Version` header
+/// (`UnsupportedProtocolVersionError`, `-32022`).
 fn version_header_rejection(requested: &str) -> Response {
     let body = serde_json::json!({
         "jsonrpc": "2.0",
         "id": null,
         "error": {
-            "code": -32004,
+            "code": -32022,
             "message": format!("unsupported MCP-Protocol-Version header: {requested}"),
         },
     });

@@ -53,14 +53,15 @@ pub enum McpError {
     /// Transport-level failure (connection closed, I/O error). JSON-RPC
     /// `-32001`, HTTP 503. Retryable.
     Transport(String),
-    /// The requested protocol version is not supported. JSON-RPC `-32004`,
+    /// The requested protocol version is not supported. JSON-RPC `-32022`,
     /// HTTP 400. Carries the requested version (or `None` when absent).
     UnsupportedProtocolVersion(String),
     /// The request requires a client capability that was not advertised.
-    /// JSON-RPC `-32003`, HTTP 400.
+    /// JSON-RPC `-32021`, HTTP 400.
     MissingRequiredCapability(String),
-    /// A mirrored `Mcp-Param-*` header did not match the request body.
-    /// JSON-RPC `-32001`, HTTP 400.
+    /// An HTTP header did not match the corresponding request-body value
+    /// (`MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name`, `Mcp-Param-*`).
+    /// JSON-RPC `-32020`, HTTP 400.
     HeaderMismatch(String),
     /// MRTR abort sentinel (SEP-2322): a handler asked the client for input
     /// (`ctx.client.elicit(…)`) that the request didn't carry yet. It exists
@@ -130,10 +131,12 @@ impl McpError {
             Self::Authentication(_)
             | Self::PermissionDenied(_)
             | Self::Timeout(_)
-            | Self::Transport(_)
-            | Self::HeaderMismatch(_) => -32001,
-            Self::MissingRequiredCapability(_) => -32003,
-            Self::UnsupportedProtocolVersion(_) => -32004,
+            | Self::Transport(_) => -32001,
+            // Spec-allocated codes (draft error-code allocation policy:
+            // `-32020..-32099` is reserved for the MCP specification).
+            Self::HeaderMismatch(_) => -32020,
+            Self::MissingRequiredCapability(_) => -32021,
+            Self::UnsupportedProtocolVersion(_) => -32022,
         }
     }
 
@@ -208,12 +211,13 @@ mod tests {
         assert_eq!(McpError::method_not_found("x").jsonrpc_code(), -32601);
         assert_eq!(
             McpError::UnsupportedProtocolVersion("x".into()).jsonrpc_code(),
-            -32004
+            -32022
         );
         assert_eq!(
             McpError::MissingRequiredCapability("x".into()).jsonrpc_code(),
-            -32003
+            -32021
         );
+        assert_eq!(McpError::HeaderMismatch("x".into()).jsonrpc_code(), -32020);
         assert_eq!(McpError::authentication("x").http_status(), 401);
         assert_eq!(McpError::permission_denied("x").http_status(), 403);
         assert_eq!(McpError::timeout("x").http_status(), 504);

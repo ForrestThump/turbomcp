@@ -282,7 +282,11 @@ mod tests {
             panic!("expected response")
         };
         let result = r.result.expect("discover result");
-        assert_eq!(result["serverInfo"]["name"], "calculator");
+        // Server identity rides `_meta` on the draft (dedicated field removed).
+        assert_eq!(
+            result["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+            "calculator"
+        );
         assert_eq!(result["capabilities"]["tools"]["listChanged"], true);
         assert_eq!(result["resultType"], "complete");
         let versions = result["supportedVersions"].as_array().unwrap();
@@ -329,7 +333,7 @@ mod tests {
             panic!()
         };
         let err = r.error.expect("should be an error");
-        assert_eq!(err.code, -32004);
+        assert_eq!(err.code, -32022);
     }
 
     #[tokio::test]

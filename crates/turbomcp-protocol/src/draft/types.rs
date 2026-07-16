@@ -312,10 +312,10 @@ pub struct BooleanSchema {
 ///  ],
 ///  "properties": {
 ///    "_meta": {
-///      "$ref": "#/$defs/MetaObject"
+///      "$ref": "#/$defs/ResultMetaObject"
 ///    },
 ///    "cacheScope": {
-///      "description": "Indicates the intended scope of the cached response, analogous to HTTP\n`Cache-Control: public` vs `Cache-Control: private`.\n\n- `\"public\"`: Any client or intermediary (e.g., shared gateway, proxy)\n  MAY cache the response and serve it to any user.\n- `\"private\"`: Only the requesting user's client MAY cache the response.\n  Shared caches (e.g., multi-tenant gateways) MUST NOT serve a cached\n  copy to a different user.",
+///      "description": "Indicates the intended scope of the cached response, analogous to HTTP\n`Cache-Control: public` vs `Cache-Control: private`.\n\n- `\"public\"`: The response does not contain user-specific data. Any\n  client or intermediary (e.g., shared gateway, caching proxy) MAY cache\n  the response and serve it across authorization contexts.\n- `\"private\"`: The response MAY be cached and reused only within the\n  same authorization context. Caches MUST NOT be shared across\n  authorization contexts (e.g., a different access token requires a\n  different cache).",
 ///      "type": "string",
 ///      "enum": [
 ///        "private",
@@ -340,11 +340,13 @@ pub struct CacheableResult {
     /**Indicates the intended scope of the cached response, analogous to HTTP
     `Cache-Control: public` vs `Cache-Control: private`.
 
-    - `"public"`: Any client or intermediary (e.g., shared gateway, proxy)
-      MAY cache the response and serve it to any user.
-    - `"private"`: Only the requesting user's client MAY cache the response.
-      Shared caches (e.g., multi-tenant gateways) MUST NOT serve a cached
-      copy to a different user.*/
+    - `"public"`: The response does not contain user-specific data. Any
+      client or intermediary (e.g., shared gateway, caching proxy) MAY cache
+      the response and serve it across authorization contexts.
+    - `"private"`: The response MAY be cached and reused only within the
+      same authorization context. Caches MUST NOT be shared across
+      authorization contexts (e.g., a different access token requires a
+      different cache).*/
     #[serde(rename = "cacheScope")]
     pub cache_scope: CacheableResultCacheScope,
     #[serde(
@@ -352,7 +354,7 @@ pub struct CacheableResult {
         default,
         skip_serializing_if = "::core::option::Option::is_none"
     )]
-    pub meta: ::core::option::Option<MetaObject>,
+    pub meta: ::core::option::Option<ResultMetaObject>,
     /**Indicates the type of the result, which allows the client to determine
     how to parse the result object.
 
@@ -376,17 +378,19 @@ pub struct CacheableResult {
 /**Indicates the intended scope of the cached response, analogous to HTTP
 `Cache-Control: public` vs `Cache-Control: private`.
 
-- `"public"`: Any client or intermediary (e.g., shared gateway, proxy)
-  MAY cache the response and serve it to any user.
-- `"private"`: Only the requesting user's client MAY cache the response.
-  Shared caches (e.g., multi-tenant gateways) MUST NOT serve a cached
-  copy to a different user.*/
+- `"public"`: The response does not contain user-specific data. Any
+  client or intermediary (e.g., shared gateway, caching proxy) MAY cache
+  the response and serve it across authorization contexts.
+- `"private"`: The response MAY be cached and reused only within the
+  same authorization context. Caches MUST NOT be shared across
+  authorization contexts (e.g., a different access token requires a
+  different cache).*/
 ///
 /// <details><summary>JSON schema</summary>
 ///
 /// ```json
 ///{
-///  "description": "Indicates the intended scope of the cached response, analogous to HTTP\n`Cache-Control: public` vs `Cache-Control: private`.\n\n- `\"public\"`: Any client or intermediary (e.g., shared gateway, proxy)\n  MAY cache the response and serve it to any user.\n- `\"private\"`: Only the requesting user's client MAY cache the response.\n  Shared caches (e.g., multi-tenant gateways) MUST NOT serve a cached\n  copy to a different user.",
+///  "description": "Indicates the intended scope of the cached response, analogous to HTTP\n`Cache-Control: public` vs `Cache-Control: private`.\n\n- `\"public\"`: The response does not contain user-specific data. Any\n  client or intermediary (e.g., shared gateway, caching proxy) MAY cache\n  the response and serve it across authorization contexts.\n- `\"private\"`: The response MAY be cached and reused only within the\n  same authorization context. Caches MUST NOT be shared across\n  authorization contexts (e.g., a different access token requires a\n  different cache).",
 ///  "type": "string",
 ///  "enum": [
 ///    "private",
@@ -564,7 +568,7 @@ pub struct CallToolRequestParams {
 ///  ],
 ///  "properties": {
 ///    "_meta": {
-///      "$ref": "#/$defs/MetaObject"
+///      "$ref": "#/$defs/ResultMetaObject"
 ///    },
 ///    "content": {
 ///      "description": "A list of content objects that represent the unstructured result of the tool call.",
@@ -615,7 +619,7 @@ pub struct CallToolResult {
         default,
         skip_serializing_if = "::core::option::Option::is_none"
     )]
-    pub meta: ::core::option::Option<MetaObject>,
+    pub meta: ::core::option::Option<ResultMetaObject>,
     /**Indicates the type of the result, which allows the client to determine
     how to parse the result object.
 
@@ -710,7 +714,9 @@ impl ::core::convert::From<CallToolResult> for CallToolResultResponseResult {
         Self::CallToolResult(value)
     }
 }
-/**This notification can be sent by either side to indicate that it is cancelling a previously-issued request.
+/**This notification is sent by the client to indicate that it is cancelling a request it previously issued.
+
+On stdio, the server also sends this notification, solely to terminate a {@link SubscriptionsListenRequestsubscriptions/listen} stream: it references the ID of the `subscriptions/listen` request that opened the stream. Servers MUST NOT use this notification to cancel any other request.
 
 The request SHOULD still be in-flight, but due to communication latency, it is always possible that this notification MAY arrive after the request has already finished.
 
@@ -720,7 +726,7 @@ This notification indicates that the result will be unused, so any associated pr
 ///
 /// ```json
 ///{
-///  "description": "This notification can be sent by either side to indicate that it is cancelling a previously-issued request.\n\nThe request SHOULD still be in-flight, but due to communication latency, it is always possible that this notification MAY arrive after the request has already finished.\n\nThis notification indicates that the result will be unused, so any associated processing SHOULD cease.",
+///  "description": "This notification is sent by the client to indicate that it is cancelling a request it previously issued.\n\nOn stdio, the server also sends this notification, solely to terminate a {@link SubscriptionsListenRequestsubscriptions/listen} stream: it references the ID of the `subscriptions/listen` request that opened the stream. Servers MUST NOT use this notification to cancel any other request.\n\nThe request SHOULD still be in-flight, but due to communication latency, it is always possible that this notification MAY arrive after the request has already finished.\n\nThis notification indicates that the result will be unused, so any associated processing SHOULD cease.",
 ///  "type": "object",
 ///  "required": [
 ///    "jsonrpc",
@@ -757,16 +763,19 @@ pub struct CancelledNotification {
 ///{
 ///  "description": "Parameters for a `notifications/cancelled` notification.",
 ///  "type": "object",
+///  "required": [
+///    "requestId"
+///  ],
 ///  "properties": {
 ///    "_meta": {
-///      "$ref": "#/$defs/MetaObject"
+///      "$ref": "#/$defs/NotificationMetaObject"
 ///    },
 ///    "reason": {
 ///      "description": "An optional string describing the reason for the cancellation. This MAY be logged or presented to the user.",
 ///      "type": "string"
 ///    },
 ///    "requestId": {
-///      "description": "The ID of the request to cancel.\n\nThis MUST correspond to the ID of a request previously issued in the same direction.",
+///      "description": "The ID of the request to cancel.\n\nThis MUST correspond to the ID of a request the client previously issued.",
 ///      "$ref": "#/$defs/RequestId"
 ///    }
 ///  }
@@ -780,28 +789,15 @@ pub struct CancelledNotificationParams {
         default,
         skip_serializing_if = "::core::option::Option::is_none"
     )]
-    pub meta: ::core::option::Option<MetaObject>,
+    pub meta: ::core::option::Option<NotificationMetaObject>,
     ///An optional string describing the reason for the cancellation. This MAY be logged or presented to the user.
     #[serde(default, skip_serializing_if = "::core::option::Option::is_none")]
     pub reason: ::core::option::Option<::alloc::string::String>,
     /**The ID of the request to cancel.
 
-    This MUST correspond to the ID of a request previously issued in the same direction.*/
-    #[serde(
-        rename = "requestId",
-        default,
-        skip_serializing_if = "::core::option::Option::is_none"
-    )]
-    pub request_id: ::core::option::Option<RequestId>,
-}
-impl ::core::default::Default for CancelledNotificationParams {
-    fn default() -> Self {
-        Self {
-            meta: Default::default(),
-            reason: Default::default(),
-            request_id: Default::default(),
-        }
-    }
+    This MUST correspond to the ID of a request the client previously issued.*/
+    #[serde(rename = "requestId")]
+    pub request_id: RequestId,
 }
 ///Capabilities a client may support. Known capabilities are defined here, in this schema, but this is not a closed set: any client can define its own, additional capabilities.
 ///
@@ -971,38 +967,46 @@ impl ::core::default::Default for ClientCapabilitiesSampling {
         }
     }
 }
-///`ClientNotification`
+/**This notification is sent by the client to indicate that it is cancelling a request it previously issued.
+
+On stdio, the server also sends this notification, solely to terminate a {@link SubscriptionsListenRequestsubscriptions/listen} stream: it references the ID of the `subscriptions/listen` request that opened the stream. Servers MUST NOT use this notification to cancel any other request.
+
+The request SHOULD still be in-flight, but due to communication latency, it is always possible that this notification MAY arrive after the request has already finished.
+
+This notification indicates that the result will be unused, so any associated processing SHOULD cease.*/
 ///
 /// <details><summary>JSON schema</summary>
 ///
 /// ```json
 ///{
-///  "anyOf": [
-///    {
-///      "$ref": "#/$defs/CancelledNotification"
+///  "description": "This notification is sent by the client to indicate that it is cancelling a request it previously issued.\n\nOn stdio, the server also sends this notification, solely to terminate a {@link SubscriptionsListenRequestsubscriptions/listen} stream: it references the ID of the `subscriptions/listen` request that opened the stream. Servers MUST NOT use this notification to cancel any other request.\n\nThe request SHOULD still be in-flight, but due to communication latency, it is always possible that this notification MAY arrive after the request has already finished.\n\nThis notification indicates that the result will be unused, so any associated processing SHOULD cease.",
+///  "type": "object",
+///  "required": [
+///    "jsonrpc",
+///    "method",
+///    "params"
+///  ],
+///  "properties": {
+///    "jsonrpc": {
+///      "type": "string",
+///      "const": "2.0"
 ///    },
-///    {
-///      "$ref": "#/$defs/ProgressNotification"
+///    "method": {
+///      "type": "string",
+///      "const": "notifications/cancelled"
+///    },
+///    "params": {
+///      "$ref": "#/$defs/CancelledNotificationParams"
 ///    }
-///  ]
+///  }
 ///}
 /// ```
 /// </details>
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
-#[serde(untagged)]
-pub enum ClientNotification {
-    CancelledNotification(CancelledNotification),
-    ProgressNotification(ProgressNotification),
-}
-impl ::core::convert::From<CancelledNotification> for ClientNotification {
-    fn from(value: CancelledNotification) -> Self {
-        Self::CancelledNotification(value)
-    }
-}
-impl ::core::convert::From<ProgressNotification> for ClientNotification {
-    fn from(value: ProgressNotification) -> Self {
-        Self::ProgressNotification(value)
-    }
+pub struct ClientNotification {
+    pub jsonrpc: ::alloc::string::String,
+    pub method: ::alloc::string::String,
+    pub params: CancelledNotificationParams,
 }
 ///`ClientRequest`
 ///
@@ -1366,7 +1370,7 @@ impl ::core::convert::From<ResourceTemplateReference> for CompleteRequestParamsR
 ///  ],
 ///  "properties": {
 ///    "_meta": {
-///      "$ref": "#/$defs/MetaObject"
+///      "$ref": "#/$defs/ResultMetaObject"
 ///    },
 ///    "completion": {
 ///      "type": "object",
@@ -1408,7 +1412,7 @@ pub struct CompleteResult {
         default,
         skip_serializing_if = "::core::option::Option::is_none"
     )]
-    pub meta: ::core::option::Option<MetaObject>,
+    pub meta: ::core::option::Option<ResultMetaObject>,
     /**Indicates the type of the result, which allows the client to determine
     how to parse the result object.
 
@@ -2061,16 +2065,15 @@ pub struct DiscoverRequest {
 ///    "cacheScope",
 ///    "capabilities",
 ///    "resultType",
-///    "serverInfo",
 ///    "supportedVersions",
 ///    "ttlMs"
 ///  ],
 ///  "properties": {
 ///    "_meta": {
-///      "$ref": "#/$defs/MetaObject"
+///      "$ref": "#/$defs/ResultMetaObject"
 ///    },
 ///    "cacheScope": {
-///      "description": "Indicates the intended scope of the cached response, analogous to HTTP\n`Cache-Control: public` vs `Cache-Control: private`.\n\n- `\"public\"`: Any client or intermediary (e.g., shared gateway, proxy)\n  MAY cache the response and serve it to any user.\n- `\"private\"`: Only the requesting user's client MAY cache the response.\n  Shared caches (e.g., multi-tenant gateways) MUST NOT serve a cached\n  copy to a different user.",
+///      "description": "Indicates the intended scope of the cached response, analogous to HTTP\n`Cache-Control: public` vs `Cache-Control: private`.\n\n- `\"public\"`: The response does not contain user-specific data. Any\n  client or intermediary (e.g., shared gateway, caching proxy) MAY cache\n  the response and serve it across authorization contexts.\n- `\"private\"`: The response MAY be cached and reused only within the\n  same authorization context. Caches MUST NOT be shared across\n  authorization contexts (e.g., a different access token requires a\n  different cache).",
 ///      "type": "string",
 ///      "enum": [
 ///        "private",
@@ -2088,10 +2091,6 @@ pub struct DiscoverRequest {
 ///    "resultType": {
 ///      "description": "Indicates the type of the result, which allows the client to determine\nhow to parse the result object.\n\nServers implementing this protocol version MUST include this field.\nFor backward compatibility, when a client receives a result from a\nserver implementing an earlier protocol version (which does not include\n`resultType`), the client MUST treat the absent field as `\"complete\"`.",
 ///      "type": "string"
-///    },
-///    "serverInfo": {
-///      "description": "Information about the server software implementation.",
-///      "$ref": "#/$defs/Implementation"
 ///    },
 ///    "supportedVersions": {
 ///      "description": "MCP Protocol Versions this server supports. The client should choose a\nversion from this list for use in subsequent requests.",
@@ -2114,11 +2113,13 @@ pub struct DiscoverResult {
     /**Indicates the intended scope of the cached response, analogous to HTTP
     `Cache-Control: public` vs `Cache-Control: private`.
 
-    - `"public"`: Any client or intermediary (e.g., shared gateway, proxy)
-      MAY cache the response and serve it to any user.
-    - `"private"`: Only the requesting user's client MAY cache the response.
-      Shared caches (e.g., multi-tenant gateways) MUST NOT serve a cached
-      copy to a different user.*/
+    - `"public"`: The response does not contain user-specific data. Any
+      client or intermediary (e.g., shared gateway, caching proxy) MAY cache
+      the response and serve it across authorization contexts.
+    - `"private"`: The response MAY be cached and reused only within the
+      same authorization context. Caches MUST NOT be shared across
+      authorization contexts (e.g., a different access token requires a
+      different cache).*/
     #[serde(rename = "cacheScope")]
     pub cache_scope: DiscoverResultCacheScope,
     ///The capabilities of the server.
@@ -2136,7 +2137,7 @@ pub struct DiscoverResult {
         default,
         skip_serializing_if = "::core::option::Option::is_none"
     )]
-    pub meta: ::core::option::Option<MetaObject>,
+    pub meta: ::core::option::Option<ResultMetaObject>,
     /**Indicates the type of the result, which allows the client to determine
     how to parse the result object.
 
@@ -2146,9 +2147,6 @@ pub struct DiscoverResult {
     `resultType`), the client MUST treat the absent field as `"complete"`.*/
     #[serde(rename = "resultType")]
     pub result_type: ::alloc::string::String,
-    ///Information about the server software implementation.
-    #[serde(rename = "serverInfo")]
-    pub server_info: Implementation,
     /**MCP Protocol Versions this server supports. The client should choose a
     version from this list for use in subsequent requests.*/
     #[serde(rename = "supportedVersions")]
@@ -2167,17 +2165,19 @@ pub struct DiscoverResult {
 /**Indicates the intended scope of the cached response, analogous to HTTP
 `Cache-Control: public` vs `Cache-Control: private`.
 
-- `"public"`: Any client or intermediary (e.g., shared gateway, proxy)
-  MAY cache the response and serve it to any user.
-- `"private"`: Only the requesting user's client MAY cache the response.
-  Shared caches (e.g., multi-tenant gateways) MUST NOT serve a cached
-  copy to a different user.*/
+- `"public"`: The response does not contain user-specific data. Any
+  client or intermediary (e.g., shared gateway, caching proxy) MAY cache
+  the response and serve it across authorization contexts.
+- `"private"`: The response MAY be cached and reused only within the
+  same authorization context. Caches MUST NOT be shared across
+  authorization contexts (e.g., a different access token requires a
+  different cache).*/
 ///
 /// <details><summary>JSON schema</summary>
 ///
 /// ```json
 ///{
-///  "description": "Indicates the intended scope of the cached response, analogous to HTTP\n`Cache-Control: public` vs `Cache-Control: private`.\n\n- `\"public\"`: Any client or intermediary (e.g., shared gateway, proxy)\n  MAY cache the response and serve it to any user.\n- `\"private\"`: Only the requesting user's client MAY cache the response.\n  Shared caches (e.g., multi-tenant gateways) MUST NOT serve a cached\n  copy to a different user.",
+///  "description": "Indicates the intended scope of the cached response, analogous to HTTP\n`Cache-Control: public` vs `Cache-Control: private`.\n\n- `\"public\"`: The response does not contain user-specific data. Any\n  client or intermediary (e.g., shared gateway, caching proxy) MAY cache\n  the response and serve it across authorization contexts.\n- `\"private\"`: The response MAY be cached and reused only within the\n  same authorization context. Caches MUST NOT be shared across\n  authorization contexts (e.g., a different access token requires a\n  different cache).",
 ///  "type": "string",
 ///  "enum": [
 ///    "private",
@@ -2471,16 +2471,11 @@ impl ::core::convert::From<ElicitRequestUrlParams> for ElicitRequestParams {
 ///  "description": "The parameters for a request to elicit information from the user via a URL in the client.",
 ///  "type": "object",
 ///  "required": [
-///    "elicitationId",
 ///    "message",
 ///    "mode",
 ///    "url"
 ///  ],
 ///  "properties": {
-///    "elicitationId": {
-///      "description": "The ID of the elicitation, which must be unique within the context of the server.\nThe client MUST treat this ID as an opaque value.",
-///      "type": "string"
-///    },
 ///    "message": {
 ///      "description": "The message to present to the user explaining why the interaction is needed.",
 ///      "type": "string"
@@ -2501,10 +2496,6 @@ impl ::core::convert::From<ElicitRequestUrlParams> for ElicitRequestParams {
 /// </details>
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
 pub struct ElicitRequestUrlParams {
-    /**The ID of the elicitation, which must be unique within the context of the server.
-    The client MUST treat this ID as an opaque value.*/
-    #[serde(rename = "elicitationId")]
-    pub elicitation_id: ::alloc::string::String,
     ///The message to present to the user explaining why the interaction is needed.
     pub message: ::alloc::string::String,
     ///The elicitation mode.
@@ -2736,76 +2727,6 @@ impl ::core::convert::From<i64> for ElicitResultContentValueVariant1 {
     fn from(value: i64) -> Self {
         Self::Integer(value)
     }
-}
-///An optional notification from the server to the client, informing it of a completion of a out-of-band elicitation request.
-///
-/// <details><summary>JSON schema</summary>
-///
-/// ```json
-///{
-///  "description": "An optional notification from the server to the client, informing it of a completion of a out-of-band elicitation request.",
-///  "type": "object",
-///  "required": [
-///    "jsonrpc",
-///    "method",
-///    "params"
-///  ],
-///  "properties": {
-///    "jsonrpc": {
-///      "type": "string",
-///      "const": "2.0"
-///    },
-///    "method": {
-///      "type": "string",
-///      "const": "notifications/elicitation/complete"
-///    },
-///    "params": {
-///      "$ref": "#/$defs/ElicitationCompleteNotificationParams"
-///    }
-///  }
-///}
-/// ```
-/// </details>
-#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
-pub struct ElicitationCompleteNotification {
-    pub jsonrpc: ::alloc::string::String,
-    pub method: ::alloc::string::String,
-    pub params: ElicitationCompleteNotificationParams,
-}
-///Parameters for a {@link ElicitationCompleteNotificationnotifications/elicitation/complete} notification.
-///
-/// <details><summary>JSON schema</summary>
-///
-/// ```json
-///{
-///  "description": "Parameters for a {@link ElicitationCompleteNotificationnotifications/elicitation/complete} notification.",
-///  "type": "object",
-///  "required": [
-///    "elicitationId"
-///  ],
-///  "properties": {
-///    "_meta": {
-///      "$ref": "#/$defs/MetaObject"
-///    },
-///    "elicitationId": {
-///      "description": "The ID of the elicitation that completed.",
-///      "type": "string"
-///    }
-///  }
-///}
-/// ```
-/// </details>
-#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
-pub struct ElicitationCompleteNotificationParams {
-    ///The ID of the elicitation that completed.
-    #[serde(rename = "elicitationId")]
-    pub elicitation_id: ::alloc::string::String,
-    #[serde(
-        rename = "_meta",
-        default,
-        skip_serializing_if = "::core::option::Option::is_none"
-    )]
-    pub meta: ::core::option::Option<MetaObject>,
 }
 /**The contents of a resource, embedded into a prompt or tool call result.
 
@@ -3149,7 +3070,7 @@ pub struct GetPromptRequestParams {
 ///  ],
 ///  "properties": {
 ///    "_meta": {
-///      "$ref": "#/$defs/MetaObject"
+///      "$ref": "#/$defs/ResultMetaObject"
 ///    },
 ///    "description": {
 ///      "description": "An optional description for the prompt.",
@@ -3180,7 +3101,7 @@ pub struct GetPromptResult {
         default,
         skip_serializing_if = "::core::option::Option::is_none"
     )]
-    pub meta: ::core::option::Option<MetaObject>,
+    pub meta: ::core::option::Option<ResultMetaObject>,
     /**Indicates the type of the result, which allows the client to determine
     how to parse the result object.
 
@@ -3264,6 +3185,96 @@ impl ::core::convert::From<GetPromptResult> for GetPromptResultResponseResult {
     fn from(value: GetPromptResult) -> Self {
         Self::GetPromptResult(value)
     }
+}
+/**Returned when a server rejects a request because the values in the HTTP
+headers do not match the corresponding values in the request body, or
+because required headers are missing or malformed. For HTTP, the response
+status code MUST be `400 Bad Request`.*/
+///
+/// <details><summary>JSON schema</summary>
+///
+/// ```json
+///{
+///  "description": "Returned when a server rejects a request because the values in the HTTP\nheaders do not match the corresponding values in the request body, or\nbecause required headers are missing or malformed. For HTTP, the response\nstatus code MUST be `400 Bad Request`.",
+///  "type": "object",
+///  "required": [
+///    "error",
+///    "jsonrpc"
+///  ],
+///  "properties": {
+///    "error": {
+///      "type": "object",
+///      "required": [
+///        "code",
+///        "message"
+///      ],
+///      "properties": {
+///        "code": {
+///          "type": "integer",
+///          "const": -32020
+///        },
+///        "data": {
+///          "description": "Additional information about the error. The value of this member is defined by the sender (e.g. detailed error information, nested errors etc.)."
+///        },
+///        "message": {
+///          "description": "A short description of the error. The message SHOULD be limited to a concise single sentence.",
+///          "type": "string"
+///        }
+///      }
+///    },
+///    "id": {
+///      "$ref": "#/$defs/RequestId"
+///    },
+///    "jsonrpc": {
+///      "type": "string",
+///      "const": "2.0"
+///    }
+///  }
+///}
+/// ```
+/// </details>
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+pub struct HeaderMismatchError {
+    pub error: HeaderMismatchErrorError,
+    #[serde(default, skip_serializing_if = "::core::option::Option::is_none")]
+    pub id: ::core::option::Option<RequestId>,
+    pub jsonrpc: ::alloc::string::String,
+}
+///`HeaderMismatchErrorError`
+///
+/// <details><summary>JSON schema</summary>
+///
+/// ```json
+///{
+///  "type": "object",
+///  "required": [
+///    "code",
+///    "message"
+///  ],
+///  "properties": {
+///    "code": {
+///      "type": "integer",
+///      "const": -32020
+///    },
+///    "data": {
+///      "description": "Additional information about the error. The value of this member is defined by the sender (e.g. detailed error information, nested errors etc.)."
+///    },
+///    "message": {
+///      "description": "A short description of the error. The message SHOULD be limited to a concise single sentence.",
+///      "type": "string"
+///    }
+///  }
+///}
+/// ```
+/// </details>
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+pub struct HeaderMismatchErrorError {
+    pub code: i64,
+    ///Additional information about the error. The value of this member is defined by the sender (e.g. detailed error information, nested errors etc.).
+    #[serde(default, skip_serializing_if = "::core::option::Option::is_none")]
+    pub data: ::core::option::Option<::serde_json::Value>,
+    ///A short description of the error. The message SHOULD be limited to a concise single sentence.
+    pub message: ::alloc::string::String,
 }
 ///An optionally-sized icon that can be displayed in a user interface.
 ///
@@ -3694,7 +3705,7 @@ At least one of `inputRequests` or `requestState` MUST be present.*/
 ///  ],
 ///  "properties": {
 ///    "_meta": {
-///      "$ref": "#/$defs/MetaObject"
+///      "$ref": "#/$defs/ResultMetaObject"
 ///    },
 ///    "inputRequests": {
 ///      "$ref": "#/$defs/InputRequests"
@@ -3723,7 +3734,7 @@ pub struct InputRequiredResult {
         default,
         skip_serializing_if = "::core::option::Option::is_none"
     )]
-    pub meta: ::core::option::Option<MetaObject>,
+    pub meta: ::core::option::Option<ResultMetaObject>,
     #[serde(
         rename = "requestState",
         default,
@@ -4497,10 +4508,10 @@ pub struct ListPromptsRequest {
 ///  ],
 ///  "properties": {
 ///    "_meta": {
-///      "$ref": "#/$defs/MetaObject"
+///      "$ref": "#/$defs/ResultMetaObject"
 ///    },
 ///    "cacheScope": {
-///      "description": "Indicates the intended scope of the cached response, analogous to HTTP\n`Cache-Control: public` vs `Cache-Control: private`.\n\n- `\"public\"`: Any client or intermediary (e.g., shared gateway, proxy)\n  MAY cache the response and serve it to any user.\n- `\"private\"`: Only the requesting user's client MAY cache the response.\n  Shared caches (e.g., multi-tenant gateways) MUST NOT serve a cached\n  copy to a different user.",
+///      "description": "Indicates the intended scope of the cached response, analogous to HTTP\n`Cache-Control: public` vs `Cache-Control: private`.\n\n- `\"public\"`: The response does not contain user-specific data. Any\n  client or intermediary (e.g., shared gateway, caching proxy) MAY cache\n  the response and serve it across authorization contexts.\n- `\"private\"`: The response MAY be cached and reused only within the\n  same authorization context. Caches MUST NOT be shared across\n  authorization contexts (e.g., a different access token requires a\n  different cache).",
 ///      "type": "string",
 ///      "enum": [
 ///        "private",
@@ -4535,11 +4546,13 @@ pub struct ListPromptsResult {
     /**Indicates the intended scope of the cached response, analogous to HTTP
     `Cache-Control: public` vs `Cache-Control: private`.
 
-    - `"public"`: Any client or intermediary (e.g., shared gateway, proxy)
-      MAY cache the response and serve it to any user.
-    - `"private"`: Only the requesting user's client MAY cache the response.
-      Shared caches (e.g., multi-tenant gateways) MUST NOT serve a cached
-      copy to a different user.*/
+    - `"public"`: The response does not contain user-specific data. Any
+      client or intermediary (e.g., shared gateway, caching proxy) MAY cache
+      the response and serve it across authorization contexts.
+    - `"private"`: The response MAY be cached and reused only within the
+      same authorization context. Caches MUST NOT be shared across
+      authorization contexts (e.g., a different access token requires a
+      different cache).*/
     #[serde(rename = "cacheScope")]
     pub cache_scope: ListPromptsResultCacheScope,
     #[serde(
@@ -4547,7 +4560,7 @@ pub struct ListPromptsResult {
         default,
         skip_serializing_if = "::core::option::Option::is_none"
     )]
-    pub meta: ::core::option::Option<MetaObject>,
+    pub meta: ::core::option::Option<ResultMetaObject>,
     /**An opaque token representing the pagination position after the last returned result.
     If present, there may be more results available.*/
     #[serde(
@@ -4580,17 +4593,19 @@ pub struct ListPromptsResult {
 /**Indicates the intended scope of the cached response, analogous to HTTP
 `Cache-Control: public` vs `Cache-Control: private`.
 
-- `"public"`: Any client or intermediary (e.g., shared gateway, proxy)
-  MAY cache the response and serve it to any user.
-- `"private"`: Only the requesting user's client MAY cache the response.
-  Shared caches (e.g., multi-tenant gateways) MUST NOT serve a cached
-  copy to a different user.*/
+- `"public"`: The response does not contain user-specific data. Any
+  client or intermediary (e.g., shared gateway, caching proxy) MAY cache
+  the response and serve it across authorization contexts.
+- `"private"`: The response MAY be cached and reused only within the
+  same authorization context. Caches MUST NOT be shared across
+  authorization contexts (e.g., a different access token requires a
+  different cache).*/
 ///
 /// <details><summary>JSON schema</summary>
 ///
 /// ```json
 ///{
-///  "description": "Indicates the intended scope of the cached response, analogous to HTTP\n`Cache-Control: public` vs `Cache-Control: private`.\n\n- `\"public\"`: Any client or intermediary (e.g., shared gateway, proxy)\n  MAY cache the response and serve it to any user.\n- `\"private\"`: Only the requesting user's client MAY cache the response.\n  Shared caches (e.g., multi-tenant gateways) MUST NOT serve a cached\n  copy to a different user.",
+///  "description": "Indicates the intended scope of the cached response, analogous to HTTP\n`Cache-Control: public` vs `Cache-Control: private`.\n\n- `\"public\"`: The response does not contain user-specific data. Any\n  client or intermediary (e.g., shared gateway, caching proxy) MAY cache\n  the response and serve it across authorization contexts.\n- `\"private\"`: The response MAY be cached and reused only within the\n  same authorization context. Caches MUST NOT be shared across\n  authorization contexts (e.g., a different access token requires a\n  different cache).",
 ///  "type": "string",
 ///  "enum": [
 ///    "private",
@@ -4747,10 +4762,10 @@ pub struct ListResourceTemplatesRequest {
 ///  ],
 ///  "properties": {
 ///    "_meta": {
-///      "$ref": "#/$defs/MetaObject"
+///      "$ref": "#/$defs/ResultMetaObject"
 ///    },
 ///    "cacheScope": {
-///      "description": "Indicates the intended scope of the cached response, analogous to HTTP\n`Cache-Control: public` vs `Cache-Control: private`.\n\n- `\"public\"`: Any client or intermediary (e.g., shared gateway, proxy)\n  MAY cache the response and serve it to any user.\n- `\"private\"`: Only the requesting user's client MAY cache the response.\n  Shared caches (e.g., multi-tenant gateways) MUST NOT serve a cached\n  copy to a different user.",
+///      "description": "Indicates the intended scope of the cached response, analogous to HTTP\n`Cache-Control: public` vs `Cache-Control: private`.\n\n- `\"public\"`: The response does not contain user-specific data. Any\n  client or intermediary (e.g., shared gateway, caching proxy) MAY cache\n  the response and serve it across authorization contexts.\n- `\"private\"`: The response MAY be cached and reused only within the\n  same authorization context. Caches MUST NOT be shared across\n  authorization contexts (e.g., a different access token requires a\n  different cache).",
 ///      "type": "string",
 ///      "enum": [
 ///        "private",
@@ -4785,11 +4800,13 @@ pub struct ListResourceTemplatesResult {
     /**Indicates the intended scope of the cached response, analogous to HTTP
     `Cache-Control: public` vs `Cache-Control: private`.
 
-    - `"public"`: Any client or intermediary (e.g., shared gateway, proxy)
-      MAY cache the response and serve it to any user.
-    - `"private"`: Only the requesting user's client MAY cache the response.
-      Shared caches (e.g., multi-tenant gateways) MUST NOT serve a cached
-      copy to a different user.*/
+    - `"public"`: The response does not contain user-specific data. Any
+      client or intermediary (e.g., shared gateway, caching proxy) MAY cache
+      the response and serve it across authorization contexts.
+    - `"private"`: The response MAY be cached and reused only within the
+      same authorization context. Caches MUST NOT be shared across
+      authorization contexts (e.g., a different access token requires a
+      different cache).*/
     #[serde(rename = "cacheScope")]
     pub cache_scope: ListResourceTemplatesResultCacheScope,
     #[serde(
@@ -4797,7 +4814,7 @@ pub struct ListResourceTemplatesResult {
         default,
         skip_serializing_if = "::core::option::Option::is_none"
     )]
-    pub meta: ::core::option::Option<MetaObject>,
+    pub meta: ::core::option::Option<ResultMetaObject>,
     /**An opaque token representing the pagination position after the last returned result.
     If present, there may be more results available.*/
     #[serde(
@@ -4831,17 +4848,19 @@ pub struct ListResourceTemplatesResult {
 /**Indicates the intended scope of the cached response, analogous to HTTP
 `Cache-Control: public` vs `Cache-Control: private`.
 
-- `"public"`: Any client or intermediary (e.g., shared gateway, proxy)
-  MAY cache the response and serve it to any user.
-- `"private"`: Only the requesting user's client MAY cache the response.
-  Shared caches (e.g., multi-tenant gateways) MUST NOT serve a cached
-  copy to a different user.*/
+- `"public"`: The response does not contain user-specific data. Any
+  client or intermediary (e.g., shared gateway, caching proxy) MAY cache
+  the response and serve it across authorization contexts.
+- `"private"`: The response MAY be cached and reused only within the
+  same authorization context. Caches MUST NOT be shared across
+  authorization contexts (e.g., a different access token requires a
+  different cache).*/
 ///
 /// <details><summary>JSON schema</summary>
 ///
 /// ```json
 ///{
-///  "description": "Indicates the intended scope of the cached response, analogous to HTTP\n`Cache-Control: public` vs `Cache-Control: private`.\n\n- `\"public\"`: Any client or intermediary (e.g., shared gateway, proxy)\n  MAY cache the response and serve it to any user.\n- `\"private\"`: Only the requesting user's client MAY cache the response.\n  Shared caches (e.g., multi-tenant gateways) MUST NOT serve a cached\n  copy to a different user.",
+///  "description": "Indicates the intended scope of the cached response, analogous to HTTP\n`Cache-Control: public` vs `Cache-Control: private`.\n\n- `\"public\"`: The response does not contain user-specific data. Any\n  client or intermediary (e.g., shared gateway, caching proxy) MAY cache\n  the response and serve it across authorization contexts.\n- `\"private\"`: The response MAY be cached and reused only within the\n  same authorization context. Caches MUST NOT be shared across\n  authorization contexts (e.g., a different access token requires a\n  different cache).",
 ///  "type": "string",
 ///  "enum": [
 ///    "private",
@@ -4998,10 +5017,10 @@ pub struct ListResourcesRequest {
 ///  ],
 ///  "properties": {
 ///    "_meta": {
-///      "$ref": "#/$defs/MetaObject"
+///      "$ref": "#/$defs/ResultMetaObject"
 ///    },
 ///    "cacheScope": {
-///      "description": "Indicates the intended scope of the cached response, analogous to HTTP\n`Cache-Control: public` vs `Cache-Control: private`.\n\n- `\"public\"`: Any client or intermediary (e.g., shared gateway, proxy)\n  MAY cache the response and serve it to any user.\n- `\"private\"`: Only the requesting user's client MAY cache the response.\n  Shared caches (e.g., multi-tenant gateways) MUST NOT serve a cached\n  copy to a different user.",
+///      "description": "Indicates the intended scope of the cached response, analogous to HTTP\n`Cache-Control: public` vs `Cache-Control: private`.\n\n- `\"public\"`: The response does not contain user-specific data. Any\n  client or intermediary (e.g., shared gateway, caching proxy) MAY cache\n  the response and serve it across authorization contexts.\n- `\"private\"`: The response MAY be cached and reused only within the\n  same authorization context. Caches MUST NOT be shared across\n  authorization contexts (e.g., a different access token requires a\n  different cache).",
 ///      "type": "string",
 ///      "enum": [
 ///        "private",
@@ -5036,11 +5055,13 @@ pub struct ListResourcesResult {
     /**Indicates the intended scope of the cached response, analogous to HTTP
     `Cache-Control: public` vs `Cache-Control: private`.
 
-    - `"public"`: Any client or intermediary (e.g., shared gateway, proxy)
-      MAY cache the response and serve it to any user.
-    - `"private"`: Only the requesting user's client MAY cache the response.
-      Shared caches (e.g., multi-tenant gateways) MUST NOT serve a cached
-      copy to a different user.*/
+    - `"public"`: The response does not contain user-specific data. Any
+      client or intermediary (e.g., shared gateway, caching proxy) MAY cache
+      the response and serve it across authorization contexts.
+    - `"private"`: The response MAY be cached and reused only within the
+      same authorization context. Caches MUST NOT be shared across
+      authorization contexts (e.g., a different access token requires a
+      different cache).*/
     #[serde(rename = "cacheScope")]
     pub cache_scope: ListResourcesResultCacheScope,
     #[serde(
@@ -5048,7 +5069,7 @@ pub struct ListResourcesResult {
         default,
         skip_serializing_if = "::core::option::Option::is_none"
     )]
-    pub meta: ::core::option::Option<MetaObject>,
+    pub meta: ::core::option::Option<ResultMetaObject>,
     /**An opaque token representing the pagination position after the last returned result.
     If present, there may be more results available.*/
     #[serde(
@@ -5081,17 +5102,19 @@ pub struct ListResourcesResult {
 /**Indicates the intended scope of the cached response, analogous to HTTP
 `Cache-Control: public` vs `Cache-Control: private`.
 
-- `"public"`: Any client or intermediary (e.g., shared gateway, proxy)
-  MAY cache the response and serve it to any user.
-- `"private"`: Only the requesting user's client MAY cache the response.
-  Shared caches (e.g., multi-tenant gateways) MUST NOT serve a cached
-  copy to a different user.*/
+- `"public"`: The response does not contain user-specific data. Any
+  client or intermediary (e.g., shared gateway, caching proxy) MAY cache
+  the response and serve it across authorization contexts.
+- `"private"`: The response MAY be cached and reused only within the
+  same authorization context. Caches MUST NOT be shared across
+  authorization contexts (e.g., a different access token requires a
+  different cache).*/
 ///
 /// <details><summary>JSON schema</summary>
 ///
 /// ```json
 ///{
-///  "description": "Indicates the intended scope of the cached response, analogous to HTTP\n`Cache-Control: public` vs `Cache-Control: private`.\n\n- `\"public\"`: Any client or intermediary (e.g., shared gateway, proxy)\n  MAY cache the response and serve it to any user.\n- `\"private\"`: Only the requesting user's client MAY cache the response.\n  Shared caches (e.g., multi-tenant gateways) MUST NOT serve a cached\n  copy to a different user.",
+///  "description": "Indicates the intended scope of the cached response, analogous to HTTP\n`Cache-Control: public` vs `Cache-Control: private`.\n\n- `\"public\"`: The response does not contain user-specific data. Any\n  client or intermediary (e.g., shared gateway, caching proxy) MAY cache\n  the response and serve it across authorization contexts.\n- `\"private\"`: The response MAY be cached and reused only within the\n  same authorization context. Caches MUST NOT be shared across\n  authorization contexts (e.g., a different access token requires a\n  different cache).",
 ///  "type": "string",
 ///  "enum": [
 ///    "private",
@@ -5215,7 +5238,12 @@ structure or access specific locations that the client has permission to read fr
 ///      "const": "roots/list"
 ///    },
 ///    "params": {
-///      "$ref": "#/$defs/RequestParams"
+///      "type": "object",
+///      "properties": {
+///        "_meta": {
+///          "$ref": "#/$defs/MetaObject"
+///        }
+///      }
 ///    }
 ///  }
 ///}
@@ -5225,7 +5253,38 @@ structure or access specific locations that the client has permission to read fr
 pub struct ListRootsRequest {
     pub method: ::alloc::string::String,
     #[serde(default, skip_serializing_if = "::core::option::Option::is_none")]
-    pub params: ::core::option::Option<RequestParams>,
+    pub params: ::core::option::Option<ListRootsRequestParams>,
+}
+///`ListRootsRequestParams`
+///
+/// <details><summary>JSON schema</summary>
+///
+/// ```json
+///{
+///  "type": "object",
+///  "properties": {
+///    "_meta": {
+///      "$ref": "#/$defs/MetaObject"
+///    }
+///  }
+///}
+/// ```
+/// </details>
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+pub struct ListRootsRequestParams {
+    #[serde(
+        rename = "_meta",
+        default,
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub meta: ::core::option::Option<MetaObject>,
+}
+impl ::core::default::Default for ListRootsRequestParams {
+    fn default() -> Self {
+        Self {
+            meta: Default::default(),
+        }
+    }
 }
 /**The result returned by the client for a {@link ListRootsRequestroots/list} request.
 This result contains an array of {@link Root} objects, each representing a root directory
@@ -5311,10 +5370,10 @@ pub struct ListToolsRequest {
 ///  ],
 ///  "properties": {
 ///    "_meta": {
-///      "$ref": "#/$defs/MetaObject"
+///      "$ref": "#/$defs/ResultMetaObject"
 ///    },
 ///    "cacheScope": {
-///      "description": "Indicates the intended scope of the cached response, analogous to HTTP\n`Cache-Control: public` vs `Cache-Control: private`.\n\n- `\"public\"`: Any client or intermediary (e.g., shared gateway, proxy)\n  MAY cache the response and serve it to any user.\n- `\"private\"`: Only the requesting user's client MAY cache the response.\n  Shared caches (e.g., multi-tenant gateways) MUST NOT serve a cached\n  copy to a different user.",
+///      "description": "Indicates the intended scope of the cached response, analogous to HTTP\n`Cache-Control: public` vs `Cache-Control: private`.\n\n- `\"public\"`: The response does not contain user-specific data. Any\n  client or intermediary (e.g., shared gateway, caching proxy) MAY cache\n  the response and serve it across authorization contexts.\n- `\"private\"`: The response MAY be cached and reused only within the\n  same authorization context. Caches MUST NOT be shared across\n  authorization contexts (e.g., a different access token requires a\n  different cache).",
 ///      "type": "string",
 ///      "enum": [
 ///        "private",
@@ -5349,11 +5408,13 @@ pub struct ListToolsResult {
     /**Indicates the intended scope of the cached response, analogous to HTTP
     `Cache-Control: public` vs `Cache-Control: private`.
 
-    - `"public"`: Any client or intermediary (e.g., shared gateway, proxy)
-      MAY cache the response and serve it to any user.
-    - `"private"`: Only the requesting user's client MAY cache the response.
-      Shared caches (e.g., multi-tenant gateways) MUST NOT serve a cached
-      copy to a different user.*/
+    - `"public"`: The response does not contain user-specific data. Any
+      client or intermediary (e.g., shared gateway, caching proxy) MAY cache
+      the response and serve it across authorization contexts.
+    - `"private"`: The response MAY be cached and reused only within the
+      same authorization context. Caches MUST NOT be shared across
+      authorization contexts (e.g., a different access token requires a
+      different cache).*/
     #[serde(rename = "cacheScope")]
     pub cache_scope: ListToolsResultCacheScope,
     #[serde(
@@ -5361,7 +5422,7 @@ pub struct ListToolsResult {
         default,
         skip_serializing_if = "::core::option::Option::is_none"
     )]
-    pub meta: ::core::option::Option<MetaObject>,
+    pub meta: ::core::option::Option<ResultMetaObject>,
     /**An opaque token representing the pagination position after the last returned result.
     If present, there may be more results available.*/
     #[serde(
@@ -5394,17 +5455,19 @@ pub struct ListToolsResult {
 /**Indicates the intended scope of the cached response, analogous to HTTP
 `Cache-Control: public` vs `Cache-Control: private`.
 
-- `"public"`: Any client or intermediary (e.g., shared gateway, proxy)
-  MAY cache the response and serve it to any user.
-- `"private"`: Only the requesting user's client MAY cache the response.
-  Shared caches (e.g., multi-tenant gateways) MUST NOT serve a cached
-  copy to a different user.*/
+- `"public"`: The response does not contain user-specific data. Any
+  client or intermediary (e.g., shared gateway, caching proxy) MAY cache
+  the response and serve it across authorization contexts.
+- `"private"`: The response MAY be cached and reused only within the
+  same authorization context. Caches MUST NOT be shared across
+  authorization contexts (e.g., a different access token requires a
+  different cache).*/
 ///
 /// <details><summary>JSON schema</summary>
 ///
 /// ```json
 ///{
-///  "description": "Indicates the intended scope of the cached response, analogous to HTTP\n`Cache-Control: public` vs `Cache-Control: private`.\n\n- `\"public\"`: Any client or intermediary (e.g., shared gateway, proxy)\n  MAY cache the response and serve it to any user.\n- `\"private\"`: Only the requesting user's client MAY cache the response.\n  Shared caches (e.g., multi-tenant gateways) MUST NOT serve a cached\n  copy to a different user.",
+///  "description": "Indicates the intended scope of the cached response, analogous to HTTP\n`Cache-Control: public` vs `Cache-Control: private`.\n\n- `\"public\"`: The response does not contain user-specific data. Any\n  client or intermediary (e.g., shared gateway, caching proxy) MAY cache\n  the response and serve it across authorization contexts.\n- `\"private\"`: The response MAY be cached and reused only within the\n  same authorization context. Caches MUST NOT be shared across\n  authorization contexts (e.g., a different access token requires a\n  different cache).",
 ///  "type": "string",
 ///  "enum": [
 ///    "private",
@@ -5660,7 +5723,7 @@ pub struct LoggingMessageNotification {
 ///  ],
 ///  "properties": {
 ///    "_meta": {
-///      "$ref": "#/$defs/MetaObject"
+///      "$ref": "#/$defs/NotificationMetaObject"
 ///    },
 ///    "data": {
 ///      "description": "The data to be logged, such as a string message or an object. Any JSON serializable type is allowed here."
@@ -5691,7 +5754,7 @@ pub struct LoggingMessageNotificationParams {
         default,
         skip_serializing_if = "::core::option::Option::is_none"
     )]
-    pub meta: ::core::option::Option<MetaObject>,
+    pub meta: ::core::option::Option<NotificationMetaObject>,
 }
 /**Represents the contents of a `_meta` field, which clients and servers use to attach additional metadata to their interactions.
 
@@ -5745,13 +5808,13 @@ impl ::core::convert::From<::serde_json::Map<::alloc::string::String, ::serde_js
 
 In MCP, a server returns this error when a client invokes a method the server does not implement — either a genuinely unknown method, or one gated behind a server capability the server did not advertise (e.g., calling `prompts/list` when the `prompts` capability was not advertised).
 
-A request that requires a client capability the client did not declare is signalled instead by {@link MissingRequiredClientCapabilityError} (`-32003`).*/
+A request that requires a client capability the client did not declare is signalled instead by {@link MissingRequiredClientCapabilityError} (`-32021`).*/
 ///
 /// <details><summary>JSON schema</summary>
 ///
 /// ```json
 ///{
-///  "description": "A JSON-RPC error indicating that the requested method does not exist or is not available.\n\nIn MCP, a server returns this error when a client invokes a method the server does not implement — either a genuinely unknown method, or one gated behind a server capability the server did not advertise (e.g., calling `prompts/list` when the `prompts` capability was not advertised).\n\nA request that requires a client capability the client did not declare is signalled instead by {@link MissingRequiredClientCapabilityError} (`-32003`).",
+///  "description": "A JSON-RPC error indicating that the requested method does not exist or is not available.\n\nIn MCP, a server returns this error when a client invokes a method the server does not implement — either a genuinely unknown method, or one gated behind a server capability the server did not advertise (e.g., calling `prompts/list` when the `prompts` capability was not advertised).\n\nA request that requires a client capability the client did not declare is signalled instead by {@link MissingRequiredClientCapabilityError} (`-32021`).",
 ///  "type": "object",
 ///  "required": [
 ///    "code",
@@ -5809,7 +5872,7 @@ declare in `clientCapabilities`. For HTTP, the response status code MUST be
 ///      "properties": {
 ///        "code": {
 ///          "type": "integer",
-///          "const": -32003
+///          "const": -32021
 ///        },
 ///        "data": {
 ///          "type": "object",
@@ -5862,7 +5925,7 @@ pub struct MissingRequiredClientCapabilityError {
 ///  "properties": {
 ///    "code": {
 ///      "type": "integer",
-///      "const": -32003
+///      "const": -32021
 ///    },
 ///    "data": {
 ///      "type": "object",
@@ -6122,6 +6185,45 @@ pub struct Notification {
     #[serde(default, skip_serializing_if = "::serde_json::Map::is_empty")]
     pub params: ::serde_json::Map<::alloc::string::String, ::serde_json::Value>,
 }
+///Extends {@link MetaObject} with additional notification-specific fields. All key naming rules from `MetaObject` apply.
+///
+/// <details><summary>JSON schema</summary>
+///
+/// ```json
+///{
+///  "description": "Extends {@link MetaObject} with additional notification-specific fields. All key naming rules from `MetaObject` apply.",
+///  "type": "object",
+///  "properties": {
+///    "io.modelcontextprotocol/subscriptionId": {
+///      "description": "Identifies the subscription stream a notification was delivered on. The\nserver MUST include this key on every notification delivered via a\n{@link SubscriptionsListenRequestsubscriptions/listen} stream, so the\nclient can correlate the notification with the originating subscription.\nThe key is absent on notifications not delivered via a subscription\nstream (e.g. progress notifications for an in-flight request), which is\nwhy it is optional here.\n\nThe value is the JSON-RPC ID of the `subscriptions/listen` request that\nopened the stream.",
+///      "$ref": "#/$defs/RequestId"
+///    }
+///  },
+///  "additionalProperties": {}
+///}
+/// ```
+/// </details>
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+pub struct NotificationMetaObject {
+    /**Identifies the subscription stream a notification was delivered on. The
+    server MUST include this key on every notification delivered via a
+    {@link SubscriptionsListenRequestsubscriptions/listen} stream, so the
+    client can correlate the notification with the originating subscription.
+    The key is absent on notifications not delivered via a subscription
+    stream (e.g. progress notifications for an in-flight request), which is
+    why it is optional here.
+
+    The value is the JSON-RPC ID of the `subscriptions/listen` request that
+    opened the stream.*/
+    #[serde(
+        rename = "io.modelcontextprotocol/subscriptionId",
+        default,
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub io_modelcontextprotocol_subscription_id: ::core::option::Option<RequestId>,
+    #[serde(flatten)]
+    pub extra: ::serde_json::Map<::alloc::string::String, ::serde_json::Value>,
+}
 ///Common params for any notification.
 ///
 /// <details><summary>JSON schema</summary>
@@ -6132,7 +6234,7 @@ pub struct Notification {
 ///  "type": "object",
 ///  "properties": {
 ///    "_meta": {
-///      "$ref": "#/$defs/MetaObject"
+///      "$ref": "#/$defs/NotificationMetaObject"
 ///    }
 ///  }
 ///}
@@ -6145,7 +6247,7 @@ pub struct NotificationParams {
         default,
         skip_serializing_if = "::core::option::Option::is_none"
     )]
-    pub meta: ::core::option::Option<MetaObject>,
+    pub meta: ::core::option::Option<NotificationMetaObject>,
 }
 impl ::core::default::Default for NotificationParams {
     fn default() -> Self {
@@ -6360,7 +6462,7 @@ pub struct PaginatedRequestParams {
 ///  ],
 ///  "properties": {
 ///    "_meta": {
-///      "$ref": "#/$defs/MetaObject"
+///      "$ref": "#/$defs/ResultMetaObject"
 ///    },
 ///    "nextCursor": {
 ///      "description": "An opaque token representing the pagination position after the last returned result.\nIf present, there may be more results available.",
@@ -6381,7 +6483,7 @@ pub struct PaginatedResult {
         default,
         skip_serializing_if = "::core::option::Option::is_none"
     )]
-    pub meta: ::core::option::Option<MetaObject>,
+    pub meta: ::core::option::Option<ResultMetaObject>,
     /**An opaque token representing the pagination position after the last returned result.
     If present, there may be more results available.*/
     #[serde(
@@ -6590,7 +6692,7 @@ pub struct ProgressNotification {
 ///  ],
 ///  "properties": {
 ///    "_meta": {
-///      "$ref": "#/$defs/MetaObject"
+///      "$ref": "#/$defs/NotificationMetaObject"
 ///    },
 ///    "message": {
 ///      "description": "An optional message describing the current progress.",
@@ -6622,7 +6724,7 @@ pub struct ProgressNotificationParams {
         default,
         skip_serializing_if = "::core::option::Option::is_none"
     )]
-    pub meta: ::core::option::Option<MetaObject>,
+    pub meta: ::core::option::Option<NotificationMetaObject>,
     ///The progress thus far. This should increase every time progress is made, even if the total is unknown.
     pub progress: f64,
     ///The progress token which was given in the initial request, used to associate this notification with the request that is proceeding.
@@ -6797,13 +6899,13 @@ pub struct PromptArgument {
     #[serde(default, skip_serializing_if = "::core::option::Option::is_none")]
     pub title: ::core::option::Option<::alloc::string::String>,
 }
-///An optional notification from the server to the client, informing it that the list of prompts it offers has changed. This may be issued by servers without any previous subscription from the client.
+///An optional notification from the server to the client, informing it that the list of prompts it offers has changed. This is only delivered on a {@link SubscriptionsListenRequestsubscriptions/listen} stream when the client requested it via the `promptsListChanged` filter field.
 ///
 /// <details><summary>JSON schema</summary>
 ///
 /// ```json
 ///{
-///  "description": "An optional notification from the server to the client, informing it that the list of prompts it offers has changed. This may be issued by servers without any previous subscription from the client.",
+///  "description": "An optional notification from the server to the client, informing it that the list of prompts it offers has changed. This is only delivered on a {@link SubscriptionsListenRequestsubscriptions/listen} stream when the client requested it via the `promptsListChanged` filter field.",
 ///  "type": "object",
 ///  "required": [
 ///    "jsonrpc",
@@ -7013,10 +7115,10 @@ pub struct ReadResourceRequestParams {
 ///  ],
 ///  "properties": {
 ///    "_meta": {
-///      "$ref": "#/$defs/MetaObject"
+///      "$ref": "#/$defs/ResultMetaObject"
 ///    },
 ///    "cacheScope": {
-///      "description": "Indicates the intended scope of the cached response, analogous to HTTP\n`Cache-Control: public` vs `Cache-Control: private`.\n\n- `\"public\"`: Any client or intermediary (e.g., shared gateway, proxy)\n  MAY cache the response and serve it to any user.\n- `\"private\"`: Only the requesting user's client MAY cache the response.\n  Shared caches (e.g., multi-tenant gateways) MUST NOT serve a cached\n  copy to a different user.",
+///      "description": "Indicates the intended scope of the cached response, analogous to HTTP\n`Cache-Control: public` vs `Cache-Control: private`.\n\n- `\"public\"`: The response does not contain user-specific data. Any\n  client or intermediary (e.g., shared gateway, caching proxy) MAY cache\n  the response and serve it across authorization contexts.\n- `\"private\"`: The response MAY be cached and reused only within the\n  same authorization context. Caches MUST NOT be shared across\n  authorization contexts (e.g., a different access token requires a\n  different cache).",
 ///      "type": "string",
 ///      "enum": [
 ///        "private",
@@ -7054,11 +7156,13 @@ pub struct ReadResourceResult {
     /**Indicates the intended scope of the cached response, analogous to HTTP
     `Cache-Control: public` vs `Cache-Control: private`.
 
-    - `"public"`: Any client or intermediary (e.g., shared gateway, proxy)
-      MAY cache the response and serve it to any user.
-    - `"private"`: Only the requesting user's client MAY cache the response.
-      Shared caches (e.g., multi-tenant gateways) MUST NOT serve a cached
-      copy to a different user.*/
+    - `"public"`: The response does not contain user-specific data. Any
+      client or intermediary (e.g., shared gateway, caching proxy) MAY cache
+      the response and serve it across authorization contexts.
+    - `"private"`: The response MAY be cached and reused only within the
+      same authorization context. Caches MUST NOT be shared across
+      authorization contexts (e.g., a different access token requires a
+      different cache).*/
     #[serde(rename = "cacheScope")]
     pub cache_scope: ReadResourceResultCacheScope,
     pub contents: ::alloc::vec::Vec<ReadResourceResultContentsItem>,
@@ -7067,7 +7171,7 @@ pub struct ReadResourceResult {
         default,
         skip_serializing_if = "::core::option::Option::is_none"
     )]
-    pub meta: ::core::option::Option<MetaObject>,
+    pub meta: ::core::option::Option<ResultMetaObject>,
     /**Indicates the type of the result, which allows the client to determine
     how to parse the result object.
 
@@ -7091,17 +7195,19 @@ pub struct ReadResourceResult {
 /**Indicates the intended scope of the cached response, analogous to HTTP
 `Cache-Control: public` vs `Cache-Control: private`.
 
-- `"public"`: Any client or intermediary (e.g., shared gateway, proxy)
-  MAY cache the response and serve it to any user.
-- `"private"`: Only the requesting user's client MAY cache the response.
-  Shared caches (e.g., multi-tenant gateways) MUST NOT serve a cached
-  copy to a different user.*/
+- `"public"`: The response does not contain user-specific data. Any
+  client or intermediary (e.g., shared gateway, caching proxy) MAY cache
+  the response and serve it across authorization contexts.
+- `"private"`: The response MAY be cached and reused only within the
+  same authorization context. Caches MUST NOT be shared across
+  authorization contexts (e.g., a different access token requires a
+  different cache).*/
 ///
 /// <details><summary>JSON schema</summary>
 ///
 /// ```json
 ///{
-///  "description": "Indicates the intended scope of the cached response, analogous to HTTP\n`Cache-Control: public` vs `Cache-Control: private`.\n\n- `\"public\"`: Any client or intermediary (e.g., shared gateway, proxy)\n  MAY cache the response and serve it to any user.\n- `\"private\"`: Only the requesting user's client MAY cache the response.\n  Shared caches (e.g., multi-tenant gateways) MUST NOT serve a cached\n  copy to a different user.",
+///  "description": "Indicates the intended scope of the cached response, analogous to HTTP\n`Cache-Control: public` vs `Cache-Control: private`.\n\n- `\"public\"`: The response does not contain user-specific data. Any\n  client or intermediary (e.g., shared gateway, caching proxy) MAY cache\n  the response and serve it across authorization contexts.\n- `\"private\"`: The response MAY be cached and reused only within the\n  same authorization context. Caches MUST NOT be shared across\n  authorization contexts (e.g., a different access token requires a\n  different cache).",
 ///  "type": "string",
 ///  "enum": [
 ///    "private",
@@ -7346,7 +7452,6 @@ impl ::core::convert::From<i64> for RequestId {
 ///  "type": "object",
 ///  "required": [
 ///    "io.modelcontextprotocol/clientCapabilities",
-///    "io.modelcontextprotocol/clientInfo",
 ///    "io.modelcontextprotocol/protocolVersion"
 ///  ],
 ///  "properties": {
@@ -7355,7 +7460,7 @@ impl ::core::convert::From<i64> for RequestId {
 ///      "$ref": "#/$defs/ClientCapabilities"
 ///    },
 ///    "io.modelcontextprotocol/clientInfo": {
-///      "description": "Identifies the client software making the request. Required.\n\nThe {@link Implementation} schema requires `name` and `version`; other\nfields are optional.",
+///      "description": "Identifies the client software making the request. Clients SHOULD\ninclude this field on every request unless specifically configured not\nto do so.\n\nThe {@link Implementation} schema requires `name` and `version`; other\nfields are optional.\n\nThe value is self-reported by the client and is not verified by the\nprotocol. It is intended for display, logging, and debugging. Servers\nSHOULD NOT use it to change their behavior, and SHOULD NOT rely on it for\nsecurity decisions.",
 ///      "$ref": "#/$defs/Implementation"
 ///    },
 ///    "io.modelcontextprotocol/logLevel": {
@@ -7370,7 +7475,8 @@ impl ::core::convert::From<i64> for RequestId {
 ///      "description": "If specified, the caller is requesting out-of-band progress notifications for this request (as represented by {@link ProgressNotificationnotifications/progress}). The value of this parameter is an opaque token that will be attached to any subsequent notifications. The receiver is not obligated to provide these notifications.",
 ///      "$ref": "#/$defs/ProgressToken"
 ///    }
-///  }
+///  },
+///  "additionalProperties": {}
 ///}
 /// ```
 /// </details>
@@ -7383,12 +7489,23 @@ pub struct RequestMetaObject {
     Servers MUST NOT infer capabilities from prior requests.*/
     #[serde(rename = "io.modelcontextprotocol/clientCapabilities")]
     pub io_modelcontextprotocol_client_capabilities: ClientCapabilities,
-    /**Identifies the client software making the request. Required.
+    /**Identifies the client software making the request. Clients SHOULD
+    include this field on every request unless specifically configured not
+    to do so.
 
     The {@link Implementation} schema requires `name` and `version`; other
-    fields are optional.*/
-    #[serde(rename = "io.modelcontextprotocol/clientInfo")]
-    pub io_modelcontextprotocol_client_info: Implementation,
+    fields are optional.
+
+    The value is self-reported by the client and is not verified by the
+    protocol. It is intended for display, logging, and debugging. Servers
+    SHOULD NOT use it to change their behavior, and SHOULD NOT rely on it for
+    security decisions.*/
+    #[serde(
+        rename = "io.modelcontextprotocol/clientInfo",
+        default,
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub io_modelcontextprotocol_client_info: ::core::option::Option<Implementation>,
     /**The desired log level for this request. Optional.
 
     If absent, the server MUST NOT send any {@link LoggingMessageNotificationnotifications/message}
@@ -7415,6 +7532,8 @@ pub struct RequestMetaObject {
         skip_serializing_if = "::core::option::Option::is_none"
     )]
     pub progress_token: ::core::option::Option<ProgressToken>,
+    #[serde(flatten)]
+    pub extra: ::serde_json::Map<::alloc::string::String, ::serde_json::Value>,
 }
 ///Common params for any request.
 ///
@@ -7711,13 +7830,13 @@ pub struct ResourceLink {
     ///The URI of this resource.
     pub uri: ::alloc::string::String,
 }
-///An optional notification from the server to the client, informing it that the list of resources it can read from has changed. This may be issued by servers without any previous subscription from the client.
+///An optional notification from the server to the client, informing it that the list of resources it can read from has changed. This is only delivered on a {@link SubscriptionsListenRequestsubscriptions/listen} stream when the client requested it via the `resourcesListChanged` filter field.
 ///
 /// <details><summary>JSON schema</summary>
 ///
 /// ```json
 ///{
-///  "description": "An optional notification from the server to the client, informing it that the list of resources it can read from has changed. This may be issued by servers without any previous subscription from the client.",
+///  "description": "An optional notification from the server to the client, informing it that the list of resources it can read from has changed. This is only delivered on a {@link SubscriptionsListenRequestsubscriptions/listen} stream when the client requested it via the `resourcesListChanged` filter field.",
 ///  "type": "object",
 ///  "required": [
 ///    "jsonrpc",
@@ -7959,7 +8078,7 @@ pub struct ResourceUpdatedNotification {
 ///  ],
 ///  "properties": {
 ///    "_meta": {
-///      "$ref": "#/$defs/MetaObject"
+///      "$ref": "#/$defs/NotificationMetaObject"
 ///    },
 ///    "uri": {
 ///      "description": "The URI of the resource that has been updated. This might be a sub-resource of the one that the client actually subscribed to.",
@@ -7977,7 +8096,7 @@ pub struct ResourceUpdatedNotificationParams {
         default,
         skip_serializing_if = "::core::option::Option::is_none"
     )]
-    pub meta: ::core::option::Option<MetaObject>,
+    pub meta: ::core::option::Option<NotificationMetaObject>,
     ///The URI of the resource that has been updated. This might be a sub-resource of the one that the client actually subscribed to.
     pub uri: ::alloc::string::String,
 }
@@ -7994,7 +8113,7 @@ pub struct ResourceUpdatedNotificationParams {
 ///  ],
 ///  "properties": {
 ///    "_meta": {
-///      "$ref": "#/$defs/MetaObject"
+///      "$ref": "#/$defs/ResultMetaObject"
 ///    },
 ///    "resultType": {
 ///      "description": "Indicates the type of the result, which allows the client to determine\nhow to parse the result object.\n\nServers implementing this protocol version MUST include this field.\nFor backward compatibility, when a client receives a result from a\nserver implementing an earlier protocol version (which does not include\n`resultType`), the client MUST treat the absent field as `\"complete\"`.",
@@ -8012,7 +8131,7 @@ pub struct Result {
         default,
         skip_serializing_if = "::core::option::Option::is_none"
     )]
-    pub meta: ::core::option::Option<MetaObject>,
+    pub meta: ::core::option::Option<ResultMetaObject>,
     /**Indicates the type of the result, which allows the client to determine
     how to parse the result object.
 
@@ -8022,6 +8141,46 @@ pub struct Result {
     `resultType`), the client MUST treat the absent field as `"complete"`.*/
     #[serde(rename = "resultType")]
     pub result_type: ::alloc::string::String,
+    #[serde(flatten)]
+    pub extra: ::serde_json::Map<::alloc::string::String, ::serde_json::Value>,
+}
+///Extends {@link MetaObject} with additional result-specific fields. All key naming rules from `MetaObject` apply.
+///
+/// <details><summary>JSON schema</summary>
+///
+/// ```json
+///{
+///  "description": "Extends {@link MetaObject} with additional result-specific fields. All key naming rules from `MetaObject` apply.",
+///  "type": "object",
+///  "properties": {
+///    "io.modelcontextprotocol/serverInfo": {
+///      "description": "Identifies the server software producing the response. Servers SHOULD\ninclude this field on every response unless specifically configured not\nto do so.\n\nThe {@link Implementation} schema requires `name` and `version`; other\nfields are optional.\n\nThe value is self-reported by the server and is not verified by the\nprotocol. It is intended for display, logging, and debugging. Clients\nSHOULD NOT use it to change their behavior, and SHOULD NOT rely on it for\nsecurity decisions.",
+///      "$ref": "#/$defs/Implementation"
+///    }
+///  },
+///  "additionalProperties": {}
+///}
+/// ```
+/// </details>
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+pub struct ResultMetaObject {
+    /**Identifies the server software producing the response. Servers SHOULD
+    include this field on every response unless specifically configured not
+    to do so.
+
+    The {@link Implementation} schema requires `name` and `version`; other
+    fields are optional.
+
+    The value is self-reported by the server and is not verified by the
+    protocol. It is intended for display, logging, and debugging. Clients
+    SHOULD NOT use it to change their behavior, and SHOULD NOT rely on it for
+    security decisions.*/
+    #[serde(
+        rename = "io.modelcontextprotocol/serverInfo",
+        default,
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub io_modelcontextprotocol_server_info: ::core::option::Option<Implementation>,
     #[serde(flatten)]
     pub extra: ::serde_json::Map<::alloc::string::String, ::serde_json::Value>,
 }
@@ -8638,9 +8797,6 @@ impl ::core::default::Default for ServerCapabilitiesTools {
 ///    },
 ///    {
 ///      "$ref": "#/$defs/LoggingMessageNotification"
-///    },
-///    {
-///      "$ref": "#/$defs/ElicitationCompleteNotification"
 ///    }
 ///  ]
 ///}
@@ -8657,7 +8813,6 @@ pub enum ServerNotification {
     PromptListChangedNotification(PromptListChangedNotification),
     ToolListChangedNotification(ToolListChangedNotification),
     LoggingMessageNotification(LoggingMessageNotification),
-    ElicitationCompleteNotification(ElicitationCompleteNotification),
 }
 impl ::core::convert::From<CancelledNotification> for ServerNotification {
     fn from(value: CancelledNotification) -> Self {
@@ -8699,11 +8854,6 @@ impl ::core::convert::From<LoggingMessageNotification> for ServerNotification {
         Self::LoggingMessageNotification(value)
     }
 }
-impl ::core::convert::From<ElicitationCompleteNotification> for ServerNotification {
-    fn from(value: ElicitationCompleteNotification) -> Self {
-        Self::ElicitationCompleteNotification(value)
-    }
-}
 ///`ServerResult`
 ///
 /// <details><summary>JSON schema</summary>
@@ -8728,6 +8878,9 @@ impl ::core::convert::From<ElicitationCompleteNotification> for ServerNotificati
 ///    },
 ///    {
 ///      "$ref": "#/$defs/ReadResourceResult"
+///    },
+///    {
+///      "$ref": "#/$defs/SubscriptionsListenResult"
 ///    },
 ///    {
 ///      "$ref": "#/$defs/ListPromptsResult"
@@ -8791,31 +8944,37 @@ pub struct ServerResult {
         default,
         skip_serializing_if = "::core::option::Option::is_none"
     )]
-    pub subtype_6: ::core::option::Option<ListPromptsResult>,
+    pub subtype_6: ::core::option::Option<SubscriptionsListenResult>,
     #[serde(
         flatten,
         default,
         skip_serializing_if = "::core::option::Option::is_none"
     )]
-    pub subtype_7: ::core::option::Option<GetPromptResult>,
+    pub subtype_7: ::core::option::Option<ListPromptsResult>,
     #[serde(
         flatten,
         default,
         skip_serializing_if = "::core::option::Option::is_none"
     )]
-    pub subtype_8: ::core::option::Option<ListToolsResult>,
+    pub subtype_8: ::core::option::Option<GetPromptResult>,
     #[serde(
         flatten,
         default,
         skip_serializing_if = "::core::option::Option::is_none"
     )]
-    pub subtype_9: ::core::option::Option<CallToolResult>,
+    pub subtype_9: ::core::option::Option<ListToolsResult>,
     #[serde(
         flatten,
         default,
         skip_serializing_if = "::core::option::Option::is_none"
     )]
-    pub subtype_10: ::core::option::Option<CompleteResult>,
+    pub subtype_10: ::core::option::Option<CallToolResult>,
+    #[serde(
+        flatten,
+        default,
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub subtype_11: ::core::option::Option<CompleteResult>,
 }
 impl ::core::default::Default for ServerResult {
     fn default() -> Self {
@@ -8831,6 +8990,7 @@ impl ::core::default::Default for ServerResult {
             subtype_8: Default::default(),
             subtype_9: Default::default(),
             subtype_10: Default::default(),
+            subtype_11: Default::default(),
         }
     }
 }
@@ -9095,16 +9255,22 @@ impl ::core::default::Default for SubscriptionFilter {
         }
     }
 }
-/**Sent by the server as the first message on a
-{@link SubscriptionsListenRequestsubscriptions/listen} stream to acknowledge
-that the subscription has been established and to report which notification
-types it agreed to honor.*/
+/**Sent by the server to acknowledge that a
+{@link SubscriptionsListenRequestsubscriptions/listen} subscription has been
+established and to report which notification types it agreed to honor.
+
+This notification MUST be the first message the server sends carrying the
+subscription's ID in `io.modelcontextprotocol/subscriptionId`. The server MUST
+NOT send any notification on the subscription before acknowledging it. On
+stdio, where every subscription shares one channel, this ordering is defined
+per subscription ID and not per channel: messages belonging to other
+subscriptions MAY be interleaved before it.*/
 ///
 /// <details><summary>JSON schema</summary>
 ///
 /// ```json
 ///{
-///  "description": "Sent by the server as the first message on a\n{@link SubscriptionsListenRequestsubscriptions/listen} stream to acknowledge\nthat the subscription has been established and to report which notification\ntypes it agreed to honor.",
+///  "description": "Sent by the server to acknowledge that a\n{@link SubscriptionsListenRequestsubscriptions/listen} subscription has been\nestablished and to report which notification types it agreed to honor.\n\nThis notification MUST be the first message the server sends carrying the\nsubscription's ID in `io.modelcontextprotocol/subscriptionId`. The server MUST\nNOT send any notification on the subscription before acknowledging it. On\nstdio, where every subscription shares one channel, this ordering is defined\nper subscription ID and not per channel: messages belonging to other\nsubscriptions MAY be interleaved before it.",
 ///  "type": "object",
 ///  "required": [
 ///    "jsonrpc",
@@ -9146,7 +9312,7 @@ pub struct SubscriptionsAcknowledgedNotification {
 ///  ],
 ///  "properties": {
 ///    "_meta": {
-///      "$ref": "#/$defs/MetaObject"
+///      "$ref": "#/$defs/NotificationMetaObject"
 ///    },
 ///    "notifications": {
 ///      "description": "The subset of requested notification types the server agreed to honor.\nOnly includes notification types the server actually supports; if the\nclient requested an unsupported type (e.g., `promptsListChanged` when\nthe server has no prompts), it is omitted from this set.",
@@ -9163,7 +9329,7 @@ pub struct SubscriptionsAcknowledgedNotificationParams {
         default,
         skip_serializing_if = "::core::option::Option::is_none"
     )]
-    pub meta: ::core::option::Option<MetaObject>,
+    pub meta: ::core::option::Option<NotificationMetaObject>,
     /**The subset of requested notification types the server agreed to honor.
     Only includes notification types the server actually supports; if the
     client requested an unsupported type (e.g., `promptsListChanged` when
@@ -9244,6 +9410,103 @@ pub struct SubscriptionsListenRequestParams {
     **MUST NOT** send notification types the client has not explicitly
     requested.*/
     pub notifications: SubscriptionFilter,
+}
+/**The response to a {@link SubscriptionsListenRequestsubscriptions/listen}
+request, signalling that the subscription has ended gracefully (for example,
+during server shutdown). Because the listen stream is long-lived, this result
+is sent only when the server tears the subscription down; an abrupt transport
+close carries no response. The result body is otherwise empty.*/
+///
+/// <details><summary>JSON schema</summary>
+///
+/// ```json
+///{
+///  "description": "The response to a {@link SubscriptionsListenRequestsubscriptions/listen}\nrequest, signalling that the subscription has ended gracefully (for example,\nduring server shutdown). Because the listen stream is long-lived, this result\nis sent only when the server tears the subscription down; an abrupt transport\nclose carries no response. The result body is otherwise empty.",
+///  "type": "object",
+///  "required": [
+///    "_meta",
+///    "resultType"
+///  ],
+///  "properties": {
+///    "_meta": {
+///      "$ref": "#/$defs/SubscriptionsListenResultMeta"
+///    },
+///    "resultType": {
+///      "description": "Indicates the type of the result, which allows the client to determine\nhow to parse the result object.\n\nServers implementing this protocol version MUST include this field.\nFor backward compatibility, when a client receives a result from a\nserver implementing an earlier protocol version (which does not include\n`resultType`), the client MUST treat the absent field as `\"complete\"`.",
+///      "type": "string"
+///    }
+///  }
+///}
+/// ```
+/// </details>
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+pub struct SubscriptionsListenResult {
+    #[serde(rename = "_meta")]
+    pub meta: SubscriptionsListenResultMeta,
+    /**Indicates the type of the result, which allows the client to determine
+    how to parse the result object.
+
+    Servers implementing this protocol version MUST include this field.
+    For backward compatibility, when a client receives a result from a
+    server implementing an earlier protocol version (which does not include
+    `resultType`), the client MUST treat the absent field as `"complete"`.*/
+    #[serde(rename = "resultType")]
+    pub result_type: ::alloc::string::String,
+}
+/**Extends {@link ResultMetaObject} with the subscription-stream identifier carried by a
+{@link SubscriptionsListenResult}. All key naming rules from `MetaObject` apply.*/
+///
+/// <details><summary>JSON schema</summary>
+///
+/// ```json
+///{
+///  "description": "Extends {@link ResultMetaObject} with the subscription-stream identifier carried by a\n{@link SubscriptionsListenResult}. All key naming rules from `MetaObject` apply.",
+///  "type": "object",
+///  "required": [
+///    "io.modelcontextprotocol/subscriptionId"
+///  ],
+///  "properties": {
+///    "io.modelcontextprotocol/serverInfo": {
+///      "description": "Identifies the server software producing the response. Servers SHOULD\ninclude this field on every response unless specifically configured not\nto do so.\n\nThe {@link Implementation} schema requires `name` and `version`; other\nfields are optional.\n\nThe value is self-reported by the server and is not verified by the\nprotocol. It is intended for display, logging, and debugging. Clients\nSHOULD NOT use it to change their behavior, and SHOULD NOT rely on it for\nsecurity decisions.",
+///      "$ref": "#/$defs/Implementation"
+///    },
+///    "io.modelcontextprotocol/subscriptionId": {
+///      "description": "Identifies the subscription stream this response closes, so the client can\ncorrelate it with the originating subscription — mirroring the same key on\nthe stream's notifications. The value is the JSON-RPC ID of the\n`subscriptions/listen` request that opened the stream (and equals this\nresponse's `id`).",
+///      "$ref": "#/$defs/RequestId"
+///    }
+///  },
+///  "additionalProperties": {}
+///}
+/// ```
+/// </details>
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+pub struct SubscriptionsListenResultMeta {
+    /**Identifies the server software producing the response. Servers SHOULD
+    include this field on every response unless specifically configured not
+    to do so.
+
+    The {@link Implementation} schema requires `name` and `version`; other
+    fields are optional.
+
+    The value is self-reported by the server and is not verified by the
+    protocol. It is intended for display, logging, and debugging. Clients
+    SHOULD NOT use it to change their behavior, and SHOULD NOT rely on it for
+    security decisions.*/
+    #[serde(
+        rename = "io.modelcontextprotocol/serverInfo",
+        default,
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub io_modelcontextprotocol_server_info: ::core::option::Option<Implementation>,
+    /**Identifies the subscription stream this response closes, so the client can
+    correlate it with the originating subscription — mirroring the same key on
+    the stream's notifications. The value is the JSON-RPC ID of the
+    `subscriptions/listen` request that opened the stream (and equals this
+    response's `id`).*/
+    #[serde(rename = "io.modelcontextprotocol/subscriptionId")]
+    pub io_modelcontextprotocol_subscription_id: RequestId,
+    #[serde(flatten)]
+    pub extra: ::serde_json::Map<::alloc::string::String, ::serde_json::Value>,
 }
 ///Text provided to or from an LLM.
 ///
@@ -9658,7 +9921,7 @@ pub struct TitledSingleSelectEnumSchemaOneOfItem {
 ///      }
 ///    },
 ///    "inputSchema": {
-///      "description": "A JSON Schema object defining the expected parameters for the tool.\n\nTool arguments are always JSON objects, so `type: \"object\"` is required at the root.\nBeyond that, any JSON Schema 2020-12 keyword may appear alongside `type` — including\ncomposition keywords (`oneOf`, `anyOf`, `allOf`, `not`), conditional keywords\n(`if`/`then`/`else`), reference keywords (`$ref`, `$defs`, `$anchor`), and any other\nstandard validation or annotation keywords.\n\nDefaults to JSON Schema 2020-12 when no explicit `$schema` is provided.",
+///      "description": "A JSON Schema object defining the expected parameters for the tool.\n\nTool arguments are always JSON objects, so `type: \"object\"` is required at the root.\nBeyond that, any JSON Schema 2020-12 keyword may appear alongside `type` — including\ncomposition keywords (`oneOf`, `anyOf`, `allOf`, `not`), conditional keywords\n(`if`/`then`/`else`), reference keywords (`$ref`, `$defs`, `$anchor`), and any other\nstandard validation or annotation keywords.\n\nProperty schemas may carry an `x-mcp-header` annotation to mirror the\nargument value into an HTTP header on the Streamable HTTP transport. See\nthe Streamable HTTP transport specification for the validity and\nextraction rules.\n\nDefaults to JSON Schema 2020-12 when no explicit `$schema` is provided.",
 ///      "type": "object",
 ///      "required": [
 ///        "type"
@@ -9973,13 +10236,18 @@ composition keywords (`oneOf`, `anyOf`, `allOf`, `not`), conditional keywords
 (`if`/`then`/`else`), reference keywords (`$ref`, `$defs`, `$anchor`), and any other
 standard validation or annotation keywords.
 
+Property schemas may carry an `x-mcp-header` annotation to mirror the
+argument value into an HTTP header on the Streamable HTTP transport. See
+the Streamable HTTP transport specification for the validity and
+extraction rules.
+
 Defaults to JSON Schema 2020-12 when no explicit `$schema` is provided.*/
 ///
 /// <details><summary>JSON schema</summary>
 ///
 /// ```json
 ///{
-///  "description": "A JSON Schema object defining the expected parameters for the tool.\n\nTool arguments are always JSON objects, so `type: \"object\"` is required at the root.\nBeyond that, any JSON Schema 2020-12 keyword may appear alongside `type` — including\ncomposition keywords (`oneOf`, `anyOf`, `allOf`, `not`), conditional keywords\n(`if`/`then`/`else`), reference keywords (`$ref`, `$defs`, `$anchor`), and any other\nstandard validation or annotation keywords.\n\nDefaults to JSON Schema 2020-12 when no explicit `$schema` is provided.",
+///  "description": "A JSON Schema object defining the expected parameters for the tool.\n\nTool arguments are always JSON objects, so `type: \"object\"` is required at the root.\nBeyond that, any JSON Schema 2020-12 keyword may appear alongside `type` — including\ncomposition keywords (`oneOf`, `anyOf`, `allOf`, `not`), conditional keywords\n(`if`/`then`/`else`), reference keywords (`$ref`, `$defs`, `$anchor`), and any other\nstandard validation or annotation keywords.\n\nProperty schemas may carry an `x-mcp-header` annotation to mirror the\nargument value into an HTTP header on the Streamable HTTP transport. See\nthe Streamable HTTP transport specification for the validity and\nextraction rules.\n\nDefaults to JSON Schema 2020-12 when no explicit `$schema` is provided.",
 ///  "type": "object",
 ///  "required": [
 ///    "type"
@@ -10010,13 +10278,13 @@ pub struct ToolInputSchema {
     #[serde(flatten)]
     pub extra: ::serde_json::Map<::alloc::string::String, ::serde_json::Value>,
 }
-///An optional notification from the server to the client, informing it that the list of tools it offers has changed. This may be issued by servers without any previous subscription from the client.
+///An optional notification from the server to the client, informing it that the list of tools it offers has changed. This is only delivered on a {@link SubscriptionsListenRequestsubscriptions/listen} stream when the client requested it via the `toolsListChanged` filter field.
 ///
 /// <details><summary>JSON schema</summary>
 ///
 /// ```json
 ///{
-///  "description": "An optional notification from the server to the client, informing it that the list of tools it offers has changed. This may be issued by servers without any previous subscription from the client.",
+///  "description": "An optional notification from the server to the client, informing it that the list of tools it offers has changed. This is only delivered on a {@link SubscriptionsListenRequestsubscriptions/listen} stream when the client requested it via the `toolsListChanged` filter field.",
 ///  "type": "object",
 ///  "required": [
 ///    "jsonrpc",
@@ -10250,7 +10518,7 @@ chosen not to implement). For HTTP, the response status code MUST be
 ///      "properties": {
 ///        "code": {
 ///          "type": "integer",
-///          "const": -32004
+///          "const": -32022
 ///        },
 ///        "data": {
 ///          "type": "object",
@@ -10311,7 +10579,7 @@ pub struct UnsupportedProtocolVersionError {
 ///  "properties": {
 ///    "code": {
 ///      "type": "integer",
-///      "const": -32004
+///      "const": -32022
 ///    },
 ///    "data": {
 ///      "type": "object",

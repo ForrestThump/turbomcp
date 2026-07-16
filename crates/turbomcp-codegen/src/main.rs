@@ -33,6 +33,9 @@ fn main() -> Result<()> {
     // Keep embedded JSON-Schema nodes (tool input/output schemas) open so
     // arbitrary keywords (`$defs`, `additionalProperties`, …) survive the wire.
     normalize::open_embedded_schemas(&mut value);
+    // Keep `_meta` object shapes open (they are open maps by spec) so typed
+    // round-trips don't drop non-reserved keys.
+    normalize::open_meta_objects(&mut value);
 
     let schema: schemars::schema::RootSchema =
         serde_json::from_value(value).context("interpreting normalized JSON as a RootSchema")?;
