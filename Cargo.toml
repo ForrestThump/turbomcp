@@ -19,10 +19,12 @@ members = [
     "crates/turbomcp-ext-apps",
     "crates/turbomcp",
 ]
-# Cross-SDK interop suite. Excluded from the workspace so rmcp's large dependency
-# tree never touches the main lockfile/gate; it carries its own lockfile and is
-# run on its own (`cd crates/turbomcp-interop && cargo test`).
-exclude = ["crates/turbomcp-interop"]
+# Excluded, separately-run test surfaces. Each carries its own lockfile and stays
+# out of the main workspace lockfile/gate (`just test`):
+#   - turbomcp-interop:     cross-SDK interop vs rmcp (heavy rmcp dep tree).
+#   - turbomcp-conformance: official MCP conformance suite (Node harness driver).
+# Run them on their own (`cd crates/<crate> && cargo test`).
+exclude = ["crates/turbomcp-interop", "crates/turbomcp-conformance"]
 resolver = "2"
 
 [workspace.lints.clippy]

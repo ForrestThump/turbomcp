@@ -1,0 +1,28 @@
+[package]
+name = "turbomcp-conformance"
+version = "4.0.0-alpha.1"
+edition = "2024"
+rust-version = "1.88"
+description = "Runs the official MCP conformance suite (@modelcontextprotocol/conformance) against a TurboMCP HTTP server."
+license = "MIT"
+publish = false
+
+# NOTE: this crate is `exclude`d from the parent workspace (see the root
+# Cargo.toml) so it never touches the main lockfile/gate. It carries its own
+# Cargo.lock and is run directly:
+#
+#     cd crates/turbomcp-conformance && cargo test
+#
+# The test spawns the official Node conformance harness
+# (`npx @modelcontextprotocol/conformance server --url …`) against an in-process
+# TurboMCP Streamable-HTTP server. Node/npx must be on PATH.
+
+[dependencies]
+
+[dev-dependencies]
+turbomcp = { path = "../turbomcp", features = ["http", "client"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "net", "time", "io-util"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "1"
+base64 = "0.22"
