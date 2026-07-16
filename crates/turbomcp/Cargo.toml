@@ -19,6 +19,9 @@ http = ["dep:turbomcp-transport-http", "turbomcp-client?/http", "tokio/rt"]
 # OAuth 2.1 resource-server auth (bearer validation, RFC 9728). Most useful
 # with `http`; the metadata endpoint + challenges are HTTP-level.
 auth = ["dep:turbomcp-auth"]
+# The OAuth 2.1 *client* flow (authorization-code + PKCE, discovery,
+# registration, refresh) under `turbomcp::auth::client`. Implies `auth`.
+client-oauth = ["auth", "turbomcp-auth/oauth-client"]
 # OpenTelemetry observability: the TraceContextLayer + W3C propagation +
 # redaction. Add `otlp` (on the telemetry crate) for the export pipeline.
 telemetry = ["dep:turbomcp-telemetry"]

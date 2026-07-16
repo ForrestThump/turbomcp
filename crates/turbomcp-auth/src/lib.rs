@@ -3,9 +3,10 @@
 //! An MCP HTTP server is an OAuth 2.1 resource server: it validates the bearer
 //! tokens clients present and tells clients where to get them. This crate
 //! provides that validation, plus the RFC 9728 metadata document and the
-//! `WWW-Authenticate` challenges. It does **not** implement OAuth *flows*
-//! (authorization-code, PKCE, dynamic client registration) — those are a
-//! client concern and land with `turbomcp-client`.
+//! `WWW-Authenticate` challenges. The **client half** — discovery,
+//! registration, the PKCE authorization-code flow, refresh, and the
+//! issuer-keyed credential store — lives in [`client`] behind the
+//! `oauth-client` feature.
 //!
 //! Auth is HTTP-transport-level (the MCP authorization spec): the token rides
 //! the `Authorization` header, never `_meta`, and stdio has no auth. So the
@@ -34,6 +35,8 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+#[cfg(feature = "oauth-client")]
+pub mod client;
 mod error;
 mod jwks;
 mod metadata;

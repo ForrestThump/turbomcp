@@ -140,6 +140,9 @@ hmac = "0.13"   # HMAC (pairs with sha2 0.11 / digest 0.11)
 base64 = "0.22.1"
 percent-encoding = "2.3.2"  # URL percent encoding/decoding (RFC 3986)
 uuid = { version = "1.23", features = ["v4", "serde"] }
+# OAuth 2.1 client flows (auth-code + PKCE + token exchange); HTTP is supplied
+# by our reqwest adapter, so no default features.
+oauth2 = { version = "5", default-features = false }
 jsonwebtoken = { version = "10.3", features = ["aws_lc_rs", "use_pem"] }
 
 # Time and date handling

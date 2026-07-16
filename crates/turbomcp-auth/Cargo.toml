@@ -14,6 +14,10 @@ default = []
 # Live JWKS fetching over HTTP (pulls in reqwest + a tokio runtime). Without
 # it, supply keys via `StaticJwks` (or implement `JwkSource` yourself).
 http-jwks = ["dep:reqwest", "dep:tokio"]
+# The OAuth 2.1 *client* half: authorization-code + PKCE flows, RFC 9728/8414
+# discovery, client registration (CIMD / pre-registered / DCR), RFC 9207 iss
+# validation, issuer-keyed credential store.
+oauth-client = ["dep:oauth2", "dep:reqwest", "dep:tokio", "dep:url"]
 
 [dependencies]
 turbomcp-core = { workspace = true }
@@ -27,8 +31,12 @@ futures = { workspace = true }
 
 reqwest = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["sync", "time"], optional = true }
+oauth2 = { workspace = true, optional = true }
+url = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
 base64 = { workspace = true }
 serde_json = { workspace = true }
+axum = { workspace = true }
+sha2 = { workspace = true }
