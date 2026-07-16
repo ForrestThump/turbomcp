@@ -227,6 +227,15 @@ enum HandleMode {
         connection: String,
         pending: Arc<PendingRequests>,
     },
+    /// Taskified call (SEP-2663 in-execution input): requests are published
+    /// to the task (`input_required` + `inputRequests`) via the attached
+    /// [`TaskInputBroker`](crate::TaskInputBroker) and the handler awaits the
+    /// client's `tasks/update` answer. The slot is late-bound — the extension
+    /// attaches its broker only if it actually taskifies the call; a call
+    /// that ran synchronously never gets one and fails as unavailable.
+    TaskMediated {
+        slot: crate::extension::TaskInputSlot,
+    },
     /// No client-interaction channel on this path (reason in the error).
     Unavailable(&'static str),
 }
@@ -301,6 +310,27 @@ impl ClientHandle {
                 state_in,
                 state_out: Mutex::new(None),
                 strict_keys,
+            }),
+        }
+    }
+
+    /// A task-mediated handle for a `tools/call` offered for augmentation
+    /// (SEP-2663 in-execution input). `slot` is shared with the
+    /// [`CallRunner`](crate::CallRunner) so the taskifying extension can
+    /// attach its broker before spawning.
+    pub(crate) fn task_mediated(
+        client_capabilities: Option<Value>,
+        slot: crate::extension::TaskInputSlot,
+    ) -> Self {
+        Self {
+            inner: Arc::new(Inner {
+                mode: HandleMode::TaskMediated { slot },
+                client_capabilities,
+                responses: BTreeMap::new(),
+                collected: Mutex::new(BTreeMap::new()),
+                state_in: None,
+                state_out: Mutex::new(None),
+                strict_keys: false,
             }),
         }
     }
@@ -385,7 +415,12 @@ impl ClientHandle {
         requests: Vec<(&str, neutral::ElicitParams)>,
     ) -> McpResult<Vec<neutral::ElicitOutcome>> {
         self.require_capability("elicitation")?;
-        if matches!(self.inner.mode, HandleMode::Bidi { .. }) {
+        if matches!(
+            self.inner.mode,
+            HandleMode::Bidi { .. } | HandleMode::TaskMediated { .. }
+        ) {
+            // Both delivery modes resolve each request individually (no
+            // batched abort), so run them in order.
             let mut outcomes = Vec::with_capacity(requests.len());
             for (key, params) in requests {
                 outcomes.push(self.elicit(key, params).await?);
@@ -501,6 +536,14 @@ impl ClientHandle {
                 connection,
                 pending,
             } => send_and_await(session, connection, pending, request).await,
+            // Taskified call: publish to the task and await `tasks/update`.
+            HandleMode::TaskMediated { slot } => match slot.get() {
+                Some(broker) => broker.obtain(key, request).await,
+                None => Err(McpError::internal(
+                    "client input is unavailable: the call was offered for task \
+                     augmentation but no input broker was attached",
+                )),
+            },
             // `require_capability` already rejected this mode.
             HandleMode::Unavailable(reason) => Err(McpError::internal(*reason)),
         }

@@ -49,9 +49,12 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::json;
 use turbomcp_core::{
-    JsonRpcError, JsonRpcMessage, JsonRpcRequest, JsonRpcResponse, RequestContext, RequestId,
+    CancellationToken, JsonRpcError, JsonRpcMessage, JsonRpcRequest, JsonRpcResponse, McpError,
+    McpResult, RequestContext, RequestId,
 };
-use turbomcp_server::{CallAugmentRequest, Extension, ExtensionRequest, SubscribeOutcome};
+use turbomcp_server::{
+    CallAugmentRequest, Extension, ExtensionRequest, SubscribeOutcome, TaskInputBroker,
+};
 
 mod store;
 mod subs;
@@ -59,7 +62,7 @@ pub mod wire;
 
 use store::{DraftTaskStore, TaskOutcome};
 use subs::TaskSubscriptions;
-use wire::CreateTaskResult;
+use wire::{CreateTaskResult, UpdateTaskParams};
 
 /// The extension identifier, advertised under `server/discover`
 /// `capabilities.extensions` and declared by clients to opt in.
@@ -226,6 +229,49 @@ fn ack(id: RequestId) -> JsonRpcMessage {
     ok(id, json!({ "resultType": wire::RESULT_TYPE_COMPLETE }))
 }
 
+/// One task's [`TaskInputBroker`] (SEP-2663 in-execution `input_required`):
+/// publishes the handler's input requests into the task's store entry —
+/// flipping it to `input_required`, surfaced by `tasks/get` — pushes the
+/// status to subscribers, and awaits the client's `tasks/update` answer.
+/// Cancellation (`tasks/cancel`, TTL purge) unblocks the awaiting handler
+/// with an error so it unwinds.
+struct TaskBroker {
+    store: Arc<DraftTaskStore>,
+    subs: Arc<TaskSubscriptions>,
+    task_id: String,
+    cancel: CancellationToken,
+}
+
+impl TaskInputBroker for TaskBroker {
+    fn obtain(
+        &self,
+        key: &str,
+        request: serde_json::Value,
+    ) -> futures::future::BoxFuture<'static, McpResult<serde_json::Value>> {
+        let store = Arc::clone(&self.store);
+        let subs = Arc::clone(&self.subs);
+        let task_id = self.task_id.clone();
+        let cancel = self.cancel.clone();
+        let key = key.to_owned();
+        Box::pin(async move {
+            let rx = store.publish_input(&task_id, &key, request).map_err(|()| {
+                McpError::internal("the task is no longer live; client input is unavailable")
+            })?;
+            // Announce `input_required` to any listen-stream subscribers
+            // (spec-optional; pollers see it via `tasks/get` regardless).
+            subs::push_status(&subs, &store, &task_id).await;
+            tokio::select! {
+                () = cancel.cancelled() => Err(McpError::internal(
+                    "the task was cancelled while awaiting client input",
+                )),
+                response = rx => response.map_err(|_| {
+                    McpError::internal("the task input channel closed before a response arrived")
+                }),
+            }
+        })
+    }
+}
+
 #[async_trait]
 impl Extension for TasksExtension {
     fn id(&self) -> &'static str {
@@ -291,7 +337,17 @@ impl Extension for TasksExtension {
         // returns. We create synchronously here, then spawn the call.
         let task = self
             .store
-            .create(self.ttl_ms, self.poll_interval_ms, cancel)?; // capacity ⇒ run normally
+            .create(self.ttl_ms, self.poll_interval_ms, cancel.clone())?; // capacity ⇒ run normally
+
+        // Enable mid-task client input (in-execution `input_required`): the
+        // call's ClientHandle publishes through this broker; the client
+        // answers via `tasks/update`.
+        run.attach_input_broker(Arc::new(TaskBroker {
+            store: Arc::clone(&self.store),
+            subs: Arc::clone(&self.subs),
+            task_id: task.task_id.clone(),
+            cancel,
+        }));
 
         let store = Arc::clone(&self.store);
         let subs = Arc::clone(&self.subs);
@@ -345,14 +401,28 @@ impl Extension for TasksExtension {
                     error(id, task_not_found(&task_id))
                 }
             }
-            // `tasks/update` delivers `inputResponses`; mid-task input
-            // (`input_required`) lands in 9c, so for now a known task simply
-            // acks and an unknown one is `-32602`.
+            // `tasks/update` delivers `inputResponses` to the awaiting
+            // handler. Responses for keys that aren't currently outstanding —
+            // never issued, already answered, superseded — are ignored, and a
+            // partial set is accepted (spec). The empty ack MAY precede the
+            // observable status change (eventual consistency); here delivery
+            // is synchronous, which is strictly stronger.
             methods::TASKS_UPDATE => {
-                if self.store.contains(&task_id) {
-                    ack(id)
-                } else {
-                    error(id, task_not_found(&task_id))
+                let responses = request
+                    .params
+                    .as_ref()
+                    .and_then(|p| serde_json::from_value::<UpdateTaskParams>(p.clone()).ok())
+                    .map(|p| p.input_responses)
+                    .unwrap_or_default();
+                match self.store.deliver_inputs(&task_id, &responses) {
+                    Some(changed) => {
+                        if changed {
+                            // Announce the flip back to `working`.
+                            subs::push_status(&self.subs, &self.store, &task_id).await;
+                        }
+                        ack(id)
+                    }
+                    None => error(id, task_not_found(&task_id)),
                 }
             }
             // The dispatcher only routes our declared methods here.

@@ -8,13 +8,14 @@
 //! Expired tasks (finite `ttlMs`) are purged lazily, cancelling any in-flight
 //! work, after which a `tasks/get` answers `-32602` (compliant per spec).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
+use tokio::sync::oneshot;
 use turbomcp_core::{CancellationToken, JsonRpcError};
 
 use crate::wire::{DetailedTask, Task, TaskStatus};
@@ -38,6 +39,21 @@ struct Entry {
     /// The terminal result/error, present once terminal.
     outcome: Option<TaskOutcome>,
     cancel: CancellationToken,
+    /// In-execution client input (SEP-2663 §Task Update Requests).
+    inputs: Inputs,
+}
+
+/// A task's in-execution input state: what the handler is waiting on.
+#[derive(Default)]
+struct Inputs {
+    /// Outstanding wire `InputRequest`s, keyed by their task-unique key —
+    /// exactly what `tasks/get` surfaces as `inputRequests`.
+    outstanding: Map<String, Value>,
+    /// The handler futures awaiting each outstanding key.
+    waiters: HashMap<String, oneshot::Sender<Value>>,
+    /// Every key ever issued for this task (keys MUST be unique over the
+    /// task's lifetime and never reused — spec).
+    used: HashSet<String>,
 }
 
 impl Entry {
@@ -65,6 +81,10 @@ impl Entry {
 
     fn detailed(&self, id: &str) -> DetailedTask {
         let mut detailed = DetailedTask::new(self.base(id));
+        if self.status == TaskStatus::InputRequired {
+            // tasks/get MUST surface ALL outstanding requests (spec).
+            detailed.input_requests = Some(self.inputs.outstanding.clone());
+        }
         match &self.outcome {
             Some(TaskOutcome::Completed(result)) => detailed.result = Some(result.clone()),
             Some(TaskOutcome::Failed(error)) => {
@@ -116,6 +136,7 @@ impl DraftTaskStore {
             poll_interval_ms,
             outcome: None,
             cancel,
+            inputs: Inputs::default(),
         };
         let task = entry.base(&id);
         map.insert(id, entry);
@@ -166,15 +187,79 @@ impl DraftTaskStore {
             entry.status = TaskStatus::Cancelled;
             entry.status_message = Some("the task was cancelled by request".to_owned());
             entry.updated_wall = OffsetDateTime::now_utc();
+            // Unblock any handler awaiting client input (dropping the senders
+            // errors the receivers) and stop advertising the requests.
+            entry.inputs.waiters.clear();
+            entry.inputs.outstanding.clear();
         }
         true
     }
 
-    /// Whether a live task with `id` exists (drives the `tasks/update` ack).
-    pub(crate) fn contains(&self, id: &str) -> bool {
+    /// Publish an in-execution input request for a live task (SEP-2663
+    /// §Task Update Requests): record `request` as outstanding under a
+    /// **task-unique** variant of `key` (keys are never reused over a task's
+    /// lifetime — spec MUST), flip a `working` task to `input_required`, and
+    /// return the receiver that [`deliver_inputs`](Self::deliver_inputs)
+    /// resolves. `Err(())` if the task is unknown, terminal, or expired — the
+    /// awaiting handler unwinds.
+    pub(crate) fn publish_input(
+        &self,
+        id: &str,
+        key: &str,
+        request: Value,
+    ) -> Result<oneshot::Receiver<Value>, ()> {
         let mut map = self.lock();
         Self::purge_expired(&mut map);
-        map.contains_key(id)
+        let entry = map.get_mut(id).ok_or(())?;
+        if entry.status.is_terminal() {
+            return Err(());
+        }
+        // Uniquify: the handler's key as-is when fresh, else `key#2`, `key#3`…
+        let mut unique = key.to_owned();
+        let mut n = 1;
+        while entry.inputs.used.contains(&unique) {
+            n += 1;
+            unique = format!("{key}#{n}");
+        }
+        entry.inputs.used.insert(unique.clone());
+        let (tx, rx) = oneshot::channel();
+        entry.inputs.outstanding.insert(unique.clone(), request);
+        entry.inputs.waiters.insert(unique, tx);
+        if entry.status == TaskStatus::Working {
+            entry.status = TaskStatus::InputRequired;
+            entry.updated_wall = OffsetDateTime::now_utc();
+        }
+        Ok(rx)
+    }
+
+    /// Deliver `tasks/update` `inputResponses`: resolve each response whose
+    /// key is currently outstanding (unknown, already-answered, and
+    /// superseded keys are ignored — spec SHOULD; partial sets are accepted).
+    /// A task drained of outstanding requests returns to `working`. `None`
+    /// for an unknown task (the caller answers `-32602`); `Some(changed)`
+    /// says whether the observable status transitioned (drives the
+    /// `notifications/tasks` push).
+    pub(crate) fn deliver_inputs(&self, id: &str, responses: &Map<String, Value>) -> Option<bool> {
+        let mut map = self.lock();
+        Self::purge_expired(&mut map);
+        let entry = map.get_mut(id)?;
+        for (key, value) in responses {
+            if entry.inputs.outstanding.contains_key(key)
+                && let Some(waiter) = entry.inputs.waiters.remove(key)
+            {
+                entry.inputs.outstanding.remove(key);
+                // A closed receiver means the handler already unwound
+                // (cancel/TTL) — the response is simply dropped.
+                let _ = waiter.send(value.clone());
+            }
+        }
+        let mut changed = false;
+        if entry.status == TaskStatus::InputRequired && entry.inputs.outstanding.is_empty() {
+            entry.status = TaskStatus::Working;
+            entry.updated_wall = OffsetDateTime::now_utc();
+            changed = true;
+        }
+        Some(changed)
     }
 
     fn purge_expired(map: &mut HashMap<String, Entry>) {
@@ -264,6 +349,88 @@ mod tests {
         let store = DraftTaskStore::default();
         assert!(store.get("nope").is_none());
         assert!(!store.cancel("nope"));
-        assert!(!store.contains("nope"));
+        assert!(store.deliver_inputs("nope", &Map::new()).is_none());
+    }
+
+    #[tokio::test]
+    async fn input_flow_publish_get_deliver_resume() {
+        let store = DraftTaskStore::default();
+        let task = store.create(None, None, CancellationToken::new()).unwrap();
+
+        // Publishing flips a working task to input_required…
+        let rx = store
+            .publish_input(
+                &task.task_id,
+                "confirm",
+                json!({"method": "elicitation/create"}),
+            )
+            .unwrap();
+        let got = store.get(&task.task_id).unwrap();
+        assert_eq!(got.task.status, TaskStatus::InputRequired);
+        // …and tasks/get surfaces ALL outstanding requests.
+        assert!(got.input_requests.as_ref().unwrap().contains_key("confirm"));
+
+        // Responses for unknown keys are ignored (spec SHOULD); the task
+        // stays input_required and the waiter stays pending.
+        let mut wrong = Map::new();
+        wrong.insert("never-issued".into(), json!({}));
+        assert_eq!(store.deliver_inputs(&task.task_id, &wrong), Some(false));
+
+        // The matching response resolves the waiter and drains the task back
+        // to working.
+        let mut responses = Map::new();
+        responses.insert("confirm".into(), json!({"action": "accept"}));
+        assert_eq!(store.deliver_inputs(&task.task_id, &responses), Some(true));
+        assert_eq!(rx.await.unwrap()["action"], "accept");
+        let got = store.get(&task.task_id).unwrap();
+        assert_eq!(got.task.status, TaskStatus::Working);
+        assert!(got.input_requests.is_none());
+
+        // A second answer for the same key is already-satisfied → ignored.
+        let mut again = Map::new();
+        again.insert("confirm".into(), json!({"action": "decline"}));
+        assert_eq!(store.deliver_inputs(&task.task_id, &again), Some(false));
+    }
+
+    #[tokio::test]
+    async fn input_keys_are_unique_over_the_task_lifetime() {
+        let store = DraftTaskStore::default();
+        let task = store.create(None, None, CancellationToken::new()).unwrap();
+
+        let _rx1 = store
+            .publish_input(&task.task_id, "confirm", json!({"n": 1}))
+            .unwrap();
+        // Reusing the handler key mints a distinct wire key (spec MUST:
+        // never reuse a key over a task's lifetime).
+        let _rx2 = store
+            .publish_input(&task.task_id, "confirm", json!({"n": 2}))
+            .unwrap();
+        let outstanding = store.get(&task.task_id).unwrap().input_requests.unwrap();
+        assert_eq!(outstanding.len(), 2);
+        assert!(outstanding.contains_key("confirm"));
+        assert!(outstanding.contains_key("confirm#2"));
+    }
+
+    #[tokio::test]
+    async fn cancel_unblocks_an_awaiting_input() {
+        let store = DraftTaskStore::default();
+        let token = CancellationToken::new();
+        let task = store.create(None, None, token.clone()).unwrap();
+        let rx = store
+            .publish_input(&task.task_id, "confirm", json!({}))
+            .unwrap();
+
+        assert!(store.cancel(&task.task_id));
+        // The waiter's sender was dropped: the receiver errors, so an
+        // awaiting handler unwinds instead of hanging.
+        assert!(rx.await.is_err());
+        // A terminal task refuses new input requests.
+        assert!(
+            store
+                .publish_input(&task.task_id, "again", json!({}))
+                .is_err()
+        );
+        // And no longer advertises the old ones.
+        assert!(store.get(&task.task_id).unwrap().input_requests.is_none());
     }
 }

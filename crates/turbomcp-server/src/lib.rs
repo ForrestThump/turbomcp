@@ -42,7 +42,8 @@ pub use context::{
 };
 pub use dispatcher::{DispatcherSessionTerminator, VersionDispatcher};
 pub use extension::{
-    CallAugmentRequest, CallRunner, Extension, ExtensionRequest, SubscribeOutcome,
+    CallAugmentRequest, CallRunner, Extension, ExtensionRequest, SubscribeOutcome, TaskInputBroker,
+    TaskInputSlot,
 };
 pub use logging::LogSender;
 pub use mrtr::ClientHandle;

@@ -877,9 +877,11 @@ async fn try_augment_call<S: McpServerCore>(
 /// Prepare the underlying `tools/call` as a [`CallRunner`]: parse the envelope,
 /// mint the task's cancellation token, wire it into a fresh context, and build
 /// the handler future that renders to draft `CallToolResult` JSON (or the
-/// JSON-RPC error). Taskified calls get no MRTR/progress/log channel — the
+/// JSON-RPC error). Taskified calls get no progress/log channel — the
 /// originating request returns `CreateTaskResult` immediately, so its stream is
-/// gone; mid-task input rides `tasks/get`/`tasks/update` instead (9c).
+/// gone. Client input DOES work mid-task: the context's `ClientHandle` is
+/// task-mediated (SEP-2663 in-execution `input_required` — published via
+/// `inputRequests`, answered via `tasks/update`).
 fn build_call_runner<S: McpServerCore>(
     server: &S,
     router: &MethodRouter<S>,
@@ -890,7 +892,18 @@ fn build_call_runner<S: McpServerCore>(
     let cancel = CancellationToken::new();
     let mut call_ctx = ctx.clone();
     call_ctx.cancellation = cancel.clone();
-    let fut = router.dispatch_call_tool(server.clone(), CallToolContext::new(call_ctx), params);
+    // Mid-task client input (SEP-2663 in-execution `input_required`): the
+    // handle publishes input requests through the late-bound broker slot the
+    // taskifying extension attaches via `CallRunner::attach_input_broker`.
+    // Capability gating (SEP-2322 MUST) still applies — the client's
+    // per-request declared capabilities travel with the handle.
+    let input_slot = crate::extension::TaskInputSlot::default();
+    let handle = ClientHandle::task_mediated(ctx.client_capabilities.clone(), input_slot.clone());
+    let fut = router.dispatch_call_tool(
+        server.clone(),
+        CallToolContext::new(call_ctx).with_client(handle),
+        params,
+    );
     let future: BoxFuture<'static, Result<Value, JsonRpcError>> = Box::pin(async move {
         match fut {
             None => Err(mcp_to_jsonrpc_error(&McpError::method_not_found(
@@ -903,7 +916,7 @@ fn build_call_runner<S: McpServerCore>(
             },
         }
     });
-    Ok(CallRunner::new(future, cancel))
+    Ok(CallRunner::new(future, cancel).with_input_slot(input_slot))
 }
 
 // ---- MRTR (SEP-2322) -----------------------------------------------------------

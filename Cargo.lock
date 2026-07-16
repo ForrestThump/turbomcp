@@ -3280,6 +3280,7 @@ name = "turbomcp-ext-tasks"
 version = "4.0.0-alpha.1"
 dependencies = [
  "async-trait",
+ "futures",
  "serde",
  "serde_json",
  "time",
