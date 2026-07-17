@@ -111,7 +111,7 @@ schemars = { version = "1.2.1", features = ["chrono04", "uuid1"] }
 jsonschema = { version = "0.46", default-features = false }
 
 # HTTP/WebSocket/Network
-reqwest = { version = "0.13.3", default-features = false, features = ["json", "stream", "native-tls", "http2", "brotli", "gzip", "form", "query"] }
+reqwest = { version = "0.13.3", default-features = false, features = ["json", "stream", "native-tls", "form", "query"] }
 axum = { version = "0.8.9", features = ["ws", "tracing", "macros"] }
 tower = { version = "0.5.3", features = ["util", "retry", "timeout"] }
 tower-http = { version = "0.6.9", features = ["compression-br", "compression-gzip", "cors", "timeout", "trace", "limit"] }
