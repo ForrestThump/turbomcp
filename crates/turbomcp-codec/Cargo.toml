@@ -24,3 +24,6 @@ thiserror = { workspace = true }
 
 [target.'cfg(any(target_arch = "x86_64", target_arch = "aarch64"))'.dependencies]
 sonic-rs = { workspace = true, optional = true }
+
+[package.metadata.docs.rs]
+all-features = true

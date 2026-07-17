@@ -32,3 +32,6 @@ tokio = { workspace = true, features = [
     "time",
     "io-util",
 ] }
+
+[package.metadata.docs.rs]
+all-features = true

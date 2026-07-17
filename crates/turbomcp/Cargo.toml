@@ -107,3 +107,6 @@ required-features = ["ext-tasks"]
 [[bench]]
 name = "dispatch"
 harness = false
+
+[package.metadata.docs.rs]
+all-features = true

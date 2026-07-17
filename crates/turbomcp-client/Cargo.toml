@@ -33,3 +33,6 @@ futures = { workspace = true, optional = true }
 [dev-dependencies]
 turbomcp-server = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util"] }
+
+[package.metadata.docs.rs]
+all-features = true

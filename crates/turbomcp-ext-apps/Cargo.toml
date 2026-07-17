@@ -11,3 +11,6 @@ homepage = "https://turbomcp.org"
 
 [dependencies]
 turbomcp-core = { workspace = true }
+
+[package.metadata.docs.rs]
+all-features = true

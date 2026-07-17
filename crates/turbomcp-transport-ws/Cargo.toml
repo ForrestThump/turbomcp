@@ -23,3 +23,6 @@ tracing = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "io-util"] }
 serde_json = { workspace = true }
 tower = { workspace = true }
+
+[package.metadata.docs.rs]
+all-features = true

@@ -30,3 +30,6 @@ regex = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+
+[package.metadata.docs.rs]
+all-features = true
