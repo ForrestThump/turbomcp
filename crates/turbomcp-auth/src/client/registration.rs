@@ -9,13 +9,28 @@ use super::OAuthClientError;
 use super::discovery::AuthorizationServerMetadata;
 
 /// A client identity usable at one authorization server.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Debug` is redacted: `client_secret` is a secret and never renders (only
+/// whether one is present does).
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientCredentials {
     /// The OAuth `client_id`.
     pub client_id: String,
     /// The client secret, when the registration produced a confidential
     /// client. Public clients (the common MCP case) have none.
     pub client_secret: Option<String>,
+}
+
+impl std::fmt::Debug for ClientCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClientCredentials")
+            .field("client_id", &self.client_id)
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 impl ClientCredentials {
@@ -138,13 +153,25 @@ pub async fn obtain_credentials(
             credentials,
             issuer,
         } => {
-            if let Some(expected) = issuer
-                && expected.trim_end_matches('/') != as_meta.issuer.trim_end_matches('/')
-            {
-                return Err(OAuthClientError::IssuerChanged {
-                    expected: expected.clone(),
-                    discovered: as_meta.issuer.clone(),
-                });
+            match issuer {
+                Some(expected)
+                    if expected.trim_end_matches('/') != as_meta.issuer.trim_end_matches('/') =>
+                {
+                    return Err(OAuthClientError::IssuerChanged {
+                        expected: expected.clone(),
+                        discovered: as_meta.issuer.clone(),
+                    });
+                }
+                Some(_) => {}
+                // No recorded issuer means no Authorization Server Binding check
+                // (spec §Authorization Server Binding): the credentials would be
+                // presented to whichever AS discovery selected. Warn — set the
+                // `issuer` to bind them to a specific server.
+                None => tracing::warn!(
+                    discovered_issuer = %as_meta.issuer,
+                    "pre-registered credentials have no recorded issuer; \
+                     presenting them without an authorization-server binding check"
+                ),
             }
             Ok(credentials.clone())
         }

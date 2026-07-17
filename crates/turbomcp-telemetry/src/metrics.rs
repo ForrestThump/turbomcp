@@ -12,9 +12,10 @@
 //! ## Label cardinality is bounded and PII-safe
 //!
 //! Every metric is labeled by `mcp.method` (a fixed method name), the negotiated
-//! `mcp.protocol_version`, and an `outcome` of `ok`/`error` — all low-cardinality
-//! and free of caller data. Identity is deliberately **not** a metric label
-//! (it would be unbounded and would leak PII); identity lives on spans, redacted.
+//! `mcp.protocol_version`, and an `outcome` of `ok`/`error`/`cancelled` — all
+//! low-cardinality and free of caller data. Identity is deliberately **not** a
+//! metric label (it would be unbounded and would leak PII); identity lives on
+//! spans, redacted.
 
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -143,16 +144,43 @@ where
 }
 
 pin_project! {
-    /// Times the inner future and records the request metrics on completion,
-    /// decrementing the in-flight counter (even if the inner future errors).
+    /// Times the inner future and records the request metrics exactly once:
+    /// on completion (outcome `ok`/`error`), or — if the future is dropped
+    /// mid-flight (client disconnect, timeout layer) — on drop (outcome
+    /// `cancelled`). Either way the in-flight counter is decremented, so the
+    /// gauge cannot drift under cancellation.
     pub struct MetricsFuture<F> {
         #[pin]
         inner: F,
         instruments: Arc<Instruments>,
-        // `None` for non-request messages (unmeasured).
+        // `None` for non-request messages (unmeasured), and taken once recorded.
         labels: Option<Vec<KeyValue>>,
         start: Instant,
     }
+
+    impl<F> PinnedDrop for MetricsFuture<F> {
+        fn drop(this: Pin<&mut Self>) {
+            let this = this.project();
+            // Labels still present ⇒ the future never completed: the request
+            // was abandoned mid-flight.
+            if let Some(base) = this.labels.take() {
+                record(this.instruments, base, "cancelled", *this.start);
+            }
+        }
+    }
+}
+
+/// Record one finished (or abandoned) request: count + duration with the
+/// `outcome` label, and the in-flight decrement with the base labels it was
+/// incremented with.
+fn record(instruments: &Instruments, base: Vec<KeyValue>, outcome: &'static str, start: Instant) {
+    let elapsed = start.elapsed().as_secs_f64();
+    let mut labels = base;
+    labels.push(KeyValue::new("outcome", outcome));
+    instruments.requests.add(1, &labels);
+    instruments.duration.record(elapsed, &labels);
+    let in_flight_labels = &labels[..labels.len() - 1];
+    instruments.in_flight.add(-1, in_flight_labels);
 }
 
 impl<F, E> Future for MetricsFuture<F>
@@ -173,15 +201,7 @@ where
                 Ok(Some(JsonRpcMessage::Response(r))) if r.error.is_some() => "error",
                 Ok(_) => "ok",
             };
-            let elapsed = this.start.elapsed().as_secs_f64();
-            let mut labels = base;
-            labels.push(KeyValue::new("outcome", outcome));
-            this.instruments.requests.add(1, &labels);
-            this.instruments.duration.record(elapsed, &labels);
-            // Decrement in-flight with the base labels (no outcome) it was
-            // incremented with.
-            let in_flight_labels = &labels[..labels.len() - 1];
-            this.instruments.in_flight.add(-1, in_flight_labels);
+            record(this.instruments, base, outcome, *this.start);
         }
         Poll::Ready(result)
     }
@@ -293,6 +313,117 @@ mod tests {
 
         let bare: JsonRpcMessage = JsonRpcRequest::new(1, "ping", None).into();
         assert_eq!(protocol_version_label(&bare), "unknown");
+    }
+
+    /// An inner service whose future never resolves — the stand-in for a
+    /// handler abandoned mid-flight (client disconnect, timeout layer).
+    #[derive(Clone)]
+    struct Never;
+
+    impl Service<JsonRpcMessage> for Never {
+        type Response = Option<JsonRpcMessage>;
+        type Error = Infallible;
+        type Future = std::future::Pending<Result<Self::Response, Self::Error>>;
+
+        fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _: JsonRpcMessage) -> Self::Future {
+            std::future::pending()
+        }
+    }
+
+    /// Total of every `name` sum data point whose attributes include all of
+    /// `want`, in the latest exported snapshot (cumulative temporality). The
+    /// filter keys on this test's unique method label, so concurrent tests
+    /// recording through the same global provider can't interfere.
+    fn sum_with(
+        finished: &[opentelemetry_sdk::metrics::data::ResourceMetrics],
+        name: &str,
+        want: &[(&str, &str)],
+    ) -> i128 {
+        use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+        let mut total: i128 = 0;
+        let Some(snapshot) = finished.last() else {
+            return 0;
+        };
+        for scope in snapshot.scope_metrics() {
+            for metric in scope.metrics() {
+                if metric.name() != name {
+                    continue;
+                }
+                match metric.data() {
+                    AggregatedMetrics::U64(MetricData::Sum(sum)) => {
+                        for dp in sum.data_points() {
+                            if attrs_match(dp.attributes(), want) {
+                                total += i128::from(dp.value());
+                            }
+                        }
+                    }
+                    AggregatedMetrics::I64(MetricData::Sum(sum)) => {
+                        for dp in sum.data_points() {
+                            if attrs_match(dp.attributes(), want) {
+                                total += i128::from(dp.value());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        total
+    }
+
+    fn attrs_match<'a>(attrs: impl Iterator<Item = &'a KeyValue>, want: &[(&str, &str)]) -> bool {
+        let attrs: Vec<&KeyValue> = attrs.collect();
+        want.iter().all(|(k, v)| {
+            attrs
+                .iter()
+                .any(|kv| kv.key.as_str() == *k && kv.value.as_str() == *v)
+        })
+    }
+
+    #[tokio::test]
+    async fn dropped_mid_flight_request_is_cancelled_and_frees_the_gauge() {
+        use opentelemetry_sdk::metrics::{
+            InMemoryMetricExporter, PeriodicReader, SdkMeterProvider,
+        };
+
+        let exporter = InMemoryMetricExporter::default();
+        let provider = SdkMeterProvider::builder()
+            .with_reader(PeriodicReader::builder(exporter.clone()).build())
+            .build();
+        global::set_meter_provider(provider.clone());
+
+        // Instruments bind to the (now SDK-backed) global provider at layer
+        // construction.
+        let mut svc = MetricsLayer::new().layer(Never);
+        let req: JsonRpcMessage = JsonRpcRequest::new(1, "drop-probe", None).into();
+        let fut = svc.call(req); // in-flight +1
+        drop(fut); // abandoned before completion
+
+        provider.force_flush().unwrap();
+        let finished = exporter.get_finished_metrics().unwrap();
+
+        assert_eq!(
+            sum_with(
+                &finished,
+                "mcp.server.requests",
+                &[("mcp.method", "drop-probe"), ("outcome", "cancelled")],
+            ),
+            1,
+            "an abandoned request counts once, as cancelled"
+        );
+        assert_eq!(
+            sum_with(
+                &finished,
+                "mcp.server.active_requests",
+                &[("mcp.method", "drop-probe")],
+            ),
+            0,
+            "the in-flight gauge returns to zero — no drift under cancellation"
+        );
     }
 
     #[test]

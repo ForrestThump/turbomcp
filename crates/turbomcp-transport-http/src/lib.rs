@@ -1080,7 +1080,11 @@ where
 /// `Mcp-Session-Id` ends that session — `204` if it existed, `404` if not.
 /// Without one, the spec permits refusing: `405`. The endpoint is part of the
 /// protected resource, so the origin + auth guards apply.
-async fn mcp_delete<S>(State(state): State<HttpState<S>>, headers: HeaderMap) -> Response
+async fn mcp_delete<S>(
+    State(state): State<HttpState<S>>,
+    peer: PeerIp,
+    headers: HeaderMap,
+) -> Response
 where
     S: McpService + Clone + Sync,
     S::Future: Send + 'static,
@@ -1091,7 +1095,17 @@ where
     if let Some(rejection) = check_host(&state.hosts, &headers) {
         return rejection;
     }
-    if let Err(rejection) = enforce_auth(&state, &headers, None).await {
+    let subject = match enforce_auth(&state, &headers, None).await {
+        Ok(subject) => subject,
+        Err(rejection) => return rejection,
+    };
+    // Rate-limit termination like POST/GET — otherwise it's an unthrottled
+    // endpoint even though it mutates session state.
+    if let Some(rejection) = enforce_rate_limit(
+        &state,
+        subject.as_deref(),
+        peer.client_ip(&state.trusted_proxies),
+    ) {
         return rejection;
     }
     let Some(terminator) = &state.session_terminator else {

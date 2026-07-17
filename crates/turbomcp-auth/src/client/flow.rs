@@ -45,7 +45,10 @@ pub struct Discovered {
 /// The per-authorization record the client MUST keep between opening the
 /// browser and receiving the callback: PKCE verifier, `state`, and the
 /// recorded expected issuer (RFC 9207 depends on this being authentic).
-#[derive(Debug)]
+///
+/// `Debug` is redacted: the PKCE verifier is a secret (a leaked verifier lets
+/// an attacker who also has the code complete the exchange), so it never
+/// renders.
 #[non_exhaustive]
 pub struct PendingAuthorization {
     /// Where to send the user's browser.
@@ -56,6 +59,19 @@ pub struct PendingAuthorization {
     expected_issuer: String,
     iss_advertised: bool,
     scopes: Vec<String>,
+}
+
+impl std::fmt::Debug for PendingAuthorization {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingAuthorization")
+            .field("authorize_url", &self.authorize_url)
+            .field("state", &self.state)
+            .field("pkce_verifier", &"<redacted>")
+            .field("expected_issuer", &self.expected_issuer)
+            .field("iss_advertised", &self.iss_advertised)
+            .field("scopes", &self.scopes)
+            .finish()
+    }
 }
 
 /// The parameters of the authorization-response redirect, parsed from its
@@ -298,8 +314,15 @@ impl OAuthClient {
         pending: PendingAuthorization,
         callback: &CallbackParams,
     ) -> Result<TokenSet, OAuthClientError> {
-        // state: discard mismatches (open-redirect protection).
-        if callback.state.as_deref() != Some(pending.state.as_str()) {
+        // state: discard mismatches (CSRF / open-redirect protection). The
+        // compare is constant-time — the redirect is typically received by a
+        // localhost HTTP listener, so a variable-time check would expose a
+        // timing oracle on the expected `state` to anything that can hit it.
+        let state_ok = callback
+            .state
+            .as_deref()
+            .is_some_and(|s| ct_eq(s.as_bytes(), pending.state.as_bytes()));
+        if !state_ok {
             return Err(OAuthClientError::Authorization(
                 "authorization response state mismatch; response discarded".into(),
             ));
@@ -406,6 +429,21 @@ impl OAuthClient {
             .load_tokens(&discovered.server.issuer, &self.resource)
             .await
     }
+}
+
+/// Constant-time byte-slice equality: no early return on the first differing
+/// byte, so comparing a secret-ish token (here the CSRF `state`) leaks no
+/// timing signal about how much of it matched. Length still differs fast — the
+/// `state` length is fixed by `CsrfToken::new_random`, so that is not sensitive.
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 /// Assemble the `oauth2` client from discovered endpoints + credentials.
@@ -528,5 +566,45 @@ mod tests {
             OAuthClient::step_up_scopes(&previous, &challenged),
             vec!["files:read", "profile", "files:write"]
         );
+    }
+
+    #[test]
+    fn secret_bearing_debug_is_redacted() {
+        // A stray `{:?}` on any of these must not spill the secret into logs.
+        let tokens = TokenSet {
+            access_token: "at-super-secret".into(),
+            refresh_token: Some("rt-super-secret".into()),
+            expires_at_epoch_secs: Some(42),
+            scopes: vec!["files:read".into()],
+        };
+        let dbg = format!("{tokens:?}");
+        assert!(!dbg.contains("super-secret"), "token leaked: {dbg}");
+        assert!(dbg.contains("<redacted>") && dbg.contains("files:read"));
+
+        let creds = ClientCredentials {
+            client_id: "public-id".into(),
+            client_secret: Some("cs-super-secret".into()),
+        };
+        let dbg = format!("{creds:?}");
+        assert!(!dbg.contains("super-secret"), "client secret leaked: {dbg}");
+        assert!(dbg.contains("public-id") && dbg.contains("<redacted>"));
+
+        let pending = PendingAuthorization {
+            authorize_url: "https://as.example/authorize?state=s".into(),
+            state: "s".into(),
+            pkce_verifier: "pv-super-secret".into(),
+            expected_issuer: "https://as.example".into(),
+            iss_advertised: true,
+            scopes: vec![],
+        };
+        let dbg = format!("{pending:?}");
+        assert!(!dbg.contains("super-secret"), "pkce verifier leaked: {dbg}");
+        assert!(dbg.contains("<redacted>"));
+
+        // A constant-time state compare still accepts the exact match and
+        // rejects a differing one.
+        assert!(ct_eq(b"abc123", b"abc123"));
+        assert!(!ct_eq(b"abc123", b"abc124"));
+        assert!(!ct_eq(b"abc", b"abcd"));
     }
 }

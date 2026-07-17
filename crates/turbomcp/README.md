@@ -111,12 +111,13 @@ async fn stats(&self) -> Json<Stats> { Json(Stats { count: 3, mean: 1.5 }) }
 
 | Feature | Enables |
 |---|---|
-| *(default)* | stdio transport (always linked) |
+| *(default)* | stdio transport, plus TCP / Unix-socket serving via `turbomcp::net` (always linked) |
 | `http` | Streamable HTTP transport (axum); the client's HTTP transport when `client` is on |
-| `websocket` | WebSocket transport (bidirectional, non-spec) → `turbomcp::ws` |
+| `websocket` | WebSocket transport (bidirectional, non-spec) → `turbomcp::ws` (`WsConfig`: Origin policy, bearer auth, size caps, keepalive) |
 | `client` | the typed `Client` + `ConnectMode` negotiation |
 | `auth` | OAuth 2.1 resource-server auth (bearer validation, RFC 9728 metadata) |
-| `telemetry` | OpenTelemetry tracing (`TraceContextLayer`, W3C `_meta` propagation, PII-safe spans) |
+| `client-oauth` | the OAuth 2.1 *client* flow (auth-code + PKCE, discovery, registration, refresh) → `turbomcp::auth::client` |
+| `telemetry` | OpenTelemetry tracing + metrics (`TraceContextLayer`, `MetricsLayer`, W3C `_meta` propagation, PII-safe spans) |
 | `ext-tasks` | the draft Tasks extension (`io.modelcontextprotocol/tasks`, SEP-2663) |
 
 ## Examples

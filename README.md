@@ -26,9 +26,10 @@ zero-boilerplate surface and strict spec compliance as a feature.
 - **Two protocol versions, one handler.** The same server answers both
   `2025-11-25` and the `2026-07-28` draft. Your handlers speak version-neutral
   types; the version-specific wire shapes are conversions, not signature changes.
-- **Transports behind one builder.** stdio (default), Streamable HTTP (axum),
-  and WebSocket. `MyServer.run_stdio()`, `MyServer.into_server().run_http(addr,
-  cfg)`, or `turbomcp::ws::serve_websocket(listener, dispatcher)`.
+- **Transports behind one builder.** stdio (default), TCP / Unix sockets,
+  Streamable HTTP (axum), and WebSocket. `MyServer.run_stdio()`,
+  `.run_tcp(addr)` / `.run_unix(path)`, `.run_http(addr, cfg)`, or
+  `turbomcp::ws::serve_websocket(listener, factory)`.
 - **The client too.** A typed `Client` runs the handshake, negotiates the
   version, and speaks the same neutral API — interoperating with the official
   Rust SDK (rmcp) in both directions.

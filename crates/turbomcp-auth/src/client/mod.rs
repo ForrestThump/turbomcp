@@ -35,7 +35,11 @@ pub use registration::{
 pub use store::{CredentialStore, MemoryCredentialStore};
 
 /// The tokens one authorization produced.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Debug` is redacted: the access and refresh tokens are secrets, so they
+/// never render (only their presence and the non-secret fields do). Use the
+/// public fields directly when you deliberately need the values.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct TokenSet {
     /// The bearer access token presented to the MCP server.
@@ -47,6 +51,20 @@ pub struct TokenSet {
     /// The scopes this token set was granted (or requested, when the AS
     /// didn't echo a grant).
     pub scopes: Vec<String>,
+}
+
+impl std::fmt::Debug for TokenSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokenSet")
+            .field("access_token", &"<redacted>")
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field("expires_at_epoch_secs", &self.expires_at_epoch_secs)
+            .field("scopes", &self.scopes)
+            .finish()
+    }
 }
 
 impl TokenSet {

@@ -119,6 +119,46 @@ async fn tcp_connections_get_independent_sessions() {
     assert_eq!(err.code, -32022, "got {err:?}");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oversized_line_does_not_take_down_the_server() {
+    use tokio::io::AsyncWriteExt;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let dispatcher = Srv.into_server().build();
+    tokio::spawn(async move {
+        let _ = turbomcp::net::serve_tcp(listener, move || {
+            LegacySessionAdapter::new(dispatcher.clone())
+        })
+        .await;
+    });
+
+    // A raw connection floods 512 KiB with no newline, then hangs. The server's
+    // per-frame cap must abort *that* connection without buffering it forever.
+    let mut flooder = tokio::net::TcpStream::connect(addr).await.unwrap();
+    flooder.write_all(&vec![b'a'; 512 * 1024]).await.unwrap();
+    flooder.flush().await.unwrap();
+
+    // A well-behaved connection still gets served — the flood took down only
+    // its own connection, not the accept loop.
+    let mut client = turbomcp::net::connect_tcp(addr).await.unwrap();
+    let init = respond(&mut client, initialize_req(0)).await;
+    assert!(
+        init.error.is_none(),
+        "server still serving other connections"
+    );
+    let call = respond(
+        &mut client,
+        JsonRpcRequest::new(
+            1,
+            "tools/call",
+            Some(json!({ "name": "echo", "arguments": { "msg": "alive" } })),
+        ),
+    )
+    .await;
+    assert_eq!(call.result.expect("result")["content"][0]["text"], "alive");
+}
+
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unix_socket_round_trip() {

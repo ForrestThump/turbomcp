@@ -15,6 +15,20 @@
 //! [`LineTransport`] over a TLS stream yourself with
 //! [`turbomcp_service::serve_with`] — these helpers serve plaintext sockets
 //! (the common case: localhost, private networks, and proxied deployments).
+//!
+//! ## Trusted-channel transport — no built-in auth or origin check
+//!
+//! Unlike the HTTP and WebSocket transports, these socket servers apply **no
+//! authentication and no Origin/Host check** — the line framing carries no such
+//! concept. Treat a plain TCP/Unix listener as a *trusted channel*: bind it to
+//! loopback or a private network, restrict the Unix socket file's permissions
+//! (its mode follows the process umask — set it deliberately if the socket must
+//! not be world-connectable), or front it with an authenticating proxy. Do not
+//! expose [`serve_tcp`] directly on a public interface. Inbound frames are
+//! still size-bounded ([`LineTransport`]'s
+//! [`DEFAULT_MAX_LINE_BYTES`](crate::DEFAULT_MAX_LINE_BYTES)); if peers are
+//! untrusted, lower that cap. For authenticated network access, use the HTTP or
+//! WebSocket transport instead.
 
 use tokio::io::BufReader;
 use tokio::net::TcpListener;

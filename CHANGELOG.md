@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security / hardening
+
+- **Line transport (stdio, TCP, Unix) now bounds inbound frame size.**
+  `LineTransport` caps a single line at `DEFAULT_MAX_LINE_BYTES` (64 MiB,
+  tunable via `with_max_line_bytes`) and aborts the connection with
+  `StdioError::LineTooLong` instead of buffering an unterminated flood without
+  bound — closing a per-connection memory-DoS on untrusted socket peers.
+- **WebSocket reaps unresponsive peers.** After `WsConfig::max_idle_pings`
+  (default 2) idle pings with no reply — not even the automatic `Pong` — the
+  connection is ended so its task, buffers, and file descriptor are reclaimed
+  rather than held indefinitely.
+- **OAuth client secrets no longer render in `Debug`.** `TokenSet`,
+  `ClientCredentials`, and `PendingAuthorization` redact their secret fields
+  (access/refresh tokens, client secret, PKCE verifier); the CSRF `state`
+  check is now constant-time; pre-registered credentials with no recorded
+  issuer log a binding-check warning.
+- **HTTP `DELETE` (session termination) is rate-limited** for parity with
+  `POST`/`GET`.
+- The `Transport` parity-contract doc and the TCP/Unix module doc spell out the
+  trusted-channel posture (no built-in auth/Origin check) and the size cap.
+
 ## [4.0.0-alpha.1] - 2026-07-16
 
 **v4 is a ground-up rewrite of TurboMCP**, shipped as the same `turbomcp` crate
@@ -35,10 +56,15 @@ API can still change before `4.0.0`. The stable line remains `3.x` (branch
   the draft's Streamable HTTP request-metadata headers (`MCP-Protocol-Version`
   mirror, `Mcp-Method` / `Mcp-Name` / `Mcp-Param-*` validation) and
   result-`_meta` `serverInfo`.
-- **Transports:** stdio (always linked), Streamable HTTP on axum 0.8
-  (per-POST SSE upgrade, sessions + DELETE termination, Origin/Host
-  DNS-rebinding guards, trusted-proxy `X-Forwarded-For`), and WebSocket —
-  `run_stdio()` / `run_http(addr, cfg)` / `ws::serve_websocket`.
+- **Transports:** stdio (always linked), TCP / Unix sockets (`turbomcp::net`,
+  one legacy session per connection), Streamable HTTP on axum 0.8 (per-POST
+  SSE upgrade, sessions + DELETE termination, Origin/Host DNS-rebinding
+  guards, trusted-proxy `X-Forwarded-For`), and WebSocket with the same
+  production guards (`WsConfig`: Origin policy, bearer auth via the shared
+  `HttpAuthenticator` seam, message-size caps, keepalive pings) —
+  `run_stdio()` / `run_tcp(addr)` / `run_unix(path)` / `run_http(addr, cfg)` /
+  `ws::serve_websocket`. The `Transport` trait documents the seven-invariant
+  parity contract every transport upholds.
 - **A typed client** (`feature = "client"`): handshake + version negotiation
   (`ConnectMode`), the server-turn loop for elicitation/sampling, an HTTP
   transport, and a task-aware `call_tool` that transparently drives
@@ -51,9 +77,14 @@ API can still change before `4.0.0`. The stable line remains `3.x` (branch
   `ctx.client` and receive the answer via `tasks/update`.
 - **Enterprise seams:** OAuth 2.1 resource-server auth (JWKS bearer
   validation, RFC 8707 `aud` binding, RFC 9728 metadata, per-tool
-  `#[tool(scopes(…))]`), identity-keyed rate limiting, OpenTelemetry tracing
-  with W3C `_meta` propagation and PII-safe spans, session idle timeout and
-  termination.
+  `#[tool(scopes(…))]`), a full OAuth 2.1 **client** flow
+  (`feature = "client-oauth"`: auth-code + PKCE, RFC 8414/OIDC discovery,
+  RFC 7591 registration + CIMD, RFC 8707 `resource` binding, RFC 9207 `iss`
+  validation, issuer-keyed credential store), identity-keyed rate limiting,
+  OpenTelemetry tracing **and metrics** (request count / duration / in-flight,
+  W3C `_meta` propagation, PII-safe labels), pluggable session and task
+  storage (`SessionBackend` / `TaskBackend` — in-memory bundled, Redis-shaped
+  seam for multi-instance deployments), session idle timeout and termination.
 - **Bidirectional + realtime:** `subscriptions/listen` (draft) and legacy
   resource subscriptions, elicitation (MRTR request-state model + legacy
   inline), sampling, roots, progress, and logging.
@@ -61,15 +92,17 @@ API can still change before `4.0.0`. The stable line remains `3.x` (branch
   `wasm32-unknown-unknown`.
 - **Verified:** official `@modelcontextprotocol/conformance` suite — 47
   checks, 43 pass, 0 fail (4 info); cross-SDK interop with the official Rust
-  SDK (rmcp) in both directions.
+  SDK (rmcp) in both directions; fuzzed untrusted-input decoders (wire codec,
+  `Mcp-Param-*` header sentinel, URI-template matcher) and `cargo-deny`
+  supply-chain checks, both in CI.
 
 ### Compatibility
 
 - The macro surface is intentionally source-compatible with v3 for the common
   case; see `crates/turbomcp/MIGRATION.md` for the deltas (error constructors,
   per-RPC contexts, derived capabilities, Tasks split).
-- Not yet ported from v3: server composition (`CompositeHandler`), visibility
-  layers, TCP/Unix-socket transports.
+- Not yet ported from v3: server composition (`CompositeHandler`) and
+  visibility layers.
 
 ## [3.1.5] - 2026-05-11
 

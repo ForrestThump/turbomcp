@@ -26,13 +26,16 @@
 //!    network transport otherwise.
 //! 3. **Cross-origin defense.** Browser-reachable endpoints validate `Origin`
 //!    (HTTP requests, WebSocket upgrades) — default-deny with an allowlist.
-//! 4. **Bounded input.** A size cap on inbound payloads (HTTP body limit, WS
-//!    message limit). Line transports bound per-frame memory by the reader's
-//!    buffer growth only — cap upstream if untrusted peers can reach them.
+//! 4. **Bounded input.** A size cap on inbound payloads: HTTP body limit, WS
+//!    message limit, and the line transport's per-frame cap
+//!    (`LineTransport::with_max_line_bytes`, defaulting to
+//!    `DEFAULT_MAX_LINE_BYTES`) — a peer that never sends `\n` is refused, not
+//!    buffered without bound. Lower the cap for untrusted socket peers.
 //! 5. **Liveness + shutdown.** Long-lived channels keep intermediaries alive
-//!    (SSE keep-alive comments, WS idle pings) and honor the shutdown token:
-//!    accept loops stop, in-flight handlers drain within the configured
-//!    deadline, `subscriptions/listen` streams close gracefully.
+//!    (SSE keep-alive comments, WS idle pings) *and* reap peers that go silent
+//!    (WS closes after `max_idle_pings` unanswered probes), and honor the
+//!    shutdown token: accept loops stop, in-flight handlers drain within the
+//!    configured deadline, `subscriptions/listen` streams close gracefully.
 //! 6. **Backpressure.** Inbound dispatch is bounded (`max_in_flight` in the
 //!    serve driver; connection/request limits in the HTTP stack) so a fast
 //!    peer cannot grow memory without bound.

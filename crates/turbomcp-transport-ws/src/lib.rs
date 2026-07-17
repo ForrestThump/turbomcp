@@ -31,10 +31,14 @@
 //!   `RequestContext::identity` exactly as it does for HTTP.
 //! - **Message-size limit** — [`WsConfig::max_message_bytes`] (default 1 MiB,
 //!   matching HTTP's body limit) is enforced by the WebSocket library.
-//! - **Idle keepalive** — after [`WsConfig::ping_interval`] (default 30s)
-//!   without an inbound frame, the transport sends a WebSocket `Ping` so
-//!   NAT/proxy idle timers don't silently kill the connection and dead peers
-//!   eventually surface as I/O errors.
+//! - **Idle keepalive + liveness reaping** — after [`WsConfig::ping_interval`]
+//!   (default 30s) without an inbound frame, the transport sends a WebSocket
+//!   `Ping` so NAT/proxy idle timers don't silently kill the connection. A live
+//!   peer's library answers with a `Pong` (an inbound frame), which resets the
+//!   idle count; a peer that is open but unreachable answers nothing, and after
+//!   [`WsConfig::max_idle_pings`] unanswered probes (default 2 ⇒ ~90s) the
+//!   transport ends the stream so the connection's task, buffers, and file
+//!   descriptor are reclaimed rather than held indefinitely.
 //! - **Graceful shutdown** — the accept loop stops when the
 //!   [`ServeConfig::shutdown`] token fires, and each live connection drains
 //!   through the serve driver's two-phase drain.
@@ -89,6 +93,7 @@ pub struct WsConfig {
     authenticator: Option<Arc<dyn HttpAuthenticator>>,
     max_message_bytes: usize,
     ping_interval: Option<Duration>,
+    max_idle_pings: Option<u32>,
     serve: ServeConfig,
 }
 
@@ -105,6 +110,7 @@ impl std::fmt::Debug for WsConfig {
         f.debug_struct("WsConfig")
             .field("max_message_bytes", &self.max_message_bytes)
             .field("ping_interval", &self.ping_interval)
+            .field("max_idle_pings", &self.max_idle_pings)
             .field("authenticator", &self.authenticator.is_some())
             .finish_non_exhaustive()
     }
@@ -117,6 +123,7 @@ impl Default for WsConfig {
             authenticator: None,
             max_message_bytes: 1 << 20, // 1 MiB, matching HttpConfig
             ping_interval: Some(Duration::from_secs(30)),
+            max_idle_pings: Some(2),
             serve: ServeConfig::default(),
         }
     }
@@ -168,10 +175,23 @@ impl WsConfig {
     }
 
     /// Send a WebSocket `Ping` after this long without an inbound frame
-    /// (default 30s); `None` disables idle pings.
+    /// (default 30s); `None` disables idle pings (and, with them, liveness
+    /// reaping).
     #[must_use]
     pub fn ping_interval(mut self, interval: Option<Duration>) -> Self {
         self.ping_interval = interval;
+        self
+    }
+
+    /// End the connection after this many consecutive unanswered idle pings
+    /// (default `Some(2)`). A peer that stays open but replies to nothing — not
+    /// even the library's automatic `Pong` — is treated as dead once the count
+    /// is reached, so its resources are reclaimed. `None` pings forever without
+    /// ever reaping (keepalive only). Has no effect when
+    /// [`ping_interval`](Self::ping_interval) is `None`.
+    #[must_use]
+    pub fn max_idle_pings(mut self, max: Option<u32>) -> Self {
+        self.max_idle_pings = max;
         self
     }
 
@@ -203,6 +223,7 @@ pub struct WebSocketTransport<S, C = DefaultCodec> {
     stream: WebSocketStream<S>,
     codec: C,
     ping_interval: Option<Duration>,
+    max_idle_pings: Option<u32>,
 }
 
 impl<S, C: Codec> WebSocketTransport<S, C> {
@@ -212,6 +233,7 @@ impl<S, C: Codec> WebSocketTransport<S, C> {
             stream,
             codec,
             ping_interval: None,
+            max_idle_pings: None,
         }
     }
 
@@ -220,6 +242,15 @@ impl<S, C: Codec> WebSocketTransport<S, C> {
     #[must_use]
     pub fn with_ping_interval(mut self, interval: Option<Duration>) -> Self {
         self.ping_interval = interval;
+        self
+    }
+
+    /// Reap the connection after `max` consecutive unanswered idle pings
+    /// (`None`, the default here, never reaps). See
+    /// [`WsConfig::max_idle_pings`].
+    #[must_use]
+    pub fn with_max_idle_pings(mut self, max: Option<u32>) -> Self {
+        self.max_idle_pings = max;
         self
     }
 }
@@ -273,15 +304,28 @@ where
     }
 
     async fn recv(&mut self) -> Result<Option<JsonRpcMessage>, Self::Error> {
+        let mut idle_pings: u32 = 0;
         loop {
             let frame = match self.ping_interval {
                 Some(interval) => {
                     match tokio::time::timeout(interval, self.stream.next()).await {
                         Ok(frame) => frame,
                         Err(_idle) => {
-                            // Idle: probe liveness (the peer's library answers
-                            // with a Pong; a dead TCP path surfaces as an error
-                            // on this or a later write).
+                            // Idle past the interval. If we've already probed the
+                            // allowed number of times with no inbound frame in
+                            // between (not even a Pong), the peer is open but
+                            // unreachable — end the stream so its resources are
+                            // reclaimed instead of held forever.
+                            if self.max_idle_pings.is_some_and(|max| idle_pings >= max) {
+                                tracing::debug!(
+                                    idle_pings,
+                                    "websocket peer unresponsive to pings; closing"
+                                );
+                                return Ok(None);
+                            }
+                            idle_pings += 1;
+                            // Probe liveness: a live peer's library answers with
+                            // a Pong (an inbound frame, resetting the count).
                             self.stream.send(Message::Ping(Vec::new().into())).await?;
                             continue;
                         }
@@ -289,6 +333,9 @@ where
                 }
                 None => self.stream.next().await,
             };
+            // Any inbound frame — including the automatic Pong — proves the peer
+            // is alive this interval.
+            idle_pings = 0;
             let Some(frame) = frame else {
                 return Ok(None);
             };
@@ -423,7 +470,8 @@ where
     let stream =
         tokio_tungstenite::accept_hdr_async_with_config(socket, callback, Some(ws_config)).await?;
     let transport = WebSocketTransport::new(stream, DefaultCodec::default())
-        .with_ping_interval(config.ping_interval);
+        .with_ping_interval(config.ping_interval)
+        .with_max_idle_pings(config.max_idle_pings);
 
     // Bearer auth (async: JWKS-backed validators may fetch keys). There is no
     // post-upgrade 401 in WebSocket, so a rejection is close code 1008.
@@ -523,6 +571,27 @@ mod tests {
         };
         assert_eq!(r.method, "late");
         client.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unresponsive_peer_is_reaped_after_max_idle_pings() {
+        let (a, b) = tokio::io::duplex(1024);
+        // The client endpoint exists but is never polled or written to, so it
+        // never sends a Pong — the "open but unreachable" case.
+        let _client = WebSocketTransport::from_raw(a, Role::Client).await;
+        let mut server = WebSocketTransport::from_raw(b, Role::Server)
+            .await
+            .with_ping_interval(Some(Duration::from_millis(10)))
+            .with_max_idle_pings(Some(2));
+
+        // recv must probe, get no pong, and end the stream — never hang.
+        let reaped = tokio::time::timeout(Duration::from_secs(2), server.recv())
+            .await
+            .expect("recv returns rather than hanging on a dead peer");
+        assert!(
+            reaped.unwrap().is_none(),
+            "an unresponsive peer surfaces as clean EOF"
+        );
     }
 
     #[test]
