@@ -111,6 +111,51 @@ jobs:
     - name: cargo check at MSRV
       run: cargo check --workspace --all-features
 
+  supply-chain:
+    name: Supply chain (cargo-deny)
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v6
+
+    # Advisories (RUSTSEC), license policy, banned/duplicate crates, and source
+    # provenance — all governed by deny.toml. Fails the build on a new
+    # vulnerability or a disallowed license.
+    - name: cargo-deny
+      uses: EmbarkStudios/cargo-deny-action@v2
+      with:
+        command: check advisories bans licenses sources
+
+  fuzz-smoke:
+    name: Fuzz (smoke)
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v6
+
+    - name: Install system dependencies
+      run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+    - name: Install nightly + cargo-fuzz
+      uses: dtolnay/rust-toolchain@nightly
+    - name: Install cargo-fuzz
+      uses: taiki-e/install-action@v2
+      with:
+        tool: cargo-fuzz
+
+    # Short deterministic runs (not a soak): each target must build under the
+    # sanitizer and survive a bounded run without a crash. Catches regressions
+    # in the untrusted-input decoders (wire codec, Mcp-Param header sentinel,
+    # URI-template matcher) on every push. Longer campaigns run out of band.
+    - name: Fuzz each target briefly
+      working-directory: fuzz
+      run: |
+        for target in codec_decode mcp_header_codec uri_template; do
+          echo "::group::fuzz $target"
+          cargo +nightly fuzz run "$target" -- -max_total_time=30 -rss_limit_mb=4096
+          echo "::endgroup::"
+        done
+
   wasm:
     name: WASM
     runs-on: ubuntu-latest

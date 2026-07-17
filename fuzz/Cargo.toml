@@ -1,0 +1,45 @@
+[package]
+name = "turbomcp-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+rust-version = "1.88"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Excluded from the main workspace (own lockfile, nightly cargo-fuzz toolchain).
+# Run: `cd fuzz && cargo +nightly fuzz run <target>`.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1"
+turbomcp-core = { path = "../crates/turbomcp-core", features = ["std"] }
+turbomcp-codec = { path = "../crates/turbomcp-codec" }
+turbomcp-service = { path = "../crates/turbomcp-service" }
+turbomcp-server = { path = "../crates/turbomcp-server" }
+
+[[bin]]
+name = "codec_decode"
+path = "fuzz_targets/codec_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mcp_header_codec"
+path = "fuzz_targets/mcp_header_codec.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "uri_template"
+path = "fuzz_targets/uri_template.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1

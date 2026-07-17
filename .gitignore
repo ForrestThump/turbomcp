@@ -133,3 +133,9 @@ site
 .stderr
 # Exception: Include trybuild test fixtures
 !**/tests/compile_fail/*.stderr
+
+# cargo-fuzz working directories (generated corpora + crash artifacts + build)
+fuzz/corpus/
+fuzz/artifacts/
+fuzz/coverage/
+fuzz/target/
