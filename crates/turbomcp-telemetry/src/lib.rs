@@ -36,9 +36,11 @@
 #![warn(missing_docs)]
 
 mod layer;
+mod metrics;
 mod propagation;
 
 pub use layer::{TraceContext, TraceContextLayer};
+pub use metrics::{Metrics, MetricsLayer};
 pub use propagation::{extract as extract_context, inject as inject_context};
 
 #[cfg(feature = "otlp")]

@@ -10,8 +10,9 @@
 
 use opentelemetry::global;
 use opentelemetry::trace::TracerProvider as _;
-use opentelemetry_otlp::{SpanExporter, WithExportConfig};
+use opentelemetry_otlp::{MetricExporter, SpanExporter, WithExportConfig};
 use opentelemetry_sdk::Resource;
+use opentelemetry_sdk::metrics::SdkMeterProvider;
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use tracing_subscriber::layer::SubscriberExt;
@@ -48,28 +49,33 @@ impl OtlpConfig {
     }
 }
 
-/// Keeps the tracer provider alive; flushes pending spans on drop. Hold it for
-/// the process lifetime.
-#[must_use = "dropping the guard shuts the exporter down and stops trace export"]
+/// Keeps the tracer + meter providers alive; flushes pending spans and metrics
+/// on drop. Hold it for the process lifetime.
+#[must_use = "dropping the guard shuts the exporters down and stops trace/metric export"]
 pub struct TelemetryGuard {
     provider: SdkTracerProvider,
+    meter_provider: SdkMeterProvider,
 }
 
 impl Drop for TelemetryGuard {
     fn drop(&mut self) {
         // Best-effort flush; nothing actionable if the collector is already gone.
         let _ = self.provider.shutdown();
+        let _ = self.meter_provider.shutdown();
     }
 }
 
-/// Install the OTLP export pipeline and a `tracing` subscriber wired to it.
+/// Install the OTLP export pipeline (traces **and** metrics) and a `tracing`
+/// subscriber wired to it.
 ///
-/// Registers a global tracer provider + W3C trace-context propagator and a
-/// global subscriber (env-filter + fmt + the OpenTelemetry layer). Returns the
-/// [`TelemetryGuard`] to hold for the process lifetime.
+/// Registers a global tracer provider, a global meter provider (so
+/// [`MetricsLayer`](crate::MetricsLayer)'s instruments export), a W3C
+/// trace-context propagator, and a global subscriber (env-filter + fmt + the
+/// OpenTelemetry layer). Returns the [`TelemetryGuard`] to hold for the process
+/// lifetime.
 ///
 /// # Errors
-/// - [`TelemetryError::Exporter`] if the OTLP exporter can't be built.
+/// - [`TelemetryError::Exporter`] if either OTLP exporter can't be built.
 /// - [`TelemetryError::Subscriber`] if a global subscriber is already installed.
 pub fn init_otlp(config: OtlpConfig) -> Result<TelemetryGuard, TelemetryError> {
     let mut builder = SpanExporter::builder().with_tonic();
@@ -85,8 +91,23 @@ pub fn init_otlp(config: OtlpConfig) -> Result<TelemetryGuard, TelemetryError> {
         .build();
     let provider = SdkTracerProvider::builder()
         .with_batch_exporter(exporter)
+        .with_resource(resource.clone())
+        .build();
+
+    // Metrics pipeline (periodic-reader OTLP export), globally installed so the
+    // MetricsLayer's `global::meter("turbomcp")` instruments record and export.
+    let mut metric_builder = MetricExporter::builder().with_tonic();
+    if let Some(endpoint) = &config.endpoint {
+        metric_builder = metric_builder.with_endpoint(endpoint.clone());
+    }
+    let metric_exporter = metric_builder
+        .build()
+        .map_err(|e| TelemetryError::Exporter(e.to_string()))?;
+    let meter_provider = SdkMeterProvider::builder()
+        .with_periodic_exporter(metric_exporter)
         .with_resource(resource)
         .build();
+    global::set_meter_provider(meter_provider.clone());
 
     let tracer = provider.tracer("turbomcp");
     global::set_tracer_provider(provider.clone());
@@ -100,5 +121,8 @@ pub fn init_otlp(config: OtlpConfig) -> Result<TelemetryGuard, TelemetryError> {
         .try_init()
         .map_err(|e| TelemetryError::Subscriber(e.to_string()))?;
 
-    Ok(TelemetryGuard { provider })
+    Ok(TelemetryGuard {
+        provider,
+        meter_provider,
+    })
 }

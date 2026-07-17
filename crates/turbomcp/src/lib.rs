@@ -215,8 +215,10 @@ pub use turbomcp_service::{AuthDecision, HttpAuthenticator};
 pub use turbomcp_service::{GovernorRateLimiter, RateKey, RateLimiter};
 
 /// OpenTelemetry observability: the [`TraceContextLayer`](telemetry::TraceContextLayer)
-/// (W3C trace continuation over `_meta` + PII-safe identity spans) and an
-/// optional OTLP export pipeline. Enable with the `telemetry` feature.
+/// (W3C trace continuation over `_meta` + PII-safe identity spans), the
+/// [`MetricsLayer`](telemetry::MetricsLayer) (request count / duration /
+/// in-flight, labeled by method + version + outcome), and an optional OTLP
+/// export pipeline (traces + metrics). Enable with the `telemetry` feature.
 #[cfg(feature = "telemetry")]
 pub use turbomcp_telemetry as telemetry;
 
