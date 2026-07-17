@@ -262,11 +262,13 @@ impl StreamableHttpClientTransport {
         }
 
         // Build HTTP client with TLS configuration
-        // IMPORTANT: Must explicitly call use_rustls_tls() because cargo features are additive
+        // IMPORTANT: Must explicitly pick a TLS backend because cargo features are additive. Native-tls
+        // here so a co-resident reqwest user (e.g. the `spider` crate in liberado-spider-mcp) is not
+        // forced onto rustls by feature unification, which hangs its page fetches.
         // and other dependencies may bring in native-tls. Without this, TLS 1.3 minimum fails.
         // See: https://github.com/seanmonstar/reqwest/issues/1314
         let mut client_builder = HttpClient::builder()
-            .use_rustls_tls()
+            .use_native_tls()
             .timeout(config.timeout);
 
         // Redirect policy: when carrying a bearer token, only follow same-origin redirects
