@@ -7,7 +7,7 @@
 //!
 //! # The production parity contract
 //!
-//! Every bundled server transport — stdio, TCP/Unix (`turbomcp-transport-stdio`),
+//! Every bundled server transport — stdio (`turbomcp-transport-stdio`),
 //! WebSocket (`turbomcp-transport-ws`), and Streamable HTTP
 //! (`turbomcp-transport-http`, a runner rather than a `Transport`) — must
 //! uphold the same production guarantees. A new transport (or a change to one)
@@ -22,15 +22,15 @@
 //!    [`HttpAuthenticator`](crate::HttpAuthenticator) seam validates a bearer
 //!    credential (per request on HTTP; at the upgrade for WebSocket, with the
 //!    principal carried per-connection via [`ServeConfig::identity`](crate::ServeConfig)).
-//!    stdio/TCP/Unix are for trusted-channel deployments; front them with a
-//!    network transport otherwise.
+//!    stdio is a trusted local channel (a launcher owns both pipe ends); use a
+//!    network transport when the deployment is reachable.
 //! 3. **Cross-origin defense.** Browser-reachable endpoints validate `Origin`
 //!    (HTTP requests, WebSocket upgrades) — default-deny with an allowlist.
 //! 4. **Bounded input.** A size cap on inbound payloads: HTTP body limit, WS
-//!    message limit, and the line transport's per-frame cap
+//!    message limit, and the stdio line transport's per-frame cap
 //!    (`LineTransport::with_max_line_bytes`, defaulting to
 //!    `DEFAULT_MAX_LINE_BYTES`) — a peer that never sends `\n` is refused, not
-//!    buffered without bound. Lower the cap for untrusted socket peers.
+//!    buffered without bound.
 //! 5. **Liveness + shutdown.** Long-lived channels keep intermediaries alive
 //!    (SSE keep-alive comments, WS idle pings) *and* reap peers that go silent
 //!    (WS closes after `max_idle_pings` unanswered probes), and honor the

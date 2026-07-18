@@ -7,13 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Dropped the non-spec TCP and Unix-socket server transports**
+  (`turbomcp::net`, `turbomcp-transport-stdio::net`). MCP defines stdio and
+  Streamable HTTP; no MCP client speaks a raw TCP/Unix socket, and those
+  transports carried no authentication or Origin concept. The supported
+  transports are **stdio + Streamable HTTP** (spec) and **WebSocket** (non-spec
+  but with the same Origin/auth/size guards). For local IPC, use stdio; for
+  network access, use HTTP or WebSocket.
+
 ### Security / hardening
 
-- **Line transport (stdio, TCP, Unix) now bounds inbound frame size.**
-  `LineTransport` caps a single line at `DEFAULT_MAX_LINE_BYTES` (64 MiB,
-  tunable via `with_max_line_bytes`) and aborts the connection with
-  `StdioError::LineTooLong` instead of buffering an unterminated flood without
-  bound — closing a per-connection memory-DoS on untrusted socket peers.
+- **The stdio line transport now bounds inbound frame size.** `LineTransport`
+  caps a single line at `DEFAULT_MAX_LINE_BYTES` (64 MiB, tunable via
+  `with_max_line_bytes`) and ends the stream with `StdioError::LineTooLong`
+  instead of buffering an unterminated flood without bound — defense-in-depth
+  against a pathological local peer.
 - **WebSocket reaps unresponsive peers.** After `WsConfig::max_idle_pings`
   (default 2) idle pings with no reply — not even the automatic `Pong` — the
   connection is ended so its task, buffers, and file descriptor are reclaimed
@@ -56,15 +66,14 @@ API can still change before `4.0.0`. The stable line remains `3.x` (branch
   the draft's Streamable HTTP request-metadata headers (`MCP-Protocol-Version`
   mirror, `Mcp-Method` / `Mcp-Name` / `Mcp-Param-*` validation) and
   result-`_meta` `serverInfo`.
-- **Transports:** stdio (always linked), TCP / Unix sockets (`turbomcp::net`,
-  one legacy session per connection), Streamable HTTP on axum 0.8 (per-POST
+- **Transports:** stdio (always linked), Streamable HTTP on axum 0.8 (per-POST
   SSE upgrade, sessions + DELETE termination, Origin/Host DNS-rebinding
   guards, trusted-proxy `X-Forwarded-For`), and WebSocket with the same
   production guards (`WsConfig`: Origin policy, bearer auth via the shared
-  `HttpAuthenticator` seam, message-size caps, keepalive pings) —
-  `run_stdio()` / `run_tcp(addr)` / `run_unix(path)` / `run_http(addr, cfg)` /
-  `ws::serve_websocket`. The `Transport` trait documents the seven-invariant
-  parity contract every transport upholds.
+  `HttpAuthenticator` seam, message-size caps, keepalive pings + idle-peer
+  reaping) — `run_stdio()` / `run_http(addr, cfg)` / `ws::serve_websocket`.
+  The `Transport` trait documents the seven-invariant parity contract every
+  transport upholds.
 - **A typed client** (`feature = "client"`): handshake + version negotiation
   (`ConnectMode`), the server-turn loop for elicitation/sampling, an HTTP
   transport, and a task-aware `call_tool` that transparently drives
@@ -101,8 +110,9 @@ API can still change before `4.0.0`. The stable line remains `3.x` (branch
 - The macro surface is intentionally source-compatible with v3 for the common
   case; see `crates/turbomcp/MIGRATION.md` for the deltas (error constructors,
   per-RPC contexts, derived capabilities, Tasks split).
-- Not yet ported from v3: server composition (`CompositeHandler`) and
-  visibility layers.
+- Not ported from v3: server composition (`CompositeHandler`), visibility
+  layers, and the TCP/Unix-socket transports (dropped as non-spec — use stdio
+  for local IPC, HTTP/WebSocket for network access).
 
 ## [3.1.5] - 2026-05-11
 

@@ -13,7 +13,7 @@ homepage = "https://turbomcp.org"
 turbomcp-core = { workspace = true }
 turbomcp-codec = { workspace = true }
 turbomcp-service = { workspace = true }
-tokio = { workspace = true, features = ["io-std", "io-util", "net", "rt"] }
+tokio = { workspace = true, features = ["io-std", "io-util"] }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 

@@ -6,14 +6,11 @@
 //! frame's bytes into a value is the [`Codec`]'s.
 //!
 //! The framing lives in [`LineTransport`], generic over any async byte streams,
-//! so it is unit-testable over an in-memory pipe and reusable by the socket
-//! servers in [`net`] (TCP + Unix domain sockets, same framing).
-//! [`StdioTransport`]/[`stdio`] specialize it to stdin/stdout; [`serve_stdio`]
-//! pairs it with a service (the dispatcher).
+//! so it is unit-testable over an in-memory pipe. [`StdioTransport`]/[`stdio`]
+//! specialize it to stdin/stdout; [`serve_stdio`] pairs it with a service (the
+//! dispatcher).
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
-
-pub mod net;
 
 use tokio::io::{
     AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, Stdin, Stdout,
@@ -43,13 +40,11 @@ pub enum StdioError {
 
 /// Default cap on one inbound line (a single JSON-RPC frame), in bytes.
 ///
-/// A line longer than this ends the connection with [`StdioError::LineTooLong`]
-/// instead of growing the read buffer without bound. This is the line framing's
-/// memory-DoS guard for untrusted peers: over a socket
-/// ([`net::serve_tcp`]/[`net::serve_unix`]) a client that streams bytes and
-/// never sends `\n` would otherwise force an unbounded allocation. 64 MiB
-/// clears any realistic MCP frame (including base64 image/audio payloads) while
-/// bounding the worst case; tune per transport with
+/// A line longer than this ends the stream with [`StdioError::LineTooLong`]
+/// instead of growing the read buffer without bound — defense-in-depth so a
+/// peer that streams bytes and never sends `\n` can't force an unbounded
+/// allocation. 64 MiB clears any realistic MCP frame (including base64
+/// image/audio payloads) while bounding the worst case; tune with
 /// [`LineTransport::with_max_line_bytes`].
 pub const DEFAULT_MAX_LINE_BYTES: usize = 64 * 1024 * 1024;
 

@@ -111,7 +111,7 @@ async fn stats(&self) -> Json<Stats> { Json(Stats { count: 3, mean: 1.5 }) }
 
 | Feature | Enables |
 |---|---|
-| *(default)* | stdio transport, plus TCP / Unix-socket serving via `turbomcp::net` (always linked) |
+| *(default)* | stdio transport (always linked) |
 | `http` | Streamable HTTP transport (axum); the client's HTTP transport when `client` is on |
 | `websocket` | WebSocket transport (bidirectional, non-spec) → `turbomcp::ws` (`WsConfig`: Origin policy, bearer auth, size caps, keepalive) |
 | `client` | the typed `Client` + `ConnectMode` negotiation |
