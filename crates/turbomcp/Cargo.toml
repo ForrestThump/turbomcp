@@ -33,6 +33,9 @@ client = ["dep:turbomcp-client"]
 # The draft Tasks extension (io.modelcontextprotocol/tasks, SEP-2663):
 # resultType:"task" augmentation, tasks/get|update|cancel, notifications/tasks.
 ext-tasks = ["dep:turbomcp-ext-tasks"]
+# SIMD-accelerated JSON (sonic-rs) as the DefaultCodec on native
+# x86_64/aarch64. Off by default: serde_json is the portable baseline.
+simd = ["turbomcp-codec/simd"]
 
 [dependencies]
 turbomcp-core = { workspace = true }
