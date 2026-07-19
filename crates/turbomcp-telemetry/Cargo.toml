@@ -5,9 +5,12 @@ edition = "2024"
 rust-version = "1.88"
 authors = ["Nicholas Paterno <nick@epistates.com>"]
 description = "TurboMCP v4 telemetry: OpenTelemetry, W3C Trace Context, metrics."
+readme = "README.md"
 license = "MIT"
 repository = "https://github.com/Epistates/turbomcp"
 homepage = "https://turbomcp.org"
+keywords = ["mcp", "opentelemetry", "tracing", "metrics"]
+categories = ["development-tools::debugging", "network-programming"]
 
 [dependencies]
 turbomcp-core = { workspace = true }

@@ -4,11 +4,13 @@ version = "4.0.0-alpha.1"
 edition = "2024"
 rust-version = "1.88"
 authors = ["Nicholas Paterno <nick@epistates.com>"]
-description = "TurboMCP v4 SDK facade: re-exports + prelude."
+description = "Rust SDK for the Model Context Protocol (MCP): macro-driven servers and a typed client, dual protocol versions, stdio/HTTP/WebSocket transports, OAuth 2.1, OpenTelemetry."
 readme = "README.md"
 license = "MIT"
 repository = "https://github.com/Epistates/turbomcp"
 homepage = "https://turbomcp.org"
+keywords = ["mcp", "model-context", "llm", "ai", "sdk"]
+categories = ["network-programming", "asynchronous", "api-bindings"]
 
 [features]
 # stdio is the default transport and is always linked; http is opt-in.

@@ -4,10 +4,13 @@ version = "4.0.0-alpha.1"
 edition = "2024"
 rust-version = "1.88"
 authors = ["Nicholas Paterno <nick@epistates.com>"]
-description = "TurboMCP v4 client: ClientBuilder, ConnectMode probe, MRTR loop, cache layer."
+description = "TurboMCP v4 client: ClientBuilder, ConnectMode probe, MRTR loop, SEP-2549 response cache."
+readme = "README.md"
 license = "MIT"
 repository = "https://github.com/Epistates/turbomcp"
 homepage = "https://turbomcp.org"
+keywords = ["mcp", "client", "llm", "ai"]
+categories = ["network-programming", "asynchronous", "api-bindings"]
 
 [features]
 # The Streamable HTTP client transport (reqwest + SSE). Off by default; stdio

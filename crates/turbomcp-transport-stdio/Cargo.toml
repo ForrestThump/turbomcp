@@ -5,9 +5,12 @@ edition = "2024"
 rust-version = "1.88"
 authors = ["Nicholas Paterno <nick@epistates.com>"]
 description = "TurboMCP v4 STDIO transport."
+readme = "README.md"
 license = "MIT"
 repository = "https://github.com/Epistates/turbomcp"
 homepage = "https://turbomcp.org"
+keywords = ["mcp", "stdio", "transport"]
+categories = ["network-programming", "asynchronous"]
 
 [dependencies]
 turbomcp-core = { workspace = true }

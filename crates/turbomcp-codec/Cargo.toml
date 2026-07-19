@@ -5,9 +5,12 @@ edition = "2024"
 rust-version = "1.88"
 authors = ["Nicholas Paterno <nick@epistates.com>"]
 description = "TurboMCP v4 wire codec: bytes <-> JsonRpcMessage (serde_json / sonic-rs / msgpack)."
+readme = "README.md"
 license = "MIT"
 repository = "https://github.com/Epistates/turbomcp"
 homepage = "https://turbomcp.org"
+keywords = ["mcp", "json-rpc", "codec", "serde"]
+categories = ["encoding", "network-programming"]
 
 [features]
 # `serde_json` is always available as the portable baseline (incl. wasm32).

@@ -4,10 +4,13 @@ version = "4.0.0-alpha.1"
 edition = "2024"
 rust-version = "1.88"
 authors = ["Nicholas Paterno <nick@epistates.com>"]
-description = "TurboMCP v4 macros: #[server], #[tool], #[resource], #[prompt], #[mcp_header], #[State]."
+description = "TurboMCP v4 macros: #[server], #[tool], #[resource], #[prompt], #[completion], #[mcp_header]."
+readme = "README.md"
 license = "MIT"
 repository = "https://github.com/Epistates/turbomcp"
 homepage = "https://turbomcp.org"
+keywords = ["mcp", "macros", "server", "codegen"]
+categories = ["development-tools::procedural-macro-helpers", "network-programming"]
 
 [lib]
 proc-macro = true

@@ -4,10 +4,13 @@ version = "4.0.0-alpha.1"
 edition = "2024"
 rust-version = "1.88"
 authors = ["Nicholas Paterno <nick@epistates.com>"]
-description = "TurboMCP v4 protocol: per-version typed wire modules + VersionDispatcher. no_std-portable types."
+description = "TurboMCP v4 protocol: version-neutral handler types + per-version generated wire modules. no_std-portable."
+readme = "README.md"
 license = "MIT"
 repository = "https://github.com/Epistates/turbomcp"
 homepage = "https://turbomcp.org"
+keywords = ["mcp", "protocol", "json-rpc", "no_std"]
+categories = ["encoding", "no-std", "api-bindings"]
 
 [lib]
 # The generated per-version `types` modules carry the spec's prose docs

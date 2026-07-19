@@ -5,9 +5,12 @@ edition = "2024"
 rust-version = "1.88"
 authors = ["Nicholas Paterno <nick@epistates.com>"]
 description = "TurboMCP v4 Tasks extension (io.modelcontextprotocol/tasks)."
+readme = "README.md"
 license = "MIT"
 repository = "https://github.com/Epistates/turbomcp"
 homepage = "https://turbomcp.org"
+keywords = ["mcp", "tasks", "extension", "llm"]
+categories = ["network-programming", "asynchronous"]
 
 [dependencies]
 turbomcp-core = { workspace = true, features = ["std"] }

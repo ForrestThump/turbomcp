@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **SEP-2549 response caching, both halves.** Servers configure the cache
+  policy advertised on draft (`2026-07-28`) cacheable results — the four
+  `*/list`s, `resources/read`, and `server/discover` — via
+  `ServerBuilder::cache_policy(...)`: a bare `CachePolicy`
+  (`private(ttl)`/`public(ttl)`) for one uniform policy, or `CachePolicies` for
+  per-capability control; a handler-set policy
+  (`ListToolsResult::with_cache(...)`, etc.) wins over the default. Without
+  configuration the wire is unchanged (`ttlMs: 0` / `cacheScope: "private"`),
+  and the `2025-11-25` wire (which has no cache fields) is untouched. The
+  typed `Client` honors what servers declare: results with `ttlMs > 0` are
+  served from memory until they expire or a `*_list_changed` /
+  `resources/updated` notification invalidates them (on by default; opt out
+  with `ClientBuilder::with_response_cache(false)`, flush with
+  `Client::clear_response_cache()`). Neutral results now carry the decoded
+  policy (`result.cache`).
+- **`ClientHandler::on_notification`** — observe server→client notifications
+  (`notifications/progress`, `notifications/message`, `*_list_changed`, …)
+  from the client handler; previously they were silently dropped. Default
+  implementation ignores them, so existing handlers are unaffected.
+- **Facade `simd` feature** — opt into the SIMD JSON codec (sonic-rs) as
+  `DefaultCodec` on native x86_64/aarch64 via `turbomcp = { features =
+  ["simd"] }`. The default build now sticks to the portable `serde_json`
+  baseline (previously sonic-rs was always compiled in via the codec crate's
+  default features).
+- **crates.io metadata polish** — every published crate now ships a README,
+  keywords, and categories.
+
 ### Changed
 
 - **Dropped the non-spec TCP and Unix-socket server transports**
@@ -35,8 +64,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   issuer log a binding-check warning.
 - **HTTP `DELETE` (session termination) is rate-limited** for parity with
   `POST`/`GET`.
-- The `Transport` parity-contract doc and the TCP/Unix module doc spell out the
-  trusted-channel posture (no built-in auth/Origin check) and the size cap.
+- The `Transport` parity-contract doc spells out the trusted-channel posture
+  and the inbound frame-size cap.
 
 ## [4.0.0-alpha.1] - 2026-07-16
 

@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.88"
 authors = ["Nicholas Paterno <nick@epistates.com>"]
 description = "TurboMCP v4 foundation: ProtocolVersion, JsonRpcMessage, RequestContext, Identity, McpError. no_std + alloc."
+readme = "README.md"
 license = "MIT"
 repository = "https://github.com/Epistates/turbomcp"
 homepage = "https://turbomcp.org"
