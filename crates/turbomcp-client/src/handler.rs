@@ -49,6 +49,15 @@ pub trait ClientHandler: Send + Sync + 'static {
     async fn list_roots(&self) -> ClientResult<Value> {
         Ok(json!({ "roots": [] }))
     }
+
+    /// Observe a server→client *notification* (`notifications/progress`,
+    /// `notifications/message`, `*_list_changed`, `resources/updated`, …).
+    /// Fire-and-forget — there is nothing to answer. The default ignores it.
+    /// (The client's response cache is invalidated by `list_changed`
+    /// notifications independently of this hook.)
+    async fn on_notification(&self, method: String, params: Option<Value>) {
+        let _ = (method, params);
+    }
 }
 
 /// Dispatch one server→client request (`method` + `params`) to `handler` and

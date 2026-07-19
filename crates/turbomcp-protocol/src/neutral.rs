@@ -182,6 +182,8 @@ pub struct ListToolsResult {
     pub tools: Vec<Tool>,
     /// Opaque pagination cursor; `Some` means more pages follow.
     pub next_cursor: Option<String>,
+    /// Cache policy (SEP-2549); `None` = the server's configured default.
+    pub cache: Option<CachePolicy>,
 }
 
 impl ListToolsResult {
@@ -190,7 +192,21 @@ impl ListToolsResult {
         Self {
             tools,
             next_cursor: None,
+            cache: None,
         }
+    }
+
+    /// Set this result's cache policy (wins over the server default).
+    #[must_use]
+    pub fn with_cache(mut self, cache: CachePolicy) -> Self {
+        self.cache = Some(cache);
+        self
+    }
+}
+
+impl Cacheable for ListToolsResult {
+    fn cache_policy_mut(&mut self) -> &mut Option<CachePolicy> {
+        &mut self.cache
     }
 }
 
@@ -283,6 +299,76 @@ impl ListParams {
             cursor: Some(cursor.into()),
         }
     }
+}
+
+// ---- caching (SEP-2549) --------------------------------------------------------
+
+/// Whether shared intermediaries may cache a response (SEP-2549).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CacheScope {
+    /// Only the requesting client may cache the response.
+    Private,
+    /// Shared intermediaries may cache the response.
+    Public,
+}
+
+/// A freshness declaration for a cacheable result (SEP-2549): `ttl_ms` is the
+/// server's freshness hint in milliseconds (`0` = immediately stale — clients
+/// should not cache), `scope` controls shared-intermediary caching. Carried on
+/// the `2026-07-28` wire (`ttlMs`/`cacheScope`, required on every cacheable
+/// result); the `2025-11-25` wire has no cache fields, so the policy is
+/// dropped there.
+///
+/// Servers configure a default per capability via `ServerBuilder::cache_policy`
+/// (in `turbomcp-server`); a handler-set policy on a result wins over that
+/// default. Complements — never replaces — the `*_list_changed` notifications.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CachePolicy {
+    /// Freshness hint in milliseconds; `0` means immediately stale.
+    pub ttl_ms: u64,
+    /// Who may cache the response.
+    pub scope: CacheScope,
+}
+
+impl CachePolicy {
+    /// Immediately stale + private: the conservative wire default.
+    pub const NO_CACHE: CachePolicy = CachePolicy {
+        ttl_ms: 0,
+        scope: CacheScope::Private,
+    };
+
+    /// A private (client-only) cache window of `ttl`.
+    #[must_use]
+    pub fn private(ttl: core::time::Duration) -> Self {
+        Self {
+            ttl_ms: u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX),
+            scope: CacheScope::Private,
+        }
+    }
+
+    /// A public (shared-intermediary) cache window of `ttl`.
+    #[must_use]
+    pub fn public(ttl: core::time::Duration) -> Self {
+        Self {
+            ttl_ms: u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX),
+            scope: CacheScope::Public,
+        }
+    }
+
+    /// Build from the wire fields (`ttlMs` + a decoded [`CacheScope`]).
+    #[must_use]
+    pub fn from_wire(ttl_ms: u64, scope: CacheScope) -> Self {
+        Self { ttl_ms, scope }
+    }
+}
+
+/// A neutral result that carries a [`CachePolicy`] (the SEP-2549
+/// `CacheableResult` surface: the four `*/list` results plus
+/// `resources/read`). The dispatcher uses this to fill the server's configured
+/// default when a handler didn't set one.
+pub trait Cacheable {
+    /// The result's cache policy slot (`None` = use the server default).
+    fn cache_policy_mut(&mut self) -> &mut Option<CachePolicy>;
 }
 
 // ---- resources ----------------------------------------------------------------
@@ -404,6 +490,8 @@ pub struct ListResourcesResult {
     pub resources: Vec<Resource>,
     /// Opaque pagination cursor; `Some` means more pages follow.
     pub next_cursor: Option<String>,
+    /// Cache policy (SEP-2549); `None` = the server's configured default.
+    pub cache: Option<CachePolicy>,
 }
 
 impl ListResourcesResult {
@@ -412,7 +500,21 @@ impl ListResourcesResult {
         Self {
             resources,
             next_cursor: None,
+            cache: None,
         }
+    }
+
+    /// Set this result's cache policy (wins over the server default).
+    #[must_use]
+    pub fn with_cache(mut self, cache: CachePolicy) -> Self {
+        self.cache = Some(cache);
+        self
+    }
+}
+
+impl Cacheable for ListResourcesResult {
+    fn cache_policy_mut(&mut self) -> &mut Option<CachePolicy> {
+        &mut self.cache
     }
 }
 
@@ -422,19 +524,38 @@ impl ListResourcesResult {
 pub struct ReadResourceResult {
     /// One or more content items (a single resource may expand to several).
     pub contents: Vec<ResourceContents>,
+    /// Cache policy (SEP-2549); `None` = the server's configured default.
+    pub cache: Option<CachePolicy>,
 }
 
 impl ReadResourceResult {
     /// A result carrying the given contents.
     pub fn new(contents: Vec<ResourceContents>) -> Self {
-        Self { contents }
+        Self {
+            contents,
+            cache: None,
+        }
     }
 
     /// A result carrying a single text item.
     pub fn text(uri: impl Into<String>, text: impl Into<String>) -> Self {
         Self {
             contents: alloc::vec![ResourceContents::text(uri, text)],
+            cache: None,
         }
+    }
+
+    /// Set this result's cache policy (wins over the server default).
+    #[must_use]
+    pub fn with_cache(mut self, cache: CachePolicy) -> Self {
+        self.cache = Some(cache);
+        self
+    }
+}
+
+impl Cacheable for ReadResourceResult {
+    fn cache_policy_mut(&mut self) -> &mut Option<CachePolicy> {
+        &mut self.cache
     }
 }
 
@@ -497,6 +618,8 @@ pub struct ListResourceTemplatesResult {
     pub resource_templates: Vec<ResourceTemplate>,
     /// Opaque pagination cursor; `Some` means more pages follow.
     pub next_cursor: Option<String>,
+    /// Cache policy (SEP-2549); `None` = the server's configured default.
+    pub cache: Option<CachePolicy>,
 }
 
 impl ListResourceTemplatesResult {
@@ -505,7 +628,21 @@ impl ListResourceTemplatesResult {
         Self {
             resource_templates,
             next_cursor: None,
+            cache: None,
         }
+    }
+
+    /// Set this result's cache policy (wins over the server default).
+    #[must_use]
+    pub fn with_cache(mut self, cache: CachePolicy) -> Self {
+        self.cache = Some(cache);
+        self
+    }
+}
+
+impl Cacheable for ListResourceTemplatesResult {
+    fn cache_policy_mut(&mut self) -> &mut Option<CachePolicy> {
+        &mut self.cache
     }
 }
 
@@ -676,6 +813,8 @@ pub struct ListPromptsResult {
     pub prompts: Vec<Prompt>,
     /// Opaque pagination cursor; `Some` means more pages follow.
     pub next_cursor: Option<String>,
+    /// Cache policy (SEP-2549); `None` = the server's configured default.
+    pub cache: Option<CachePolicy>,
 }
 
 impl ListPromptsResult {
@@ -684,7 +823,21 @@ impl ListPromptsResult {
         Self {
             prompts,
             next_cursor: None,
+            cache: None,
         }
+    }
+
+    /// Set this result's cache policy (wins over the server default).
+    #[must_use]
+    pub fn with_cache(mut self, cache: CachePolicy) -> Self {
+        self.cache = Some(cache);
+        self
+    }
+}
+
+impl Cacheable for ListPromptsResult {
+    fn cache_policy_mut(&mut self) -> &mut Option<CachePolicy> {
+        &mut self.cache
     }
 }
 
@@ -1015,13 +1168,17 @@ impl From<Tool> for draft::Tool {
 
 impl From<ListToolsResult> for draft::ListToolsResult {
     fn from(r: ListToolsResult) -> Self {
+        let cache = r.cache.unwrap_or(CachePolicy::NO_CACHE);
         draft::ListToolsResult {
-            cache_scope: draft::ListToolsResultCacheScope::Private,
+            cache_scope: match cache.scope {
+                CacheScope::Public => draft::ListToolsResultCacheScope::Public,
+                CacheScope::Private => draft::ListToolsResultCacheScope::Private,
+            },
             meta: None,
             next_cursor: r.next_cursor,
             result_type: result_type::COMPLETE.to_string(),
             tools: r.tools.into_iter().map(Into::into).collect(),
-            ttl_ms: 0,
+            ttl_ms: cache.ttl_ms,
         }
     }
 }
@@ -1120,25 +1277,33 @@ impl From<ResourceContents> for draft::EmbeddedResourceResource {
 
 impl From<ListResourcesResult> for draft::ListResourcesResult {
     fn from(r: ListResourcesResult) -> Self {
+        let cache = r.cache.unwrap_or(CachePolicy::NO_CACHE);
         draft::ListResourcesResult {
-            cache_scope: draft::ListResourcesResultCacheScope::Private,
+            cache_scope: match cache.scope {
+                CacheScope::Public => draft::ListResourcesResultCacheScope::Public,
+                CacheScope::Private => draft::ListResourcesResultCacheScope::Private,
+            },
             meta: None,
             next_cursor: r.next_cursor,
             resources: r.resources.into_iter().map(Into::into).collect(),
             result_type: result_type::COMPLETE.to_string(),
-            ttl_ms: 0,
+            ttl_ms: cache.ttl_ms,
         }
     }
 }
 
 impl From<ReadResourceResult> for draft::ReadResourceResult {
     fn from(r: ReadResourceResult) -> Self {
+        let cache = r.cache.unwrap_or(CachePolicy::NO_CACHE);
         draft::ReadResourceResult {
-            cache_scope: draft::ReadResourceResultCacheScope::Private,
+            cache_scope: match cache.scope {
+                CacheScope::Public => draft::ReadResourceResultCacheScope::Public,
+                CacheScope::Private => draft::ReadResourceResultCacheScope::Private,
+            },
             contents: r.contents.into_iter().map(Into::into).collect(),
             meta: None,
             result_type: result_type::COMPLETE.to_string(),
-            ttl_ms: 0,
+            ttl_ms: cache.ttl_ms,
         }
     }
 }
@@ -1160,13 +1325,17 @@ impl From<ResourceTemplate> for draft::ResourceTemplate {
 
 impl From<ListResourceTemplatesResult> for draft::ListResourceTemplatesResult {
     fn from(r: ListResourceTemplatesResult) -> Self {
+        let cache = r.cache.unwrap_or(CachePolicy::NO_CACHE);
         draft::ListResourceTemplatesResult {
-            cache_scope: draft::ListResourceTemplatesResultCacheScope::Private,
+            cache_scope: match cache.scope {
+                CacheScope::Public => draft::ListResourceTemplatesResultCacheScope::Public,
+                CacheScope::Private => draft::ListResourceTemplatesResultCacheScope::Private,
+            },
             meta: None,
             next_cursor: r.next_cursor,
             resource_templates: r.resource_templates.into_iter().map(Into::into).collect(),
             result_type: result_type::COMPLETE.to_string(),
-            ttl_ms: 0,
+            ttl_ms: cache.ttl_ms,
         }
     }
 }
@@ -1217,13 +1386,17 @@ impl From<PromptMessage> for draft::PromptMessage {
 
 impl From<ListPromptsResult> for draft::ListPromptsResult {
     fn from(r: ListPromptsResult) -> Self {
+        let cache = r.cache.unwrap_or(CachePolicy::NO_CACHE);
         draft::ListPromptsResult {
-            cache_scope: draft::ListPromptsResultCacheScope::Private,
+            cache_scope: match cache.scope {
+                CacheScope::Public => draft::ListPromptsResultCacheScope::Public,
+                CacheScope::Private => draft::ListPromptsResultCacheScope::Private,
+            },
             meta: None,
             next_cursor: r.next_cursor,
             prompts: r.prompts.into_iter().map(Into::into).collect(),
             result_type: result_type::COMPLETE.to_string(),
-            ttl_ms: 0,
+            ttl_ms: cache.ttl_ms,
         }
     }
 }
@@ -1656,6 +1829,13 @@ impl From<draft::ListToolsResult> for ListToolsResult {
         ListToolsResult {
             tools: r.tools.into_iter().map(Into::into).collect(),
             next_cursor: r.next_cursor,
+            cache: Some(CachePolicy::from_wire(
+                r.ttl_ms,
+                match r.cache_scope {
+                    draft::ListToolsResultCacheScope::Public => CacheScope::Public,
+                    draft::ListToolsResultCacheScope::Private => CacheScope::Private,
+                },
+            )),
         }
     }
 }
@@ -1739,6 +1919,13 @@ impl From<draft::ListResourcesResult> for ListResourcesResult {
         ListResourcesResult {
             resources: r.resources.into_iter().map(Into::into).collect(),
             next_cursor: r.next_cursor,
+            cache: Some(CachePolicy::from_wire(
+                r.ttl_ms,
+                match r.cache_scope {
+                    draft::ListResourcesResultCacheScope::Public => CacheScope::Public,
+                    draft::ListResourcesResultCacheScope::Private => CacheScope::Private,
+                },
+            )),
         }
     }
 }
@@ -1747,6 +1934,13 @@ impl From<draft::ReadResourceResult> for ReadResourceResult {
     fn from(r: draft::ReadResourceResult) -> Self {
         ReadResourceResult {
             contents: r.contents.into_iter().map(Into::into).collect(),
+            cache: Some(CachePolicy::from_wire(
+                r.ttl_ms,
+                match r.cache_scope {
+                    draft::ReadResourceResultCacheScope::Public => CacheScope::Public,
+                    draft::ReadResourceResultCacheScope::Private => CacheScope::Private,
+                },
+            )),
         }
     }
 }
@@ -1768,6 +1962,13 @@ impl From<draft::ListResourceTemplatesResult> for ListResourceTemplatesResult {
         ListResourceTemplatesResult {
             resource_templates: r.resource_templates.into_iter().map(Into::into).collect(),
             next_cursor: r.next_cursor,
+            cache: Some(CachePolicy::from_wire(
+                r.ttl_ms,
+                match r.cache_scope {
+                    draft::ListResourceTemplatesResultCacheScope::Public => CacheScope::Public,
+                    draft::ListResourceTemplatesResultCacheScope::Private => CacheScope::Private,
+                },
+            )),
         }
     }
 }
@@ -1817,6 +2018,13 @@ impl From<draft::ListPromptsResult> for ListPromptsResult {
         ListPromptsResult {
             prompts: r.prompts.into_iter().map(Into::into).collect(),
             next_cursor: r.next_cursor,
+            cache: Some(CachePolicy::from_wire(
+                r.ttl_ms,
+                match r.cache_scope {
+                    draft::ListPromptsResultCacheScope::Public => CacheScope::Public,
+                    draft::ListPromptsResultCacheScope::Private => CacheScope::Private,
+                },
+            )),
         }
     }
 }
@@ -1882,6 +2090,8 @@ impl From<legacy::ListToolsResult> for ListToolsResult {
         ListToolsResult {
             tools: r.tools.into_iter().map(Into::into).collect(),
             next_cursor: r.next_cursor,
+            // The 2025-11-25 wire has no cache fields (SEP-2549 is draft-only).
+            cache: None,
         }
     }
 }
@@ -1969,6 +2179,7 @@ impl From<legacy::ListResourcesResult> for ListResourcesResult {
         ListResourcesResult {
             resources: r.resources.into_iter().map(Into::into).collect(),
             next_cursor: r.next_cursor,
+            cache: None,
         }
     }
 }
@@ -1977,6 +2188,7 @@ impl From<legacy::ReadResourceResult> for ReadResourceResult {
     fn from(r: legacy::ReadResourceResult) -> Self {
         ReadResourceResult {
             contents: r.contents.into_iter().map(Into::into).collect(),
+            cache: None,
         }
     }
 }
@@ -1998,6 +2210,7 @@ impl From<legacy::ListResourceTemplatesResult> for ListResourceTemplatesResult {
         ListResourceTemplatesResult {
             resource_templates: r.resource_templates.into_iter().map(Into::into).collect(),
             next_cursor: r.next_cursor,
+            cache: None,
         }
     }
 }
@@ -2047,6 +2260,7 @@ impl From<legacy::ListPromptsResult> for ListPromptsResult {
         ListPromptsResult {
             prompts: r.prompts.into_iter().map(Into::into).collect(),
             next_cursor: r.next_cursor,
+            cache: None,
         }
     }
 }

@@ -31,6 +31,7 @@ use turbomcp_core::{
     CancellationToken, JsonRpcError, JsonRpcMessage, JsonRpcNotification, JsonRpcRequest,
     JsonRpcResponse, McpError, ProtocolVersion, RequestContext, RequestId, meta,
 };
+use turbomcp_protocol::neutral::CachePolicy;
 use turbomcp_protocol::{methods, version};
 use turbomcp_service::{ProtocolError, mcp_to_jsonrpc_error};
 
@@ -93,6 +94,105 @@ struct Shared {
     /// Stamp `io.modelcontextprotocol/serverInfo` into every draft result's
     /// `_meta` (spec SHOULD; opt out via `without_server_info_meta`).
     server_info_meta: bool,
+    /// Per-capability cache defaults (SEP-2549), applied to draft cacheable
+    /// results whose handler didn't set a policy.
+    cache: CachePolicies,
+}
+
+/// Per-capability cache defaults (SEP-2549) for the `2026-07-28` wire's
+/// `ttlMs`/`cacheScope` fields — one [`CachePolicy`] per cacheable surface
+/// (`server/discover`, the four `*/list`s, `resources/read`). The default is
+/// [`CachePolicy::NO_CACHE`] everywhere (private + immediately stale —
+/// exactly the pre-configuration behavior). A handler-set policy on a neutral
+/// result wins over these defaults. The `2025-11-25` wire has no cache
+/// fields, so this configuration is inert there.
+///
+/// For the common one-knob case a bare [`CachePolicy`] converts into a
+/// uniform `CachePolicies`; chain the per-surface setters for granularity:
+///
+/// ```ignore
+/// builder.cache_policy(CachePolicy::public(Duration::from_secs(60)));
+/// builder.cache_policy(
+///     CachePolicies::default().tools_list(CachePolicy::private(Duration::from_secs(30))),
+/// );
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CachePolicies {
+    pub(crate) discover: CachePolicy,
+    pub(crate) tools_list: CachePolicy,
+    pub(crate) resources_list: CachePolicy,
+    pub(crate) resource_templates_list: CachePolicy,
+    pub(crate) resources_read: CachePolicy,
+    pub(crate) prompts_list: CachePolicy,
+}
+
+impl CachePolicies {
+    /// The same policy for every cacheable surface.
+    #[must_use]
+    pub fn uniform(policy: CachePolicy) -> Self {
+        Self {
+            discover: policy,
+            tools_list: policy,
+            resources_list: policy,
+            resource_templates_list: policy,
+            resources_read: policy,
+            prompts_list: policy,
+        }
+    }
+
+    /// Set the `server/discover` policy.
+    #[must_use]
+    pub fn discover(mut self, policy: CachePolicy) -> Self {
+        self.discover = policy;
+        self
+    }
+
+    /// Set the `tools/list` policy.
+    #[must_use]
+    pub fn tools_list(mut self, policy: CachePolicy) -> Self {
+        self.tools_list = policy;
+        self
+    }
+
+    /// Set the `resources/list` policy.
+    #[must_use]
+    pub fn resources_list(mut self, policy: CachePolicy) -> Self {
+        self.resources_list = policy;
+        self
+    }
+
+    /// Set the `resources/templates/list` policy.
+    #[must_use]
+    pub fn resource_templates_list(mut self, policy: CachePolicy) -> Self {
+        self.resource_templates_list = policy;
+        self
+    }
+
+    /// Set the `resources/read` policy.
+    #[must_use]
+    pub fn resources_read(mut self, policy: CachePolicy) -> Self {
+        self.resources_read = policy;
+        self
+    }
+
+    /// Set the `prompts/list` policy.
+    #[must_use]
+    pub fn prompts_list(mut self, policy: CachePolicy) -> Self {
+        self.prompts_list = policy;
+        self
+    }
+}
+
+impl Default for CachePolicies {
+    fn default() -> Self {
+        Self::uniform(CachePolicy::NO_CACHE)
+    }
+}
+
+impl From<CachePolicy> for CachePolicies {
+    fn from(policy: CachePolicy) -> Self {
+        Self::uniform(policy)
+    }
 }
 
 impl Shared {
@@ -163,6 +263,7 @@ impl<S: McpServerCore> VersionDispatcher<S> {
                 extensions: Arc::new(Vec::new()),
                 strict_elicitation_keys: false,
                 server_info_meta: true,
+                cache: CachePolicies::default(),
             },
         }
     }
@@ -213,6 +314,19 @@ impl<S: McpServerCore> VersionDispatcher<S> {
     #[must_use]
     pub fn without_server_info_meta(mut self) -> Self {
         self.shared.server_info_meta = false;
+        self
+    }
+
+    /// Set the per-capability cache defaults (SEP-2549) advertised on draft
+    /// cacheable results (`server/discover`, the four `*/list`s, and
+    /// `resources/read`). Accepts a bare [`CachePolicy`] for a uniform policy
+    /// or a [`CachePolicies`] for per-capability control. A handler-set policy
+    /// on a neutral result wins over these defaults. Without this, every
+    /// cacheable result advertises `ttlMs: 0` / `cacheScope: "private"`
+    /// (immediately stale).
+    #[must_use]
+    pub fn with_cache_policy(mut self, cache: impl Into<CachePolicies>) -> Self {
+        self.shared.cache = cache.into();
         self
     }
 
@@ -478,6 +592,7 @@ async fn handle_request<S: McpServerCore>(
             router,
             supported,
             &shared.extensions,
+            shared.cache.discover,
         )),
         methods::request::PING => Ok(JsonRpcResponse::success(id, serde_json::json!({})).into()),
 

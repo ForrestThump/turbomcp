@@ -9,6 +9,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use futures::FutureExt;
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -35,6 +36,27 @@ use super::params::{
     parse_read_resource_params,
 };
 use super::{Shared, connection_id, error_response, ok_value, session_id};
+
+/// Fill the server's configured default cache policy (SEP-2549) into a
+/// cacheable neutral result whose handler didn't set one. Applied on both wire
+/// families — the legacy conversion has no cache fields and ignores the value.
+fn with_cache_default<N>(
+    fut: Option<BoxFuture<'static, Result<N, McpError>>>,
+    policy: neutral::CachePolicy,
+) -> Option<BoxFuture<'static, Result<N, McpError>>>
+where
+    N: neutral::Cacheable + Send + 'static,
+{
+    fut.map(|f| {
+        async move {
+            f.await.map(|mut n| {
+                n.cache_policy_mut().get_or_insert(policy);
+                n
+            })
+        }
+        .boxed()
+    })
+}
 
 /// Await a registered handler's future and widen its neutral result to the
 /// active wire type `W`. A `None` future means the capability isn't registered
@@ -120,6 +142,7 @@ pub(super) async fn dispatch_capability<S: McpServerCore, W: WireFamily>(
     match method {
         methods::request::TOOLS_LIST => {
             let fut = router.dispatch_list_tools(server, ListToolsContext::new(ctx), list_params);
+            let fut = with_cache_default(fut, shared.cache.tools_list);
             finish::<_, W::ListTools>(id, method, fut).await
         }
         methods::request::TOOLS_CALL => {
@@ -151,6 +174,7 @@ pub(super) async fn dispatch_capability<S: McpServerCore, W: WireFamily>(
         methods::request::RESOURCES_LIST => {
             let fut =
                 router.dispatch_list_resources(server, ListResourcesContext::new(ctx), list_params);
+            let fut = with_cache_default(fut, shared.cache.resources_list);
             finish::<_, W::ListResources>(id, method, fut).await
         }
         methods::request::RESOURCES_TEMPLATES_LIST => {
@@ -159,6 +183,7 @@ pub(super) async fn dispatch_capability<S: McpServerCore, W: WireFamily>(
                 ListResourceTemplatesContext::new(ctx),
                 list_params,
             );
+            let fut = with_cache_default(fut, shared.cache.resource_templates_list);
             finish::<_, W::ListResourceTemplates>(id, method, fut).await
         }
         methods::request::RESOURCES_READ => {
@@ -184,6 +209,7 @@ pub(super) async fn dispatch_capability<S: McpServerCore, W: WireFamily>(
                     .with_log(log_sender::<W>(req, &ctx, router.has_logging())),
                 params,
             );
+            let fut = with_cache_default(fut, shared.cache.resources_read);
             let subject = ctx.identity.subject().map(str::to_owned);
             finish_mrtr::<_, W::ReadResource>(id, method, subject, fut, &handle, signer, W::MRTR)
                 .await
@@ -191,6 +217,7 @@ pub(super) async fn dispatch_capability<S: McpServerCore, W: WireFamily>(
         methods::request::PROMPTS_LIST => {
             let fut =
                 router.dispatch_list_prompts(server, ListPromptsContext::new(ctx), list_params);
+            let fut = with_cache_default(fut, shared.cache.prompts_list);
             finish::<_, W::ListPrompts>(id, method, fut).await
         }
         methods::request::PROMPTS_GET => {

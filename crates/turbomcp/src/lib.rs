@@ -41,7 +41,7 @@ pub use turbomcp_service::{
 // ---- server -----------------------------------------------------------------
 
 pub use turbomcp_server::{
-    Audio, CallToolContext, ClientHandle, CompleteContext, GetPromptContext, Image,
+    Audio, CachePolicies, CallToolContext, ClientHandle, CompleteContext, GetPromptContext, Image,
     IntoCallToolResult, IntoGetPromptResult, IntoReadResourceResult, IntoServerBuilder, Json,
     LegacySessionAdapter, ListPromptsContext, ListResourceTemplatesContext, ListResourcesContext,
     ListToolsContext, LogSender, McpServerCore, MethodRouter, ProgressReporter,
@@ -200,7 +200,8 @@ pub mod prelude {
     pub use turbomcp_server::{
         Audio, CallToolContext, CompleteContext, GetPromptContext, Image, IntoServerBuilder, Json,
         ListPromptsContext, ListResourceTemplatesContext, ListResourcesContext, ListToolsContext,
-        McpServerCore, ServerBuilder, WithCompletions, WithPrompts, WithResources, WithTools,
+        McpServerCore, ReadResourceContext, ServerBuilder, WithCompletions, WithPrompts,
+        WithResources, WithTools,
     };
     pub use turbomcp_transport_stdio::serve_stdio;
 

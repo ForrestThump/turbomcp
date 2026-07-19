@@ -40,7 +40,7 @@ pub use context::{
     CallToolContext, CompleteContext, GetPromptContext, ListPromptsContext,
     ListResourceTemplatesContext, ListResourcesContext, ListToolsContext, ReadResourceContext,
 };
-pub use dispatcher::{DispatcherSessionTerminator, VersionDispatcher};
+pub use dispatcher::{CachePolicies, DispatcherSessionTerminator, VersionDispatcher};
 pub use extension::{
     CallAugmentRequest, CallRunner, Extension, ExtensionRequest, SubscribeOutcome, TaskInputBroker,
     TaskInputSlot,

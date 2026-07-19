@@ -184,8 +184,9 @@ pub(super) fn discover_response<S: McpServerCore>(
     router: &MethodRouter<S>,
     supported: &[ProtocolVersion],
     extensions: &[Arc<dyn Extension>],
+    cache: neutral::CachePolicy,
 ) -> JsonRpcMessage {
-    let result = build_discover_result(server, router, supported);
+    let result = build_discover_result(server, router, supported, cache);
     let mut value = match serde_json::to_value(&result) {
         Ok(v) => v,
         Err(e) => return error_response(id, &McpError::internal(format!("serialize result: {e}"))),
@@ -209,6 +210,7 @@ fn build_discover_result<S: McpServerCore>(
     server: &S,
     router: &MethodRouter<S>,
     supported: &[ProtocolVersion],
+    cache: neutral::CachePolicy,
 ) -> draft::DiscoverResult {
     // `listChanged`/`subscribe` are true: the subscription registry delivers
     // these for every registered capability (`subscriptions/listen`).
@@ -241,10 +243,10 @@ fn build_discover_result<S: McpServerCore>(
             }),
     };
     draft::DiscoverResult {
-        // Conservative cache defaults, consistent with the list conversions in
-        // `neutral.rs`: private + immediately stale. A configurable cache
-        // policy is tracked as deferred.
-        cache_scope: draft::DiscoverResultCacheScope::Private,
+        cache_scope: match cache.scope {
+            neutral::CacheScope::Public => draft::DiscoverResultCacheScope::Public,
+            neutral::CacheScope::Private => draft::DiscoverResultCacheScope::Private,
+        },
         capabilities,
         instructions: server.instructions(),
         // The server's identity rides `_meta` (`io.modelcontextprotocol/
@@ -256,7 +258,7 @@ fn build_discover_result<S: McpServerCore>(
         }),
         result_type: neutral::result_type::COMPLETE.to_string(),
         supported_versions: supported.iter().map(|v| v.as_str().to_owned()).collect(),
-        ttl_ms: 0,
+        ttl_ms: cache.ttl_ms,
     }
 }
 

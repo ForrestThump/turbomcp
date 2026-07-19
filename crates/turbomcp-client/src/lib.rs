@@ -12,6 +12,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod cache;
 mod client;
 mod connection;
 mod error;

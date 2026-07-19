@@ -36,6 +36,7 @@ use tokio::sync::{mpsc, oneshot};
 use turbomcp_core::{JsonRpcError, JsonRpcMessage, JsonRpcRequest, JsonRpcResponse, RequestId};
 use turbomcp_service::Transport;
 
+use crate::cache::ResponseCache;
 use crate::error::{ClientError, ClientResult};
 use crate::handler::{ClientHandler, dispatch_server_request};
 
@@ -101,6 +102,21 @@ impl Connection {
     where
         T: Transport,
     {
+        Self::connect_with_cache(transport, request_timeout, handler, None)
+    }
+
+    /// [`connect`](Self::connect), plus a [`ResponseCache`] the actor
+    /// invalidates on inbound `*_list_changed` / `resources/updated`
+    /// notifications (the [`Client`](crate::Client) wires this).
+    pub(crate) fn connect_with_cache<T>(
+        transport: T,
+        request_timeout: Duration,
+        handler: Option<Arc<dyn ClientHandler>>,
+        cache: Option<Arc<ResponseCache>>,
+    ) -> Self
+    where
+        T: Transport,
+    {
         // Capacity mirrors the server driver's default outbound buffer.
         let (tx, rx) = mpsc::channel::<JsonRpcMessage>(1024);
         let pending: Arc<Pending> = Arc::new(Mutex::new(HashMap::new()));
@@ -111,6 +127,7 @@ impl Connection {
             Arc::clone(&pending),
             weak_out,
             handler,
+            cache,
         ));
         Self {
             inner: Arc::new(Inner {
@@ -208,6 +225,7 @@ async fn actor<T>(
     pending: Arc<Pending>,
     weak_out: mpsc::WeakSender<JsonRpcMessage>,
     handler: Option<Arc<dyn ClientHandler>>,
+    cache: Option<Arc<ResponseCache>>,
 ) where
     T: Transport,
 {
@@ -231,7 +249,7 @@ async fn actor<T>(
             frame = transport.recv() => {
                 match frame {
                     Ok(Some(msg)) => {
-                        if let Some(reply) = route_inbound(msg, &pending, &handler, &weak_out)
+                        if let Some(reply) = route_inbound(msg, &pending, &handler, &weak_out, &cache)
                             && let Err(e) = transport.send(reply).await {
                                 tracing::debug!(error = %e, "client reply send failed; closing");
                                 break;
@@ -260,6 +278,7 @@ fn route_inbound(
     pending: &Arc<Pending>,
     handler: &Option<Arc<dyn ClientHandler>>,
     weak_out: &mpsc::WeakSender<JsonRpcMessage>,
+    cache: &Option<Arc<ResponseCache>>,
 ) -> Option<JsonRpcMessage> {
     match msg {
         JsonRpcMessage::Response(resp) => {
@@ -267,7 +286,22 @@ fn route_inbound(
             None
         }
         JsonRpcMessage::Notification(n) => {
-            tracing::trace!(method = %n.method, "client received notification (dropped)");
+            // Invalidate cached responses the notification obsoletes, then
+            // hand it to the user's handler (default: ignore).
+            if let Some(cache) = cache {
+                cache.on_notification(&n.method, n.params.as_ref());
+            }
+            match handler {
+                Some(handler) => {
+                    let handler = Arc::clone(handler);
+                    tokio::spawn(async move {
+                        handler.on_notification(n.method, n.params).await;
+                    });
+                }
+                None => {
+                    tracing::trace!(method = %n.method, "client received notification (no handler)");
+                }
+            }
             None
         }
         JsonRpcMessage::Request(req) => match handler {

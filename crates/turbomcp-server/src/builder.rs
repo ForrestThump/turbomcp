@@ -18,7 +18,7 @@
 
 use std::sync::Arc;
 
-use crate::dispatcher::VersionDispatcher;
+use crate::dispatcher::{CachePolicies, VersionDispatcher};
 use crate::extension::Extension;
 use crate::router::MethodRouter;
 use crate::session::SessionBackend;
@@ -36,6 +36,7 @@ pub struct ServerBuilder<S> {
     session_backend: Option<Arc<dyn SessionBackend>>,
     task_backend: Option<Arc<dyn TaskBackend>>,
     extensions: Vec<Arc<dyn Extension>>,
+    cache: Option<CachePolicies>,
 }
 
 impl<S: McpServerCore> ServerBuilder<S> {
@@ -52,6 +53,7 @@ impl<S: McpServerCore> ServerBuilder<S> {
             session_backend: None,
             task_backend: None,
             extensions: Vec::new(),
+            cache: None,
         }
     }
 
@@ -69,7 +71,18 @@ impl<S: McpServerCore> ServerBuilder<S> {
             session_backend: None,
             task_backend: None,
             extensions: Vec::new(),
+            cache: None,
         }
+    }
+
+    /// Set the cache defaults (SEP-2549) advertised on draft cacheable
+    /// results: a bare [`CachePolicy`](turbomcp_protocol::neutral::CachePolicy)
+    /// for a uniform policy, or a [`CachePolicies`] for per-capability
+    /// control. See [`VersionDispatcher::with_cache_policy`].
+    #[must_use]
+    pub fn cache_policy(mut self, cache: impl Into<CachePolicies>) -> Self {
+        self.cache = Some(cache.into());
+        self
     }
 
     /// Evict a legacy (`2025-11-25`) session not seen within `timeout`, tearing
@@ -217,6 +230,9 @@ impl<S: McpServerCore> ServerBuilder<S> {
         }
         for extension in self.extensions {
             dispatcher = dispatcher.with_extension(extension);
+        }
+        if let Some(cache) = self.cache {
+            dispatcher = dispatcher.with_cache_policy(cache);
         }
         dispatcher
     }

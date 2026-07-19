@@ -30,6 +30,7 @@ use turbomcp_protocol::neutral;
 use turbomcp_protocol::v2025_11_25::types as legacy;
 use turbomcp_service::{Transport, mcp_headers};
 
+use crate::cache::ResponseCache;
 use crate::connection::Connection;
 use crate::error::{ClientError, ClientResult};
 use crate::handler::{ClientHandler, dispatch_server_request};
@@ -84,6 +85,7 @@ pub struct ClientBuilder {
     connect_mode: ConnectMode,
     request_timeout: Duration,
     handler: Option<Arc<dyn ClientHandler>>,
+    response_cache: bool,
 }
 
 impl ClientBuilder {
@@ -95,6 +97,7 @@ impl ClientBuilder {
             connect_mode: ConnectMode::Auto,
             request_timeout: crate::connection::DEFAULT_REQUEST_TIMEOUT,
             handler: None,
+            response_cache: true,
         }
     }
 
@@ -130,6 +133,20 @@ impl ClientBuilder {
         self
     }
 
+    /// Enable or disable the SEP-2549 response cache (default: enabled).
+    ///
+    /// When enabled, `*/list` and `resources/read` results whose server
+    /// declared a positive `ttlMs` are served from memory until they expire
+    /// or a `*_list_changed` / `resources/updated` notification invalidates
+    /// them. Servers that don't opt in (`ttlMs: 0`, the wire default — and
+    /// every `2025-11-25` server, whose wire has no cache fields) are never
+    /// cached, so enabling this is safe against any server.
+    #[must_use]
+    pub fn with_response_cache(mut self, enabled: bool) -> Self {
+        self.response_cache = enabled;
+        self
+    }
+
     /// Spawn the connection over `transport`, run the handshake, and return a
     /// ready [`Client`].
     ///
@@ -140,12 +157,24 @@ impl ClientBuilder {
     where
         T: Transport,
     {
-        let conn = Connection::connect(transport, self.request_timeout, self.handler.clone());
-        self.handshake(conn).await
+        let cache = self
+            .response_cache
+            .then(|| Arc::new(ResponseCache::default()));
+        let conn = Connection::connect_with_cache(
+            transport,
+            self.request_timeout,
+            self.handler.clone(),
+            cache.clone(),
+        );
+        self.handshake(conn, cache).await
     }
 
     /// Drive the handshake per the configured mode, returning a [`Client`].
-    async fn handshake(self, conn: Connection) -> ClientResult<Client> {
+    async fn handshake(
+        self,
+        conn: Connection,
+        cache: Option<Arc<ResponseCache>>,
+    ) -> ClientResult<Client> {
         let outcome = match self.connect_mode {
             ConnectMode::Modern => self.modern_handshake(&conn).await?,
             ConnectMode::Legacy => self.legacy_handshake(&conn).await?,
@@ -187,6 +216,7 @@ impl ClientBuilder {
             request_meta,
             handler: self.handler.clone(),
             header_params: Arc::new(Mutex::new(HashMap::new())),
+            cache,
         })
     }
 
@@ -280,6 +310,9 @@ pub struct Client {
     /// Tool name → its `#[mcp_header]` parameter names, learned from `list_tools`.
     /// Drives transparent `Mcp-Param-*` mirroring on `call_tool`.
     header_params: Arc<Mutex<HashMap<String, Vec<HeaderParam>>>>,
+    /// The SEP-2549 response cache (`None` = disabled at build time). Shared
+    /// with the connection actor, which invalidates on notifications.
+    cache: Option<Arc<ResponseCache>>,
 }
 
 impl Client {
@@ -339,13 +372,46 @@ impl Client {
         self.versioned_request(method, params).await
     }
 
+    /// Drop every cached response (see
+    /// [`ClientBuilder::with_response_cache`]). A no-op when the cache is
+    /// disabled. Notifications already invalidate automatically; this is the
+    /// manual escape hatch.
+    pub fn clear_response_cache(&self) {
+        if let Some(cache) = &self.cache {
+            cache.clear();
+        }
+    }
+
+    /// Issue a cacheable request (SEP-2549): serve a fresh cached result when
+    /// one exists, otherwise hit the server and store the raw result per its
+    /// declared `ttlMs`. `discriminator` distinguishes entries within a
+    /// method (the pagination cursor for `*/list`, the URI for
+    /// `resources/read`).
+    async fn cached_request(
+        &self,
+        method: &str,
+        params: Map<String, Value>,
+        discriminator: Option<&str>,
+    ) -> ClientResult<Value> {
+        if let Some(cache) = &self.cache
+            && let Some(hit) = cache.get(method, discriminator)
+        {
+            return Ok(hit);
+        }
+        let v = self.versioned_request(method, params).await?;
+        if let Some(cache) = &self.cache {
+            cache.store(method, discriminator, &v);
+        }
+        Ok(v)
+    }
+
     /// List the server's tools (one page; pass a `cursor` to continue).
     ///
     /// # Errors
     /// Propagates RPC and decode failures.
     pub async fn list_tools(&self, cursor: Option<&str>) -> ClientResult<neutral::ListToolsResult> {
         let v = self
-            .versioned_request(request::TOOLS_LIST, list_params(cursor))
+            .cached_request(request::TOOLS_LIST, list_params(cursor), cursor)
             .await?;
         let mut result: neutral::ListToolsResult =
             self.decode::<draft::ListToolsResult, legacy::ListToolsResult, _>(v)?;
@@ -473,7 +539,7 @@ impl Client {
         cursor: Option<&str>,
     ) -> ClientResult<neutral::ListResourcesResult> {
         let v = self
-            .versioned_request(request::RESOURCES_LIST, list_params(cursor))
+            .cached_request(request::RESOURCES_LIST, list_params(cursor), cursor)
             .await?;
         self.decode::<draft::ListResourcesResult, legacy::ListResourcesResult, _>(v)
     }
@@ -486,9 +552,21 @@ impl Client {
         &self,
         uri: impl Into<String>,
     ) -> ClientResult<neutral::ReadResourceResult> {
+        let uri = uri.into();
+        // `resources/read` runs the MRTR loop, so it can't share
+        // `cached_request`; the cache wraps the *settled* result (never an
+        // `input_required` intermediate).
+        if let Some(cache) = &self.cache
+            && let Some(hit) = cache.get(request::RESOURCES_READ, Some(&uri))
+        {
+            return self.decode::<draft::ReadResourceResult, legacy::ReadResourceResult, _>(hit);
+        }
         let mut params = Map::new();
-        params.insert("uri".into(), json!(uri.into()));
+        params.insert("uri".into(), json!(&uri));
         let v = self.mrtr_request(request::RESOURCES_READ, params).await?;
+        if let Some(cache) = &self.cache {
+            cache.store(request::RESOURCES_READ, Some(&uri), &v);
+        }
         self.decode::<draft::ReadResourceResult, legacy::ReadResourceResult, _>(v)
     }
 
@@ -501,7 +579,11 @@ impl Client {
         cursor: Option<&str>,
     ) -> ClientResult<neutral::ListResourceTemplatesResult> {
         let v = self
-            .versioned_request(request::RESOURCES_TEMPLATES_LIST, list_params(cursor))
+            .cached_request(
+                request::RESOURCES_TEMPLATES_LIST,
+                list_params(cursor),
+                cursor,
+            )
             .await?;
         self.decode::<draft::ListResourceTemplatesResult, legacy::ListResourceTemplatesResult, _>(v)
     }
@@ -515,7 +597,7 @@ impl Client {
         cursor: Option<&str>,
     ) -> ClientResult<neutral::ListPromptsResult> {
         let v = self
-            .versioned_request(request::PROMPTS_LIST, list_params(cursor))
+            .cached_request(request::PROMPTS_LIST, list_params(cursor), cursor)
             .await?;
         self.decode::<draft::ListPromptsResult, legacy::ListPromptsResult, _>(v)
     }
