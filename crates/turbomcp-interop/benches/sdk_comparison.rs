@@ -19,7 +19,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, Content, Implementation, ProtocolVersion,
+    CallToolRequestParams, CallToolResult, ContentBlock, Implementation, ProtocolVersion,
     ServerCapabilities, ServerInfo,
 };
 use rmcp::{
@@ -60,7 +60,7 @@ impl RmcpAdder {
         &self,
         Parameters(AddArgs { a, b }): Parameters<AddArgs>,
     ) -> Result<CallToolResult, RmcpError> {
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             (a + b).to_string(),
         )]))
     }
