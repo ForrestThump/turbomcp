@@ -6,8 +6,10 @@ zero-boilerplate surface and strict spec compliance as a feature.
 
 > **Status: `4.0.0-alpha.1` — a prerelease for community testing.** A
 > ground-up rewrite of `turbomcp` for the v4 major version; the stable line is
-> `3.x`. Edition 2024, MSRV 1.88. The draft protocol revision (`2026-07-28`)
-> tracks the pre-freeze spec; `2025-11-25` support is stable.
+> `3.x`. Edition 2024, MSRV 1.88. Passes the official MCP conformance suite
+> with zero failures and interoperates with the official Rust SDK (rmcp 2.x)
+> in both directions, verified in-repo. The draft protocol revision
+> (`2026-07-28`) tracks the pre-freeze spec; `2025-11-25` support is stable.
 
 ## What you get
 
@@ -27,9 +29,11 @@ zero-boilerplate surface and strict spec compliance as a feature.
   version, and speaks the same neutral API — interoperating with the official
   Rust SDK (rmcp) both directions. `call_tool` transparently drives task-shaped
   results (including mid-task `input_required`) to completion.
-- **Production seams.** OAuth 2.1 resource-server auth, identity-keyed rate
-  limiting, OpenTelemetry tracing, progress/logging, subscriptions, and
-  bidirectional elicitation (MRTR) — each opt-in behind a feature flag.
+- **Production seams.** OAuth 2.1 on both halves (resource-server bearer
+  validation and the client auth-code + PKCE flow), identity-keyed rate
+  limiting, OpenTelemetry tracing + metrics, progress/logging, subscriptions,
+  response caching (SEP-2549), and bidirectional elicitation (MRTR) — each
+  opt-in behind a feature flag.
 
 ## Quickstart
 
@@ -119,6 +123,7 @@ async fn stats(&self) -> Json<Stats> { Json(Stats { count: 3, mean: 1.5 }) }
 | `client-oauth` | the OAuth 2.1 *client* flow (auth-code + PKCE, discovery, registration, refresh) → `turbomcp::auth::client` |
 | `telemetry` | OpenTelemetry tracing + metrics (`TraceContextLayer`, `MetricsLayer`, W3C `_meta` propagation, PII-safe spans) |
 | `ext-tasks` | the draft Tasks extension (`io.modelcontextprotocol/tasks`, SEP-2663) |
+| `simd` | SIMD JSON (sonic-rs) as the default codec on native x86_64/aarch64; byte-compatible with the serde_json baseline |
 
 ## Examples
 
