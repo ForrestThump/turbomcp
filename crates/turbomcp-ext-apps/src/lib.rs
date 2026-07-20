@@ -1,4 +1,5 @@
-//! TurboMCP v4 Apps extension (io.modelcontextprotocol/apps) — deferred post-GA.
+//! TurboMCP v4 Apps extension (SEP-1865, extension id
+//! `io.modelcontextprotocol/ui`) — deferred post-GA.
 //!
 //! TurboMCP v4 — Phase 0 skeleton. Implementation lands in later phases.
 #![forbid(unsafe_code)]
