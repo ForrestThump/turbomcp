@@ -157,4 +157,89 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, CodecError::Decode(_)));
     }
+
+    /// Payloads that historically shake out JSON-backend divergence: non-BMP
+    /// unicode, escape-heavy strings, integer extremes, high-precision floats,
+    /// deep nesting, a large string, and null/absent params.
+    fn edge_messages() -> Vec<JsonRpcMessage> {
+        let deep = (0..64).fold(
+            serde_json::json!("bottom"),
+            |inner, _| serde_json::json!({ "d": inner }),
+        );
+        vec![
+            JsonRpcRequest::new(
+                i64::MAX,
+                "tools/call",
+                Some(serde_json::json!({
+                    "name": "emoji-🦀-tool",
+                    "arguments": {
+                        "text": "line1\nline2\ttab \"quoted\" back\\slash \u{0007} ✓ 𝔘𝔫𝔦𝔠𝔬𝔡𝔢 🇺🇳",
+                        "zero_width": "a\u{200b}b\u{feff}c",
+                    }
+                })),
+            )
+            .into(),
+            JsonRpcRequest::new(
+                i64::MIN,
+                "resources/read",
+                Some(serde_json::json!({
+                    "ints": [0, -1, i64::MAX, i64::MIN, u32::MAX],
+                    "floats": [0.1, -2.5e-308, 1.7976931348623157e308, 42.0],
+                })),
+            )
+            .into(),
+            JsonRpcRequest::new("string-id-🔑", "ping", Some(deep)).into(),
+            JsonRpcRequest::new(
+                7,
+                "prompts/get",
+                Some(serde_json::json!({ "blob": "x".repeat(64 * 1024) })),
+            )
+            .into(),
+            JsonRpcRequest::new(8, "tools/list", None).into(),
+        ]
+    }
+
+    #[test]
+    fn edge_payloads_roundtrip_under_serde_json() {
+        for msg in edge_messages() {
+            let bytes = SerdeJsonCodec.encode(&msg).expect("encode");
+            let back: JsonRpcMessage = SerdeJsonCodec.decode(&bytes).expect("decode");
+            assert_eq!(msg, back);
+        }
+    }
+
+    /// The `simd` feature swaps `DefaultCodec` to sonic-rs, so byte-level
+    /// interchangeability with the serde_json baseline is load-bearing: both
+    /// directions must parse the other's output for every edge payload.
+    #[cfg(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64")))]
+    #[test]
+    fn edge_payloads_are_interchangeable_across_codecs() {
+        for msg in edge_messages() {
+            let via_serde = SerdeJsonCodec.encode(&msg).expect("serde encode");
+            let via_sonic = SonicRsCodec.encode(&msg).expect("sonic encode");
+            let sonic_reads_serde: JsonRpcMessage = SonicRsCodec
+                .decode(&via_serde)
+                .expect("sonic decodes serde");
+            let serde_reads_sonic: JsonRpcMessage = SerdeJsonCodec
+                .decode(&via_sonic)
+                .expect("serde decodes sonic");
+            assert_eq!(msg, sonic_reads_serde);
+            assert_eq!(msg, serde_reads_sonic);
+        }
+    }
+
+    #[test]
+    fn empty_and_truncated_input_are_decode_errors_not_panics() {
+        for input in [&b""[..], &b"{"[..], &br#"{"jsonrpc":"2.0","id":1,"met"#[..]] {
+            assert!(matches!(
+                SerdeJsonCodec.decode::<JsonRpcMessage>(input),
+                Err(CodecError::Decode(_))
+            ));
+            #[cfg(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64")))]
+            assert!(matches!(
+                SonicRsCodec.decode::<JsonRpcMessage>(input),
+                Err(CodecError::Decode(_))
+            ));
+        }
+    }
 }

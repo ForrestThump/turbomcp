@@ -1,6 +1,7 @@
 //! Production guards on the WebSocket server: Origin policy at the upgrade,
-//! bearer auth right after it (close 1008 on rejection), and the
-//! authenticated principal stamped into every inbound message.
+//! bearer auth right after it (close 1008 on rejection), the authenticated
+//! principal stamped into every inbound message, and the inbound
+//! message-size cap.
 
 use std::task::{Context, Poll};
 
@@ -89,6 +90,42 @@ async fn browser_origin_is_rejected_at_the_upgrade() {
     req.headers_mut()
         .insert("origin", "https://app.example".parse().unwrap());
     assert!(tokio_tungstenite::connect_async(req).await.is_ok());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oversized_frames_end_the_connection() {
+    let addr = spawn_server(WsConfig::new().max_message_bytes(1024)).await;
+
+    // A frame within the cap is served normally.
+    let req = format!("ws://{addr}").into_client_request().unwrap();
+    let (stream, _) = tokio_tungstenite::connect_async(req).await.unwrap();
+    let mut client = WebSocketTransport::new(stream, DefaultCodec::default());
+    client
+        .send(JsonRpcMessage::Request(JsonRpcRequest::new(
+            1, "small", None,
+        )))
+        .await
+        .unwrap();
+    assert!(
+        client.recv().await.unwrap().is_some(),
+        "within-cap frame is answered"
+    );
+
+    // A frame over the cap must NOT be answered: the server rejects it at the
+    // socket layer and the connection ends (recv sees close/error, never a
+    // response).
+    client
+        .send(JsonRpcMessage::Request(JsonRpcRequest::new(
+            2,
+            "big",
+            Some(json!({ "blob": "x".repeat(4 * 1024) })),
+        )))
+        .await
+        .unwrap();
+    match client.recv().await {
+        Ok(None) | Err(_) => {} // closed — the guard held
+        Ok(Some(msg)) => panic!("oversized frame was served: {msg:?}"),
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

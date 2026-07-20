@@ -76,13 +76,12 @@ tempfile = "3.27"
 # URI template (RFC 6570) matching for #[resource("…/{var}")] — the pattern core
 regex = "1.11"
 
-# Serialization with performance focus
+# Serialization with performance focus. `float_roundtrip` makes serde_json's
+# float *parsing* correctly rounded (without it, extreme-exponent values like
+# 2.5e-308 gain 1 ulp on decode — wire fidelity is worth the small parse cost).
 serde = { version = "1.0.228", features = ["derive", "rc"] }
-serde_json = { version = "1.0.149", features = ["raw_value", "preserve_order"] }
-msgpacker = { version = "0.7", features = ["derive"] }  # MessagePack for binary efficiency
-sonic-rs = "0.5.8"   # High-performance JSON
-simd-json = "0.17" # SIMD-accelerated JSON parsing
-ciborium = "0.2"
+serde_json = { version = "1.0.149", features = ["raw_value", "preserve_order", "float_roundtrip"] }
+sonic-rs = "0.5.8"   # High-performance JSON (codec `simd` feature)
 
 # Schema validation and generation
 schemars = { version = "1.2.1", features = ["chrono04", "uuid1"] }

@@ -36,6 +36,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **crates.io metadata polish** — every published crate now ships a README,
   keywords, and categories.
 
+### Fixed
+
+- **Float decode is now correctly rounded** (serde_json `float_roundtrip`).
+  Without it, JSON numbers with extreme exponents (e.g. `2.5e-308`) gained
+  1 ulp on decode — found by the new codec edge-payload suite, which also
+  proves byte-level interchangeability between the `serde_json` baseline and
+  the `simd` (sonic-rs) codec across unicode, integer-extreme, deep-nesting,
+  and large payloads.
+
 ### Changed
 
 - **Dropped the non-spec TCP and Unix-socket server transports**
