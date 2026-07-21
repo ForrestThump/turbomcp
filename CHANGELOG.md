@@ -33,6 +33,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ["simd"] }`. The default build now sticks to the portable `serde_json`
   baseline (previously sonic-rs was always compiled in via the codec crate's
   default features).
+- **Tool metadata is now first-class and lossless** (consumer feedback from a
+  74-tool v3 production server). `neutral::Tool` carries `annotations`
+  (the spec's `ToolAnnotations` behavior hints), `icons` (with `theme`), and
+  arbitrary namespaced `_meta` — all preserved through both wire versions in
+  both directions (previously the conversions silently emitted empty values,
+  which would have dropped safety hints and tag-based policy metadata).
+  `#[tool]` gains `title = "…"` and the behavior-hint flags `read_only`,
+  `destructive`, `idempotent`, `open_world` (bare = true, or `= false` to
+  declare the opposite — distinct from leaving a hint unset). Builders:
+  `Tool::with_annotations` / `with_icon` / `with_meta_entry`,
+  `ToolAnnotations::new().read_only()…`, `Icon::new(src)`.
 - **crates.io metadata polish** — every published crate now ships a README,
   keywords, and categories.
 

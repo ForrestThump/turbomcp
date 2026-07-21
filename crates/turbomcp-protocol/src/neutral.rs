@@ -129,6 +129,108 @@ pub struct Tool {
     /// Per-tool `2025-11-25` task support (`#[tool(task)]`). `None` leaves it to
     /// the server's global Tasks policy; the draft wire ignores it.
     pub task_support: Option<TaskSupport>,
+    /// Behavior hints for clients (`readOnlyHint`, `destructiveHint`, …).
+    /// Hints, not guarantees — clients MUST NOT treat them as security
+    /// boundaries. Carried losslessly on both wire versions.
+    pub annotations: Option<ToolAnnotations>,
+    /// Sized icons a client can display for this tool (both wire versions).
+    pub icons: Vec<Icon>,
+    /// Arbitrary `_meta` for this tool (namespaced keys per the spec's `_meta`
+    /// conventions — e.g. server-local tags a catalog policy keys off).
+    /// Empty = absent on the wire. Carried losslessly on both wire versions.
+    pub meta: Map<String, Value>,
+}
+
+/// Behavior hints describing a [`Tool`] to clients (the spec's
+/// `ToolAnnotations`). Every field is a **hint**, not a guarantee: clients
+/// must not rely on them for safety decisions about untrusted servers.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ToolAnnotations {
+    /// Human-readable title (display precedence: `Tool::title`, then this,
+    /// then `Tool::name`).
+    pub title: Option<String>,
+    /// `true` = the tool does not modify its environment (default `false`).
+    pub read_only_hint: Option<bool>,
+    /// `true` = updates may be destructive; `false` = additive only.
+    /// Meaningful only when not read-only (default `true`).
+    pub destructive_hint: Option<bool>,
+    /// `true` = repeat calls with the same arguments have no additional
+    /// effect. Meaningful only when not read-only (default `false`).
+    pub idempotent_hint: Option<bool>,
+    /// `true` = interacts with an "open world" of external entities (e.g. web
+    /// search); `false` = a closed domain (default `true`).
+    pub open_world_hint: Option<bool>,
+}
+
+impl ToolAnnotations {
+    /// Annotations with every hint unset.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Mark the tool read-only (does not modify its environment).
+    #[must_use]
+    pub fn read_only(mut self) -> Self {
+        self.read_only_hint = Some(true);
+        self
+    }
+
+    /// Set the destructive hint.
+    #[must_use]
+    pub fn destructive(mut self, destructive: bool) -> Self {
+        self.destructive_hint = Some(destructive);
+        self
+    }
+
+    /// Set the idempotent hint.
+    #[must_use]
+    pub fn idempotent(mut self, idempotent: bool) -> Self {
+        self.idempotent_hint = Some(idempotent);
+        self
+    }
+
+    /// Set the open-world hint.
+    #[must_use]
+    pub fn open_world(mut self, open_world: bool) -> Self {
+        self.open_world_hint = Some(open_world);
+        self
+    }
+}
+
+/// A sized icon resource (`ui` display hint on tools, resources, prompts).
+/// `src` is an HTTP(S) URL or a base64 `data:` URI.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Icon {
+    /// URI of the icon resource (HTTP/HTTPS or `data:`).
+    pub src: String,
+    /// MIME type override when the source's is missing or generic.
+    pub mime_type: Option<String>,
+    /// `"WxH"` strings (e.g. `"48x48"`) or `"any"`; empty = any size.
+    pub sizes: Vec<String>,
+    /// The color scheme this icon is designed for; `None` = suits both.
+    pub theme: Option<IconTheme>,
+}
+
+impl Icon {
+    /// An icon with the given source URI (any size, MIME inferred).
+    pub fn new(src: impl Into<String>) -> Self {
+        Self {
+            src: src.into(),
+            mime_type: None,
+            sizes: Vec::new(),
+            theme: None,
+        }
+    }
+}
+
+/// The color scheme an [`Icon`] is designed for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IconTheme {
+    /// For light backgrounds.
+    Light,
+    /// For dark backgrounds.
+    Dark,
 }
 
 impl Tool {
@@ -141,7 +243,32 @@ impl Tool {
             input_schema,
             output_schema: None,
             task_support: None,
+            annotations: None,
+            icons: Vec::new(),
+            meta: Map::new(),
         }
+    }
+
+    /// Set the behavior-hint annotations (builder style).
+    #[must_use]
+    pub fn with_annotations(mut self, annotations: ToolAnnotations) -> Self {
+        self.annotations = Some(annotations);
+        self
+    }
+
+    /// Add a display icon (builder style).
+    #[must_use]
+    pub fn with_icon(mut self, icon: Icon) -> Self {
+        self.icons.push(icon);
+        self
+    }
+
+    /// Set a namespaced `_meta` entry (builder style) — e.g.
+    /// `.with_meta_entry("com.example/tags", json!(["read"]))`.
+    #[must_use]
+    pub fn with_meta_entry(mut self, key: impl Into<String>, value: Value) -> Self {
+        self.meta.insert(key.into(), value);
+        self
     }
 
     /// Set the description (builder style).
@@ -1152,16 +1279,42 @@ impl From<Tool> for draft::Tool {
                 extra: Map::new(),
             });
         draft::Tool {
-            annotations: None,
+            annotations: t.annotations.map(Into::into),
             description: t.description,
-            icons: Vec::new(),
+            icons: t.icons.into_iter().map(Into::into).collect(),
             input_schema,
-            meta: None,
+            meta: (!t.meta.is_empty()).then(|| draft::MetaObject(t.meta)),
             name: t.name,
             // The draft `ToolOutputSchema` is a permissive bag ($schema + a
             // flattened `extra`), so any JSON Schema object deserializes into it.
             output_schema: t.output_schema.and_then(|v| serde_json::from_value(v).ok()),
             title: t.title,
+        }
+    }
+}
+
+impl From<ToolAnnotations> for draft::ToolAnnotations {
+    fn from(a: ToolAnnotations) -> Self {
+        draft::ToolAnnotations {
+            destructive_hint: a.destructive_hint,
+            idempotent_hint: a.idempotent_hint,
+            open_world_hint: a.open_world_hint,
+            read_only_hint: a.read_only_hint,
+            title: a.title,
+        }
+    }
+}
+
+impl From<Icon> for draft::Icon {
+    fn from(i: Icon) -> Self {
+        draft::Icon {
+            mime_type: i.mime_type,
+            sizes: i.sizes,
+            src: i.src,
+            theme: i.theme.map(|t| match t {
+                IconTheme::Light => draft::IconTheme::Light,
+                IconTheme::Dark => draft::IconTheme::Dark,
+            }),
         }
     }
 }
@@ -1528,22 +1681,48 @@ impl From<Tool> for legacy::Tool {
                 extra: Map::new(),
             });
         legacy::Tool {
-            annotations: None,
+            annotations: t.annotations.map(Into::into),
             description: t.description,
             // A declared `#[tool(task)]` sets per-tool task support; otherwise
             // left unset for the dispatcher to patch under a global Tasks policy.
             execution: t.task_support.map(|ts| legacy::ToolExecution {
                 task_support: Some(ts.into()),
             }),
-            icons: Vec::new(),
+            icons: t.icons.into_iter().map(Into::into).collect(),
             input_schema,
-            meta: Map::new(),
+            meta: t.meta,
             name: t.name,
             // The legacy `ToolOutputSchema` is a closed object schema (requires
             // `type`); a schemars-generated struct schema deserializes cleanly,
             // and anything that doesn't is dropped rather than failing.
             output_schema: t.output_schema.and_then(|v| serde_json::from_value(v).ok()),
             title: t.title,
+        }
+    }
+}
+
+impl From<ToolAnnotations> for legacy::ToolAnnotations {
+    fn from(a: ToolAnnotations) -> Self {
+        legacy::ToolAnnotations {
+            destructive_hint: a.destructive_hint,
+            idempotent_hint: a.idempotent_hint,
+            open_world_hint: a.open_world_hint,
+            read_only_hint: a.read_only_hint,
+            title: a.title,
+        }
+    }
+}
+
+impl From<Icon> for legacy::Icon {
+    fn from(i: Icon) -> Self {
+        legacy::Icon {
+            mime_type: i.mime_type,
+            sizes: i.sizes,
+            src: i.src,
+            theme: i.theme.map(|t| match t {
+                IconTheme::Light => legacy::IconTheme::Light,
+                IconTheme::Dark => legacy::IconTheme::Dark,
+            }),
         }
     }
 }
@@ -1820,6 +1999,35 @@ impl From<draft::Tool> for Tool {
             // The draft models Tasks as a server-directed extension, not a
             // per-tool wire field.
             task_support: None,
+            annotations: t.annotations.map(Into::into),
+            icons: t.icons.into_iter().map(Into::into).collect(),
+            meta: t.meta.map(|m| m.0).unwrap_or_default(),
+        }
+    }
+}
+
+impl From<draft::ToolAnnotations> for ToolAnnotations {
+    fn from(a: draft::ToolAnnotations) -> Self {
+        ToolAnnotations {
+            title: a.title,
+            read_only_hint: a.read_only_hint,
+            destructive_hint: a.destructive_hint,
+            idempotent_hint: a.idempotent_hint,
+            open_world_hint: a.open_world_hint,
+        }
+    }
+}
+
+impl From<draft::Icon> for Icon {
+    fn from(i: draft::Icon) -> Self {
+        Icon {
+            src: i.src,
+            mime_type: i.mime_type,
+            sizes: i.sizes,
+            theme: i.theme.map(|t| match t {
+                draft::IconTheme::Light => IconTheme::Light,
+                draft::IconTheme::Dark => IconTheme::Dark,
+            }),
         }
     }
 }
@@ -2081,6 +2289,35 @@ impl From<legacy::Tool> for Tool {
                 .unwrap_or_else(|_| Value::Object(Map::new())),
             output_schema: t.output_schema.and_then(|s| serde_json::to_value(s).ok()),
             task_support: t.execution.and_then(|e| e.task_support).map(Into::into),
+            annotations: t.annotations.map(Into::into),
+            icons: t.icons.into_iter().map(Into::into).collect(),
+            meta: t.meta,
+        }
+    }
+}
+
+impl From<legacy::ToolAnnotations> for ToolAnnotations {
+    fn from(a: legacy::ToolAnnotations) -> Self {
+        ToolAnnotations {
+            title: a.title,
+            read_only_hint: a.read_only_hint,
+            destructive_hint: a.destructive_hint,
+            idempotent_hint: a.idempotent_hint,
+            open_world_hint: a.open_world_hint,
+        }
+    }
+}
+
+impl From<legacy::Icon> for Icon {
+    fn from(i: legacy::Icon) -> Self {
+        Icon {
+            src: i.src,
+            mime_type: i.mime_type,
+            sizes: i.sizes,
+            theme: i.theme.map(|t| match t {
+                legacy::IconTheme::Light => IconTheme::Light,
+                legacy::IconTheme::Dark => IconTheme::Dark,
+            }),
         }
     }
 }
@@ -2515,6 +2752,77 @@ mod tests {
         let wire: legacy::ListToolsResult = original.into();
         let back: ListToolsResult = wire.into();
         assert_eq!(back.tools[0].name, "add");
+    }
+
+    /// A tool carrying every metadata surface — annotations (all five hints),
+    /// icons (with theme), and namespaced `_meta`.
+    fn metadata_tool() -> Tool {
+        Tool::new("audit", json!({"type": "object"}))
+            .with_title("Audit")
+            .with_annotations(
+                ToolAnnotations::new()
+                    .read_only()
+                    .destructive(false)
+                    .idempotent(true)
+                    .open_world(false),
+            )
+            .with_icon(Icon {
+                src: "https://example.com/audit.png".into(),
+                mime_type: Some("image/png".into()),
+                sizes: alloc::vec!["48x48".into()],
+                theme: Some(IconTheme::Dark),
+            })
+            .with_meta_entry("com.example/tags", json!(["read", "safety"]))
+    }
+
+    fn assert_metadata_preserved(back: &Tool) {
+        let a = back.annotations.as_ref().expect("annotations survive");
+        assert_eq!(a.read_only_hint, Some(true));
+        assert_eq!(a.destructive_hint, Some(false));
+        assert_eq!(a.idempotent_hint, Some(true));
+        assert_eq!(a.open_world_hint, Some(false));
+        assert_eq!(back.icons.len(), 1);
+        assert_eq!(back.icons[0].src, "https://example.com/audit.png");
+        assert_eq!(back.icons[0].mime_type.as_deref(), Some("image/png"));
+        assert_eq!(back.icons[0].sizes, alloc::vec!["48x48".to_string()]);
+        assert_eq!(back.icons[0].theme, Some(IconTheme::Dark));
+        assert_eq!(back.meta["com.example/tags"], json!(["read", "safety"]));
+    }
+
+    #[test]
+    fn tool_annotations_icons_and_meta_round_trip_the_draft_wire() {
+        let wire: draft::Tool = metadata_tool().into();
+        let v = serde_json::to_value(&wire).unwrap();
+        // Exact spec wire names.
+        assert_eq!(v["annotations"]["readOnlyHint"], json!(true));
+        assert_eq!(v["annotations"]["destructiveHint"], json!(false));
+        assert_eq!(v["annotations"]["idempotentHint"], json!(true));
+        assert_eq!(v["annotations"]["openWorldHint"], json!(false));
+        assert_eq!(v["icons"][0]["src"], "https://example.com/audit.png");
+        assert_eq!(v["icons"][0]["theme"], "dark");
+        assert_eq!(v["_meta"]["com.example/tags"], json!(["read", "safety"]));
+        let back: Tool = wire.into();
+        assert_metadata_preserved(&back);
+    }
+
+    #[test]
+    fn tool_annotations_icons_and_meta_round_trip_the_legacy_wire() {
+        let wire: legacy::Tool = metadata_tool().into();
+        let v = serde_json::to_value(&wire).unwrap();
+        assert_eq!(v["annotations"]["readOnlyHint"], json!(true));
+        assert_eq!(v["icons"][0]["theme"], "dark");
+        assert_eq!(v["_meta"]["com.example/tags"], json!(["read", "safety"]));
+        let back: Tool = wire.into();
+        assert_metadata_preserved(&back);
+    }
+
+    #[test]
+    fn absent_tool_metadata_stays_absent_on_the_wire() {
+        let wire: draft::Tool = Tool::new("plain", json!({"type": "object"})).into();
+        let v = serde_json::to_value(&wire).unwrap();
+        assert!(v.get("annotations").is_none(), "no annotations key: {v}");
+        assert!(v.get("icons").is_none(), "no icons key: {v}");
+        assert!(v.get("_meta").is_none(), "no _meta key: {v}");
     }
 
     #[test]

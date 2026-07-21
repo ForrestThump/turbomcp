@@ -43,10 +43,18 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
             continue;
         };
         match kind {
-            Marker::Tool { desc, task, scopes } => {
+            Marker::Tool {
+                desc,
+                task,
+                scopes,
+                title,
+                hints,
+            } => {
                 let mut h = Handler::parse(f, desc, HandlerKind::Tool)?;
                 h.task = task;
                 h.scopes = scopes;
+                h.title = title;
+                h.hints = hints;
                 tools.push(h);
             }
             Marker::Prompt(desc) => prompts.push(Handler::parse(f, desc, HandlerKind::Prompt)?),
@@ -179,6 +187,8 @@ enum Marker {
         desc: Option<String>,
         task: bool,
         scopes: Vec<String>,
+        title: Option<String>,
+        hints: ToolHints,
     },
     Prompt(Option<String>),
     Resource {
@@ -188,12 +198,58 @@ enum Marker {
     Completion,
 }
 
+/// Behavior-hint flags from `#[tool(read_only, destructive = false, …)]` —
+/// each maps to the spec's `ToolAnnotations` (`None` = hint not declared).
+#[derive(Default, Clone, Copy)]
+struct ToolHints {
+    read_only: Option<bool>,
+    destructive: Option<bool>,
+    idempotent: Option<bool>,
+    open_world: Option<bool>,
+}
+
+impl ToolHints {
+    fn any(&self) -> bool {
+        self.read_only.is_some()
+            || self.destructive.is_some()
+            || self.idempotent.is_some()
+            || self.open_world.is_some()
+    }
+}
+
 /// One argument inside `#[tool(...)]`: a bare description string, `description =
-/// "…"`, the `task` flag, or `scopes("…", …)` (required OAuth scopes).
+/// "…"`, `title = "…"`, the `task` flag, `scopes("…", …)` (required OAuth
+/// scopes), or a behavior hint — `read_only` / `destructive` / `idempotent` /
+/// `open_world`, each optionally `= true|false` (bare = `true`).
 enum ToolArg {
     Desc(String),
+    Title(String),
     Task,
     Scopes(Vec<String>),
+    Hint(HintKind, bool),
+}
+
+#[derive(Clone, Copy)]
+enum HintKind {
+    ReadOnly,
+    Destructive,
+    Idempotent,
+    OpenWorld,
+}
+
+fn hint_kind(meta: &Meta) -> Option<HintKind> {
+    let p = meta.path();
+    if p.is_ident("read_only") {
+        Some(HintKind::ReadOnly)
+    } else if p.is_ident("destructive") {
+        Some(HintKind::Destructive)
+    } else if p.is_ident("idempotent") {
+        Some(HintKind::Idempotent)
+    } else if p.is_ident("open_world") {
+        Some(HintKind::OpenWorld)
+    } else {
+        None
+    }
 }
 
 impl Parse for ToolArg {
@@ -215,6 +271,13 @@ impl Parse for ToolArg {
                     "expected `description = \"…\"`",
                 )),
             }
+        } else if meta.path().is_ident("title") {
+            match meta {
+                Meta::NameValue(nv) => lit_str(&nv.value)
+                    .map(ToolArg::Title)
+                    .ok_or_else(|| syn::Error::new(nv.value.span(), "expected a string literal")),
+                _ => Err(syn::Error::new(meta.span(), "expected `title = \"…\"`")),
+            }
         } else if meta.path().is_ident("scopes") {
             match meta {
                 Meta::List(list) => {
@@ -224,34 +287,75 @@ impl Parse for ToolArg {
                 }
                 _ => Err(syn::Error::new(meta.span(), "expected `scopes(\"…\", …)`")),
             }
+        } else if let Some(kind) = hint_kind(&meta) {
+            match meta {
+                // Bare flag: `read_only` means the hint is true.
+                Meta::Path(_) => Ok(ToolArg::Hint(kind, true)),
+                // Explicit: `destructive = false` declares the hint false
+                // (distinct from not declaring it — the spec defaults differ).
+                Meta::NameValue(nv) => match &nv.value {
+                    syn::Expr::Lit(el) => match &el.lit {
+                        syn::Lit::Bool(b) => Ok(ToolArg::Hint(kind, b.value)),
+                        _ => Err(syn::Error::new(
+                            nv.value.span(),
+                            "expected `true` or `false`",
+                        )),
+                    },
+                    _ => Err(syn::Error::new(
+                        nv.value.span(),
+                        "expected `true` or `false`",
+                    )),
+                },
+                Meta::List(l) => Err(syn::Error::new(
+                    l.span(),
+                    "behavior hints take no list — use the bare flag or `= true|false`",
+                )),
+            }
         } else {
             Err(syn::Error::new(
                 meta.span(),
-                "expected `description = \"…\"`, `task`, or `scopes(…)`",
+                "expected `description = \"…\"`, `title = \"…\"`, `task`, `scopes(…)`, \
+                 or a behavior hint (`read_only`, `destructive`, `idempotent`, `open_world`)",
             ))
         }
     }
 }
 
+/// Everything `#[tool(...)]` can declare.
+#[derive(Default)]
+struct ToolMarkerArgs {
+    desc: Option<String>,
+    task: bool,
+    scopes: Vec<String>,
+    title: Option<String>,
+    hints: ToolHints,
+}
+
 /// Parse `#[tool]`, `#[tool("…")]`, `#[tool(description = "…")]`, `#[tool(task)]`,
-/// `#[tool(scopes(…))]`, and their combinations.
-fn parse_tool_args(attr: &Attribute) -> syn::Result<(Option<String>, bool, Vec<String>)> {
+/// `#[tool(scopes(…))]`, `#[tool(title = "…")]`, behavior hints, and combinations.
+fn parse_tool_args(attr: &Attribute) -> syn::Result<ToolMarkerArgs> {
     match &attr.meta {
-        Meta::Path(_) => Ok((None, false, Vec::new())),
-        Meta::NameValue(nv) => Ok((lit_str(&nv.value), false, Vec::new())),
+        Meta::Path(_) => Ok(ToolMarkerArgs::default()),
+        Meta::NameValue(nv) => Ok(ToolMarkerArgs {
+            desc: lit_str(&nv.value),
+            ..ToolMarkerArgs::default()
+        }),
         Meta::List(_) => {
             let args = attr.parse_args_with(Punctuated::<ToolArg, Token![,]>::parse_terminated)?;
-            let mut desc = None;
-            let mut task = false;
-            let mut scopes = Vec::new();
+            let mut parsed = ToolMarkerArgs::default();
             for a in args {
                 match a {
-                    ToolArg::Desc(s) => desc = Some(s),
-                    ToolArg::Task => task = true,
-                    ToolArg::Scopes(s) => scopes = s,
+                    ToolArg::Desc(s) => parsed.desc = Some(s),
+                    ToolArg::Title(s) => parsed.title = Some(s),
+                    ToolArg::Task => parsed.task = true,
+                    ToolArg::Scopes(s) => parsed.scopes = s,
+                    ToolArg::Hint(HintKind::ReadOnly, v) => parsed.hints.read_only = Some(v),
+                    ToolArg::Hint(HintKind::Destructive, v) => parsed.hints.destructive = Some(v),
+                    ToolArg::Hint(HintKind::Idempotent, v) => parsed.hints.idempotent = Some(v),
+                    ToolArg::Hint(HintKind::OpenWorld, v) => parsed.hints.open_world = Some(v),
                 }
             }
-            Ok((desc, task, scopes))
+            Ok(parsed)
         }
     }
 }
@@ -272,11 +376,13 @@ fn take_marker(attrs: &mut Vec<Attribute>) -> syn::Result<Option<Marker>> {
     let attr = attrs.remove(pos);
     let doc = doc_comment(attrs);
     if attr.path().is_ident("tool") {
-        let (desc, task, scopes) = parse_tool_args(&attr)?;
+        let parsed = parse_tool_args(&attr)?;
         Ok(Some(Marker::Tool {
-            desc: desc.or(doc),
-            task,
-            scopes,
+            desc: parsed.desc.or(doc),
+            task: parsed.task,
+            scopes: parsed.scopes,
+            title: parsed.title,
+            hints: parsed.hints,
         }))
     } else if attr.path().is_ident("prompt") {
         Ok(Some(Marker::Prompt(marker_description(&attr)?.or(doc))))
@@ -354,6 +460,10 @@ struct Handler {
     task: bool,
     /// `#[tool(scopes(…))]`: OAuth scopes the caller must hold. Tools only.
     scopes: Vec<String>,
+    /// `#[tool(title = "…")]`: human-facing display name. Tools only.
+    title: Option<String>,
+    /// `#[tool(read_only, …)]` behavior hints → `ToolAnnotations`. Tools only.
+    hints: ToolHints,
 }
 
 impl Handler {
@@ -432,6 +542,8 @@ impl Handler {
             ret_ty,
             task: false,
             scopes: Vec::new(),
+            title: None,
+            hints: ToolHints::default(),
         })
     }
 
@@ -571,6 +683,27 @@ fn gen_tool_list_entry(t: &Handler) -> TokenStream {
     let task_support = t
         .task
         .then(|| quote!(.with_task_support(::turbomcp::neutral::TaskSupport::Optional)));
+    let title = t.title.as_ref().map(|s| quote!(.with_title(#s)));
+    // Behavior hints (`read_only`, `destructive`, …) → `ToolAnnotations`.
+    let annotations = t.hints.any().then(|| {
+        let set = [
+            ("read_only_hint", t.hints.read_only),
+            ("destructive_hint", t.hints.destructive),
+            ("idempotent_hint", t.hints.idempotent),
+            ("open_world_hint", t.hints.open_world),
+        ]
+        .into_iter()
+        .filter_map(|(field, v)| {
+            let field = Ident::new(field, proc_macro2::Span::call_site());
+            v.map(|v| quote!(__annotations.#field = ::core::option::Option::Some(#v);))
+        })
+        .collect::<Vec<_>>();
+        quote!(.with_annotations({
+            let mut __annotations = ::turbomcp::neutral::ToolAnnotations::new();
+            #(#set)*
+            __annotations
+        }))
+    });
     quote! {
         {
             let mut __schema = ::turbomcp::__macros::close_object_schema(
@@ -583,7 +716,8 @@ fn gen_tool_list_entry(t: &Handler) -> TokenStream {
                 )
             );
             #(#header_marks)*
-            ::turbomcp::neutral::Tool::new(#name, __schema) #desc #output_schema #task_support
+            ::turbomcp::neutral::Tool::new(#name, __schema)
+                #desc #title #annotations #output_schema #task_support
         }
     }
 }
