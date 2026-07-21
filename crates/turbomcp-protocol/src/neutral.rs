@@ -15,6 +15,7 @@
 //! Conversions are intentionally one-directional (neutral → wire) and total
 //! (`From`, never failing): a handler can always be serialized to the wire.
 
+use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -37,7 +38,8 @@ pub mod result_type {
 
 /// A neutral content block. The enum is `#[non_exhaustive]` so further block
 /// kinds (embedded resources, resource links) slot in without breaking callers.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// (`PartialEq` only: resource-link annotations carry an `f64` priority.)
+#[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum Content {
     /// Plain UTF-8 text.
@@ -60,8 +62,10 @@ pub enum Content {
     /// blob), carried in a message rather than referenced by URI.
     Resource(ResourceContents),
     /// A link to a resource by URI + descriptor (name/title/MIME/size), without
-    /// its contents — the client can `resources/read` it.
-    ResourceLink(Resource),
+    /// its contents — the client can `resources/read` it. Boxed: a full
+    /// [`Resource`] (annotations/icons/`_meta`) would otherwise dominate the
+    /// enum's size, taxing every text block in a content vector.
+    ResourceLink(Box<Resource>),
 }
 
 impl Content {
@@ -93,7 +97,7 @@ impl Content {
 
     /// A resource-link content block referencing a resource by URI.
     pub fn resource_link(resource: Resource) -> Self {
-        Self::ResourceLink(resource)
+        Self::ResourceLink(Box::new(resource))
     }
 }
 
@@ -501,7 +505,7 @@ pub trait Cacheable {
 // ---- resources ----------------------------------------------------------------
 
 /// A resource descriptor (`resources/list`).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct Resource {
     /// The resource URI (what `resources/read` references).
@@ -516,6 +520,12 @@ pub struct Resource {
     pub mime_type: Option<String>,
     /// Raw content size in bytes (before any encoding), if known.
     pub size: Option<u64>,
+    /// Display/consumption annotations (audience, priority, last-modified).
+    pub annotations: Option<Annotations>,
+    /// Sized icons a client can display for this resource.
+    pub icons: Vec<Icon>,
+    /// Arbitrary namespaced `_meta` (empty = absent on the wire).
+    pub meta: Map<String, Value>,
 }
 
 impl Resource {
@@ -528,6 +538,9 @@ impl Resource {
             description: None,
             mime_type: None,
             size: None,
+            annotations: None,
+            icons: Vec::new(),
+            meta: Map::new(),
         }
     }
 
@@ -549,6 +562,69 @@ impl Resource {
     #[must_use]
     pub fn with_mime_type(mut self, mime_type: impl Into<String>) -> Self {
         self.mime_type = Some(mime_type.into());
+        self
+    }
+
+    /// Set the display/consumption annotations (builder style).
+    #[must_use]
+    pub fn with_annotations(mut self, annotations: Annotations) -> Self {
+        self.annotations = Some(annotations);
+        self
+    }
+
+    /// Add a display icon (builder style).
+    #[must_use]
+    pub fn with_icon(mut self, icon: Icon) -> Self {
+        self.icons.push(icon);
+        self
+    }
+
+    /// Set a namespaced `_meta` entry (builder style).
+    #[must_use]
+    pub fn with_meta_entry(mut self, key: impl Into<String>, value: Value) -> Self {
+        self.meta.insert(key.into(), value);
+        self
+    }
+}
+
+/// Display/consumption annotations on resources and resource templates (the
+/// spec's `Annotations`): who the item is for, how important it is, and when
+/// it last changed. All advisory.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Annotations {
+    /// Intended audience(s); empty = unspecified.
+    pub audience: Vec<Role>,
+    /// Importance, `0.0` (least) ..= `1.0` (most important).
+    pub priority: Option<f64>,
+    /// ISO 8601 timestamp of the last modification.
+    pub last_modified: Option<String>,
+}
+
+impl Annotations {
+    /// Annotations with every field unset.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add an intended audience role.
+    #[must_use]
+    pub fn for_audience(mut self, role: Role) -> Self {
+        self.audience.push(role);
+        self
+    }
+
+    /// Set the priority (`0.0` ..= `1.0`).
+    #[must_use]
+    pub fn priority(mut self, priority: f64) -> Self {
+        self.priority = Some(priority);
+        self
+    }
+
+    /// Set the last-modified timestamp (ISO 8601).
+    #[must_use]
+    pub fn last_modified(mut self, when: impl Into<String>) -> Self {
+        self.last_modified = Some(when.into());
         self
     }
 }
@@ -701,6 +777,12 @@ pub struct ResourceTemplate {
     pub description: Option<String>,
     /// MIME type shared by all matching resources, if uniform.
     pub mime_type: Option<String>,
+    /// Display/consumption annotations (audience, priority, last-modified).
+    pub annotations: Option<Annotations>,
+    /// Sized icons a client can display for matching resources.
+    pub icons: Vec<Icon>,
+    /// Arbitrary namespaced `_meta` (empty = absent on the wire).
+    pub meta: Map<String, Value>,
 }
 
 impl ResourceTemplate {
@@ -712,7 +794,31 @@ impl ResourceTemplate {
             title: None,
             description: None,
             mime_type: None,
+            annotations: None,
+            icons: Vec::new(),
+            meta: Map::new(),
         }
+    }
+
+    /// Set the display/consumption annotations (builder style).
+    #[must_use]
+    pub fn with_annotations(mut self, annotations: Annotations) -> Self {
+        self.annotations = Some(annotations);
+        self
+    }
+
+    /// Add a display icon (builder style).
+    #[must_use]
+    pub fn with_icon(mut self, icon: Icon) -> Self {
+        self.icons.push(icon);
+        self
+    }
+
+    /// Set a namespaced `_meta` entry (builder style).
+    #[must_use]
+    pub fn with_meta_entry(mut self, key: impl Into<String>, value: Value) -> Self {
+        self.meta.insert(key.into(), value);
+        self
     }
 
     /// Set the description (builder style).
@@ -859,6 +965,10 @@ pub struct Prompt {
     pub description: Option<String>,
     /// Declared arguments for templating.
     pub arguments: Vec<PromptArgument>,
+    /// Sized icons a client can display for this prompt.
+    pub icons: Vec<Icon>,
+    /// Arbitrary namespaced `_meta` (empty = absent on the wire).
+    pub meta: Map<String, Value>,
 }
 
 impl Prompt {
@@ -869,7 +979,23 @@ impl Prompt {
             title: None,
             description: None,
             arguments: Vec::new(),
+            icons: Vec::new(),
+            meta: Map::new(),
         }
+    }
+
+    /// Add a display icon (builder style).
+    #[must_use]
+    pub fn with_icon(mut self, icon: Icon) -> Self {
+        self.icons.push(icon);
+        self
+    }
+
+    /// Set a namespaced `_meta` entry (builder style).
+    #[must_use]
+    pub fn with_meta_entry(mut self, key: impl Into<String>, value: Value) -> Self {
+        self.meta.insert(key.into(), value);
+        self
     }
 
     /// Set the description (builder style).
@@ -1251,18 +1377,21 @@ impl From<Content> for draft::ContentBlock {
                     type_: "resource".to_string(),
                 })
             }
-            Content::ResourceLink(r) => draft::ContentBlock::ResourceLink(draft::ResourceLink {
-                annotations: None,
-                description: r.description,
-                icons: alloc::vec::Vec::new(),
-                meta: None,
-                mime_type: r.mime_type,
-                name: r.name,
-                size: r.size.and_then(|s| i64::try_from(s).ok()),
-                title: r.title,
-                type_: "resource_link".to_string(),
-                uri: r.uri,
-            }),
+            Content::ResourceLink(r) => {
+                let r = *r;
+                draft::ContentBlock::ResourceLink(draft::ResourceLink {
+                    annotations: r.annotations.map(Into::into),
+                    description: r.description,
+                    icons: r.icons.into_iter().map(Into::into).collect(),
+                    meta: (!r.meta.is_empty()).then_some(draft::MetaObject(r.meta)),
+                    mime_type: r.mime_type,
+                    name: r.name,
+                    size: r.size.and_then(|s| i64::try_from(s).ok()),
+                    title: r.title,
+                    type_: "resource_link".to_string(),
+                    uri: r.uri,
+                })
+            }
         }
     }
 }
@@ -1283,7 +1412,7 @@ impl From<Tool> for draft::Tool {
             description: t.description,
             icons: t.icons.into_iter().map(Into::into).collect(),
             input_schema,
-            meta: (!t.meta.is_empty()).then(|| draft::MetaObject(t.meta)),
+            meta: (!t.meta.is_empty()).then_some(draft::MetaObject(t.meta)),
             name: t.name,
             // The draft `ToolOutputSchema` is a permissive bag ($schema + a
             // flattened `extra`), so any JSON Schema object deserializes into it.
@@ -1353,15 +1482,25 @@ impl From<CallToolResult> for draft::CallToolResult {
 impl From<Resource> for draft::Resource {
     fn from(r: Resource) -> Self {
         draft::Resource {
-            annotations: None,
+            annotations: r.annotations.map(Into::into),
             description: r.description,
-            icons: Vec::new(),
-            meta: None,
+            icons: r.icons.into_iter().map(Into::into).collect(),
+            meta: (!r.meta.is_empty()).then_some(draft::MetaObject(r.meta)),
             mime_type: r.mime_type,
             name: r.name,
             size: r.size.map(|s| i64::try_from(s).unwrap_or(i64::MAX)),
             title: r.title,
             uri: r.uri,
+        }
+    }
+}
+
+impl From<Annotations> for draft::Annotations {
+    fn from(a: Annotations) -> Self {
+        draft::Annotations {
+            audience: a.audience.into_iter().map(Into::into).collect(),
+            last_modified: a.last_modified,
+            priority: a.priority,
         }
     }
 }
@@ -1464,10 +1603,10 @@ impl From<ReadResourceResult> for draft::ReadResourceResult {
 impl From<ResourceTemplate> for draft::ResourceTemplate {
     fn from(t: ResourceTemplate) -> Self {
         draft::ResourceTemplate {
-            annotations: None,
+            annotations: t.annotations.map(Into::into),
             description: t.description,
-            icons: Vec::new(),
-            meta: None,
+            icons: t.icons.into_iter().map(Into::into).collect(),
+            meta: (!t.meta.is_empty()).then_some(draft::MetaObject(t.meta)),
             mime_type: t.mime_type,
             name: t.name,
             title: t.title,
@@ -1520,8 +1659,8 @@ impl From<Prompt> for draft::Prompt {
         draft::Prompt {
             arguments: p.arguments.into_iter().map(Into::into).collect(),
             description: p.description,
-            icons: Vec::new(),
-            meta: None,
+            icons: p.icons.into_iter().map(Into::into).collect(),
+            meta: (!p.meta.is_empty()).then_some(draft::MetaObject(p.meta)),
             name: p.name,
             title: p.title,
         }
@@ -1630,18 +1769,21 @@ impl From<Content> for legacy::ContentBlock {
                     type_: "resource".to_string(),
                 })
             }
-            Content::ResourceLink(r) => legacy::ContentBlock::ResourceLink(legacy::ResourceLink {
-                annotations: None,
-                description: r.description,
-                icons: alloc::vec::Vec::new(),
-                meta: Map::new(),
-                mime_type: r.mime_type,
-                name: r.name,
-                size: r.size.and_then(|s| i64::try_from(s).ok()),
-                title: r.title,
-                type_: "resource_link".to_string(),
-                uri: r.uri,
-            }),
+            Content::ResourceLink(r) => {
+                let r = *r;
+                legacy::ContentBlock::ResourceLink(legacy::ResourceLink {
+                    annotations: r.annotations.map(Into::into),
+                    description: r.description,
+                    icons: r.icons.into_iter().map(Into::into).collect(),
+                    meta: r.meta,
+                    mime_type: r.mime_type,
+                    name: r.name,
+                    size: r.size.and_then(|s| i64::try_from(s).ok()),
+                    title: r.title,
+                    type_: "resource_link".to_string(),
+                    uri: r.uri,
+                })
+            }
         }
     }
 }
@@ -1759,15 +1901,25 @@ impl From<CallToolResult> for legacy::CallToolResult {
 impl From<Resource> for legacy::Resource {
     fn from(r: Resource) -> Self {
         legacy::Resource {
-            annotations: None,
+            annotations: r.annotations.map(Into::into),
             description: r.description,
-            icons: Vec::new(),
-            meta: Map::new(),
+            icons: r.icons.into_iter().map(Into::into).collect(),
+            meta: r.meta,
             mime_type: r.mime_type,
             name: r.name,
             size: r.size.map(|s| i64::try_from(s).unwrap_or(i64::MAX)),
             title: r.title,
             uri: r.uri,
+        }
+    }
+}
+
+impl From<Annotations> for legacy::Annotations {
+    fn from(a: Annotations) -> Self {
+        legacy::Annotations {
+            audience: a.audience.into_iter().map(Into::into).collect(),
+            last_modified: a.last_modified,
+            priority: a.priority,
         }
     }
 }
@@ -1856,10 +2008,10 @@ impl From<ReadResourceResult> for legacy::ReadResourceResult {
 impl From<ResourceTemplate> for legacy::ResourceTemplate {
     fn from(t: ResourceTemplate) -> Self {
         legacy::ResourceTemplate {
-            annotations: None,
+            annotations: t.annotations.map(Into::into),
             description: t.description,
-            icons: Vec::new(),
-            meta: Map::new(),
+            icons: t.icons.into_iter().map(Into::into).collect(),
+            meta: t.meta,
             mime_type: t.mime_type,
             name: t.name,
             title: t.title,
@@ -1905,8 +2057,8 @@ impl From<Prompt> for legacy::Prompt {
         legacy::Prompt {
             arguments: p.arguments.into_iter().map(Into::into).collect(),
             description: p.description,
-            icons: Vec::new(),
-            meta: Map::new(),
+            icons: p.icons.into_iter().map(Into::into).collect(),
+            meta: p.meta,
             name: p.name,
             title: p.title,
         }
@@ -1982,7 +2134,7 @@ impl From<draft::ContentBlock> for Content {
                 mime_type: a.mime_type,
             },
             draft::ContentBlock::EmbeddedResource(e) => Content::Resource(e.resource.into()),
-            draft::ContentBlock::ResourceLink(l) => Content::ResourceLink(l.into()),
+            draft::ContentBlock::ResourceLink(l) => Content::ResourceLink(Box::new(l.into())),
         }
     }
 }
@@ -2067,6 +2219,19 @@ impl From<draft::Resource> for Resource {
             description: r.description,
             mime_type: r.mime_type,
             size: r.size.map(|s| u64::try_from(s).unwrap_or(0)),
+            annotations: r.annotations.map(Into::into),
+            icons: r.icons.into_iter().map(Into::into).collect(),
+            meta: r.meta.map(|m| m.0).unwrap_or_default(),
+        }
+    }
+}
+
+impl From<draft::Annotations> for Annotations {
+    fn from(a: draft::Annotations) -> Self {
+        Annotations {
+            audience: a.audience.into_iter().map(Into::into).collect(),
+            priority: a.priority,
+            last_modified: a.last_modified,
         }
     }
 }
@@ -2080,6 +2245,9 @@ impl From<draft::ResourceLink> for Resource {
             description: l.description,
             mime_type: l.mime_type,
             size: l.size.map(|s| u64::try_from(s).unwrap_or(0)),
+            annotations: l.annotations.map(Into::into),
+            icons: l.icons.into_iter().map(Into::into).collect(),
+            meta: l.meta.map(|m| m.0).unwrap_or_default(),
         }
     }
 }
@@ -2161,6 +2329,9 @@ impl From<draft::ResourceTemplate> for ResourceTemplate {
             title: t.title,
             description: t.description,
             mime_type: t.mime_type,
+            annotations: t.annotations.map(Into::into),
+            icons: t.icons.into_iter().map(Into::into).collect(),
+            meta: t.meta.map(|m| m.0).unwrap_or_default(),
         }
     }
 }
@@ -2208,6 +2379,8 @@ impl From<draft::Prompt> for Prompt {
             title: p.title,
             description: p.description,
             arguments: p.arguments.into_iter().map(Into::into).collect(),
+            icons: p.icons.into_iter().map(Into::into).collect(),
+            meta: p.meta.map(|m| m.0).unwrap_or_default(),
         }
     }
 }
@@ -2274,7 +2447,7 @@ impl From<legacy::ContentBlock> for Content {
                 mime_type: a.mime_type,
             },
             legacy::ContentBlock::EmbeddedResource(e) => Content::Resource(e.resource.into()),
-            legacy::ContentBlock::ResourceLink(l) => Content::ResourceLink(l.into()),
+            legacy::ContentBlock::ResourceLink(l) => Content::ResourceLink(Box::new(l.into())),
         }
     }
 }
@@ -2356,6 +2529,19 @@ impl From<legacy::Resource> for Resource {
             description: r.description,
             mime_type: r.mime_type,
             size: r.size.map(|s| u64::try_from(s).unwrap_or(0)),
+            annotations: r.annotations.map(Into::into),
+            icons: r.icons.into_iter().map(Into::into).collect(),
+            meta: r.meta,
+        }
+    }
+}
+
+impl From<legacy::Annotations> for Annotations {
+    fn from(a: legacy::Annotations) -> Self {
+        Annotations {
+            audience: a.audience.into_iter().map(Into::into).collect(),
+            priority: a.priority,
+            last_modified: a.last_modified,
         }
     }
 }
@@ -2369,6 +2555,9 @@ impl From<legacy::ResourceLink> for Resource {
             description: l.description,
             mime_type: l.mime_type,
             size: l.size.map(|s| u64::try_from(s).unwrap_or(0)),
+            annotations: l.annotations.map(Into::into),
+            icons: l.icons.into_iter().map(Into::into).collect(),
+            meta: l.meta,
         }
     }
 }
@@ -2438,6 +2627,9 @@ impl From<legacy::ResourceTemplate> for ResourceTemplate {
             title: t.title,
             description: t.description,
             mime_type: t.mime_type,
+            annotations: t.annotations.map(Into::into),
+            icons: t.icons.into_iter().map(Into::into).collect(),
+            meta: t.meta,
         }
     }
 }
@@ -2479,6 +2671,8 @@ impl From<legacy::Prompt> for Prompt {
             title: p.title,
             description: p.description,
             arguments: p.arguments.into_iter().map(Into::into).collect(),
+            icons: p.icons.into_iter().map(Into::into).collect(),
+            meta: p.meta,
         }
     }
 }
@@ -2823,6 +3017,91 @@ mod tests {
         assert!(v.get("annotations").is_none(), "no annotations key: {v}");
         assert!(v.get("icons").is_none(), "no icons key: {v}");
         assert!(v.get("_meta").is_none(), "no _meta key: {v}");
+    }
+
+    /// A resource carrying every metadata surface: spec `Annotations`
+    /// (audience/priority/lastModified), an icon, and namespaced `_meta`.
+    fn metadata_resource() -> Resource {
+        Resource::new("mem://doc", "doc")
+            .with_annotations(
+                Annotations::new()
+                    .for_audience(Role::User)
+                    .priority(0.75)
+                    .last_modified("2026-07-20T00:00:00Z"),
+            )
+            .with_icon(Icon::new("https://example.com/doc.png"))
+            .with_meta_entry("com.example/tags", json!(["docs"]))
+    }
+
+    fn assert_resource_metadata(back: &Resource) {
+        let a = back.annotations.as_ref().expect("annotations survive");
+        assert_eq!(a.audience, alloc::vec![Role::User]);
+        assert_eq!(a.priority, Some(0.75));
+        assert_eq!(a.last_modified.as_deref(), Some("2026-07-20T00:00:00Z"));
+        assert_eq!(back.icons[0].src, "https://example.com/doc.png");
+        assert_eq!(back.meta["com.example/tags"], json!(["docs"]));
+    }
+
+    #[test]
+    fn resource_metadata_round_trips_both_wires() {
+        let draft_wire: draft::Resource = metadata_resource().into();
+        let v = serde_json::to_value(&draft_wire).unwrap();
+        assert_eq!(v["annotations"]["audience"], json!(["user"]));
+        assert_eq!(v["annotations"]["priority"], json!(0.75));
+        assert_eq!(v["annotations"]["lastModified"], "2026-07-20T00:00:00Z");
+        assert_eq!(v["_meta"]["com.example/tags"], json!(["docs"]));
+        let back: Resource = draft_wire.into();
+        assert_resource_metadata(&back);
+
+        let legacy_wire: legacy::Resource = metadata_resource().into();
+        let back: Resource = legacy_wire.into();
+        assert_resource_metadata(&back);
+    }
+
+    #[test]
+    fn resource_template_and_prompt_metadata_round_trip_both_wires() {
+        let template = ResourceTemplate::new("file://{path}", "files")
+            .with_annotations(Annotations::new().for_audience(Role::Assistant))
+            .with_meta_entry("com.example/kind", json!("fs"));
+        let draft_wire: draft::ResourceTemplate = template.clone().into();
+        let back: ResourceTemplate = draft_wire.into();
+        assert_eq!(
+            back.annotations.as_ref().unwrap().audience,
+            alloc::vec![Role::Assistant]
+        );
+        assert_eq!(back.meta["com.example/kind"], json!("fs"));
+        let legacy_wire: legacy::ResourceTemplate = template.into();
+        let back: ResourceTemplate = legacy_wire.into();
+        assert_eq!(back.meta["com.example/kind"], json!("fs"));
+
+        let prompt = Prompt::new("summarize")
+            .with_icon(Icon::new("https://example.com/p.png"))
+            .with_meta_entry("com.example/category", json!("text"));
+        let draft_wire: draft::Prompt = prompt.clone().into();
+        let back: Prompt = draft_wire.into();
+        assert_eq!(back.icons[0].src, "https://example.com/p.png");
+        assert_eq!(back.meta["com.example/category"], json!("text"));
+        let legacy_wire: legacy::Prompt = prompt.into();
+        let back: Prompt = legacy_wire.into();
+        assert_eq!(back.icons[0].src, "https://example.com/p.png");
+    }
+
+    #[test]
+    fn resource_link_content_carries_metadata_both_wires() {
+        let content = Content::ResourceLink(Box::new(metadata_resource()));
+        let wire: draft::ContentBlock = content.clone().into();
+        let back: Content = wire.into();
+        let Content::ResourceLink(r) = back else {
+            panic!("resource link survives");
+        };
+        assert_resource_metadata(&r);
+
+        let wire: legacy::ContentBlock = content.into();
+        let back: Content = wire.into();
+        let Content::ResourceLink(r) = back else {
+            panic!("resource link survives");
+        };
+        assert_resource_metadata(&r);
     }
 
     #[test]
