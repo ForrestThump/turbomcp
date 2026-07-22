@@ -364,6 +364,91 @@ async fn legacy_get_stream_delivers_subscribed_resource_updates() {
     assert!(event["params"].get("_meta").is_none());
 }
 
+/// Two concurrent legacy sessions are isolated: each GET stream sees only its
+/// own session's subscribed updates, with no cross-talk.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_legacy_sessions_get_only_their_own_events() {
+    let dispatcher = VersionDispatcher::new(Resourceful, MethodRouter::new().with_resources());
+    let notifier = dispatcher.notifier();
+    let app = router(dispatcher, HttpConfig::new());
+
+    let initialize = |name: &str| {
+        json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": { "name": name, "version": "1" },
+            }
+        })
+    };
+    let mut sids = Vec::new();
+    for name in ["client-a", "client-b"] {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(initialize(name).to_string()))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        sids.push(
+            resp.headers()["mcp-session-id"]
+                .to_str()
+                .unwrap()
+                .to_owned(),
+        );
+    }
+    assert_ne!(sids[0], sids[1], "each initialize mints its own session");
+
+    // A subscribes to file://a, B to file://b.
+    for (sid, uri) in [(&sids[0], "file://a"), (&sids[1], "file://b")] {
+        let sub = json!({
+            "jsonrpc": "2.0", "id": 2, "method": "resources/subscribe",
+            "params": { "uri": uri }
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("mcp-session-id", sid)
+            .body(Body::from(sub.to_string()))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // Open both GET streams.
+    let mut streams = Vec::new();
+    for sid in &sids {
+        let req = Request::builder()
+            .method("GET")
+            .uri("/mcp")
+            .header(header::ACCEPT, "text/event-stream")
+            .header("mcp-session-id", sid)
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        streams.push((resp.into_body(), String::new()));
+    }
+
+    // Publish both updates; each stream's FIRST event must be its own uri —
+    // if file://a had leaked onto B's stream it would arrive there first.
+    notifier.resource_updated("file://a").await;
+    notifier.resource_updated("file://b").await;
+
+    let (body_a, buf_a) = &mut streams[0];
+    let event_a = event_json(&next_sse_chunk(body_a, buf_a).await);
+    assert_eq!(event_a["method"], "notifications/resources/updated");
+    assert_eq!(event_a["params"]["uri"], "file://a");
+
+    let (body_b, buf_b) = &mut streams[1];
+    let event_b = event_json(&next_sse_chunk(body_b, buf_b).await);
+    assert_eq!(event_b["method"], "notifications/resources/updated");
+    assert_eq!(event_b["params"]["uri"], "file://b");
+}
+
 #[tokio::test]
 async fn get_without_session_header_stays_405() {
     let (app, _notifier) = app(HttpConfig::new());

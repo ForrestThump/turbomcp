@@ -40,10 +40,22 @@ impl Demo {
         Ok(format!("{region}: {sql}"))
     }
 
+    // The positional description form (no doc comment to fall back to).
+    #[tool("Multiply two numbers")]
+    async fn mul(&self, a: f64, b: f64) -> McpResult<String> {
+        Ok(format!("{}", a * b))
+    }
+
     /// The application configuration.
     #[resource("config://app")]
     async fn app_config(&self) -> McpResult<String> {
         Ok(r#"{"debug":false}"#.to_string())
+    }
+
+    // The positional description form for prompts.
+    #[prompt("Translate text to French")]
+    async fn translate(&self, text: String) -> McpResult<String> {
+        Ok(format!("Translate to French:\n\n{text}"))
     }
 
     /// Summarize some text.
@@ -186,6 +198,37 @@ async fn mcp_header_param_is_marked_in_schema() {
         query["inputSchema"]["properties"]["sql"]["description"],
         "The SQL to run"
     );
+}
+
+#[tokio::test]
+async fn positional_description_form_reaches_the_wire() {
+    let tools = call(JsonRpcRequest::new(
+        8,
+        "tools/list",
+        Some(serde_json::json!({ "_meta": draft_meta() })),
+    ))
+    .await;
+    let mul = tools["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "mul")
+        .expect("mul is listed");
+    assert_eq!(mul["description"], "Multiply two numbers");
+
+    let prompts = call(JsonRpcRequest::new(
+        9,
+        "prompts/list",
+        Some(serde_json::json!({ "_meta": draft_meta() })),
+    ))
+    .await;
+    let translate = prompts["prompts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "translate")
+        .expect("translate is listed");
+    assert_eq!(translate["description"], "Translate text to French");
 }
 
 #[tokio::test]

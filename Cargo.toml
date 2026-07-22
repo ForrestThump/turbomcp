@@ -169,6 +169,7 @@ serde_with = "3.19"
 
 # Development and testing
 criterion = { version = "0.8.2", features = ["html_reports"] }
+trybuild = "1.0"
 proptest = "1.11"
 tokio-test = "0.4"
 wiremock = "0.6.5"

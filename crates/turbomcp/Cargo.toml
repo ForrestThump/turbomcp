@@ -70,6 +70,7 @@ tokio = { workspace = true, features = [
     "time",
 ] }
 insta = { workspace = true }
+trybuild = { workspace = true }
 criterion = { workspace = true, features = ["async_tokio"] }
 tower = { workspace = true, features = ["util"] }
 axum = { workspace = true }

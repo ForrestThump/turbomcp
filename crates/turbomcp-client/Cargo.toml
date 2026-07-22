@@ -36,6 +36,7 @@ futures = { workspace = true, optional = true }
 [dev-dependencies]
 turbomcp-server = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util"] }
+async-trait = { workspace = true }
 
 [package.metadata.docs.rs]
 all-features = true

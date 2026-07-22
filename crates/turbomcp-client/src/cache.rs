@@ -140,13 +140,44 @@ mod tests {
     }
 
     #[test]
-    fn fresh_entries_hit_and_expire() {
+    fn fresh_entries_hit_and_cursors_are_distinct_entries() {
         let cache = ResponseCache::default();
         let result = json!({ "tools": [], "ttlMs": 60_000 });
         cache.store("tools/list", None, &result);
         assert_eq!(cache.get("tools/list", None), Some(result));
         // A different discriminator (cursor) is a different entry.
         assert!(cache.get("tools/list", Some("page2")).is_none());
+    }
+
+    #[test]
+    fn entries_expire_after_their_ttl() {
+        let cache = ResponseCache::default();
+        cache.store("tools/list", None, &json!({ "tools": [], "ttlMs": 15 }));
+        assert!(cache.get("tools/list", None).is_some(), "fresh: a hit");
+        std::thread::sleep(Duration::from_millis(40));
+        assert!(
+            cache.get("tools/list", None).is_none(),
+            "past ttlMs: a miss"
+        );
+    }
+
+    #[test]
+    fn at_capacity_the_soonest_to_expire_entry_is_evicted() {
+        let cache = ResponseCache::default();
+        // Entry 0 expires first; fill the rest of the capacity with later ones.
+        cache.store("tools/list", Some("cursor-0"), &json!({ "ttlMs": 10_000 }));
+        for i in 1..MAX_ENTRIES {
+            cache.store(
+                "tools/list",
+                Some(&format!("cursor-{i}")),
+                &json!({ "ttlMs": 100_000 }),
+            );
+        }
+        // Admitting one more evicts the soonest-to-expire (entry 0), not the new one.
+        cache.store("tools/list", Some("overflow"), &json!({ "ttlMs": 100_000 }));
+        assert!(cache.get("tools/list", Some("cursor-0")).is_none());
+        assert!(cache.get("tools/list", Some("cursor-1")).is_some());
+        assert!(cache.get("tools/list", Some("overflow")).is_some());
     }
 
     #[test]
@@ -172,6 +203,12 @@ mod tests {
                 .is_none()
         );
         assert!(cache.get(request::PROMPTS_LIST, None).is_some());
+
+        // The prompts branch fires too (each capability invalidates only its own).
+        cache.store(request::TOOLS_LIST, None, &result);
+        cache.on_notification(notification::PROMPTS_LIST_CHANGED, None);
+        assert!(cache.get(request::PROMPTS_LIST, None).is_none());
+        assert!(cache.get(request::TOOLS_LIST, None).is_some());
     }
 
     #[test]

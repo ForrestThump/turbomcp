@@ -216,6 +216,7 @@ impl From<JsonRpcResponse> for JsonRpcMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::string::ToString;
     use serde_json::json;
 
     #[test]
@@ -245,6 +246,38 @@ mod tests {
         assert_eq!(n, RequestId::Number(7));
         let s: RequestId = serde_json::from_str("\"abc\"").unwrap();
         assert_eq!(s, RequestId::String("abc".into()));
+    }
+
+    #[test]
+    fn request_id_rejects_null_and_fractional() {
+        // MCP forbids null and fractional ids (see the RequestId doc).
+        assert!(serde_json::from_str::<RequestId>("null").is_err());
+        assert!(serde_json::from_str::<RequestId>("1.5").is_err());
+    }
+
+    #[test]
+    fn null_id_request_degrades_to_notification() {
+        // A frame with `id: null` cannot be a Request (null ids are illegal);
+        // the untagged decode falls through to Notification (the unknown `id`
+        // field is ignored), so the frame is never answered rather than being
+        // misread as an answerable request.
+        let raw = json!({"jsonrpc":"2.0","id":null,"method":"ping"}).to_string();
+        let msg: JsonRpcMessage = serde_json::from_str(&raw).unwrap();
+        assert!(matches!(msg, JsonRpcMessage::Notification(_)));
+    }
+
+    #[test]
+    fn version_field_validation() {
+        let m: JsonRpcMessage = JsonRpcRequest::new(1, "ping", None).into();
+        assert!(m.has_valid_version());
+        // A wrong version string parses (tolerant reader) but is detectable.
+        let raw = json!({"jsonrpc":"1.0","id":1,"method":"ping"}).to_string();
+        let bad: JsonRpcMessage = serde_json::from_str(&raw).unwrap();
+        assert!(!bad.has_valid_version());
+        // A missing `jsonrpc` field defaults to "2.0".
+        let raw = json!({"id":1,"method":"ping"}).to_string();
+        let missing: JsonRpcMessage = serde_json::from_str(&raw).unwrap();
+        assert!(missing.has_valid_version());
     }
 
     #[test]

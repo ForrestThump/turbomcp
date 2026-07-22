@@ -155,16 +155,19 @@ build-all-features:
 [group: 'test']
 test:
   echo "Running comprehensive test suite..."
-  echo "Step 1/5: Running unit, integration, and doc tests (all features)..."
+  echo "Step 1/6: Running unit, integration, and doc tests (all features)..."
   cargo test --workspace --all-features
-  echo "Step 2/5: Running clippy on all crates, targets, and examples..."
+  echo "Step 2/6: Running clippy on all crates, targets, and examples..."
   cargo clippy {{workspace_flags}} --all-targets --all-features -- -D warnings
-  echo "Step 3/5: Verifying the no-default-features facade still lints..."
+  echo "Step 3/6: Verifying the no-default-features facade still lints..."
   cargo clippy -p turbomcp -- -D warnings
-  echo "Step 4/5: Checking formatting on all code..."
+  echo "Step 4/6: Testing non-default foundation configs (no_std core/protocol, no-simd codec)..."
+  cargo test -p turbomcp-core -p turbomcp-protocol -p turbomcp-codec --no-default-features
+  echo "Step 5/6: Checking formatting on all code..."
   cargo fmt --all -- --check
-  echo "Step 5/5: Verifying wasm portability (no_std core + protocol)..."
+  echo "Step 6/6: Verifying wasm portability (no_std foundation, default + no-default)..."
   cargo build -p turbomcp-core -p turbomcp-protocol --target wasm32-unknown-unknown
+  cargo build -p turbomcp-core -p turbomcp-protocol -p turbomcp-codec --no-default-features --target wasm32-unknown-unknown
   echo "All tests, linting, and formatting checks passed!"
 
 # Run tests only (no linting/formatting)

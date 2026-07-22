@@ -46,6 +46,29 @@ expression: tools
     "name": "hello"
   },
   {
+    "description": "Multiply two numbers",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "required": [
+        "a",
+        "b"
+      ],
+      "properties": {
+        "a": {
+          "type": "number",
+          "format": "double"
+        },
+        "b": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false
+    },
+    "name": "mul"
+  },
+  {
     "description": "Run a query, mirroring `region` into a request header.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",

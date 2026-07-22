@@ -43,8 +43,9 @@ otlp = [
 [dev-dependencies]
 futures = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }
-# The in-memory exporter, to assert what the MetricsLayer actually records.
+# The in-memory exporters, to assert what the layers actually record.
 opentelemetry_sdk = { workspace = true, features = ["metrics", "testing"] }
+tracing-subscriber = { workspace = true }
 
 [package.metadata.docs.rs]
 all-features = true

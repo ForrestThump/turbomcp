@@ -229,6 +229,54 @@ mod tests {
     }
 
     #[test]
+    fn auth_group_maps_to_minus_32001() {
+        for e in [
+            McpError::authentication("x"),
+            McpError::permission_denied("x"),
+            McpError::timeout("x"),
+            McpError::transport("x"),
+        ] {
+            assert_eq!(e.jsonrpc_code(), -32001, "{e}");
+        }
+    }
+
+    #[test]
+    fn http_status_covers_every_variant() {
+        // The full PLAN.md §4.10 table — a regression in any arm must fail here.
+        assert_eq!(McpError::internal("x").http_status(), 500);
+        assert_eq!(McpError::InputRequired.http_status(), 500);
+        assert_eq!(McpError::invalid_params("x").http_status(), 400);
+        assert_eq!(
+            McpError::UnsupportedProtocolVersion("x".into()).http_status(),
+            400
+        );
+        assert_eq!(
+            McpError::MissingRequiredCapability("x".into()).http_status(),
+            400
+        );
+        assert_eq!(McpError::HeaderMismatch("x".into()).http_status(), 400);
+        assert_eq!(McpError::method_not_found("x").http_status(), 404);
+        assert_eq!(McpError::tool_not_found("x").http_status(), 404);
+        assert_eq!(McpError::resource_not_found("x").http_status(), 404);
+        assert_eq!(McpError::authentication("x").http_status(), 401);
+        assert_eq!(McpError::permission_denied("x").http_status(), 403);
+        assert_eq!(McpError::timeout("x").http_status(), 504);
+        assert_eq!(McpError::transport("x").http_status(), 503);
+        assert_eq!(
+            McpError::tool_execution_failed("t", "boom").http_status(),
+            200
+        );
+    }
+
+    #[test]
+    fn serde_json_errors_become_invalid_params() {
+        let e = serde_json::from_str::<u32>("not json").unwrap_err();
+        let mcp: McpError = e.into();
+        assert!(matches!(mcp, McpError::InvalidParams(_)));
+        assert_eq!(mcp.jsonrpc_code(), -32602);
+    }
+
+    #[test]
     fn retryable_classification() {
         assert!(McpError::timeout("x").is_retryable());
         assert!(McpError::transport("x").is_retryable());

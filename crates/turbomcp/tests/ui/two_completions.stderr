@@ -1,0 +1,5 @@
+error: a #[server] may declare at most one #[completion] handler
+  --> tests/ui/two_completions.rs:15:5
+   |
+15 |     async fn two(&self, _p: neutral::CompleteParams) -> McpResult<neutral::CompleteResult> {
+   |     ^^^^^

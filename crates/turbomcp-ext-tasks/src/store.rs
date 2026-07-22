@@ -311,6 +311,55 @@ mod tests {
     }
 
     #[test]
+    fn expired_tasks_are_purged_and_their_work_cancelled() {
+        let store = DraftTaskStore::default();
+        let cancel = CancellationToken::new();
+        let short = store.create(Some(20), None, cancel.clone()).unwrap();
+        // ttl 0 means "unlimited here" — never auto-purged (spec: null/0).
+        let unlimited = store
+            .create(Some(0), None, CancellationToken::new())
+            .unwrap();
+        assert!(store.get(&short.task_id).is_some(), "fresh: visible");
+
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            store.get(&short.task_id).is_none(),
+            "past createdAt + ttlMs the task is gone (SEP-2663) → tasks/get -32602"
+        );
+        assert!(
+            cancel.is_cancelled(),
+            "purging a live task fires its cancel token so in-flight work stops"
+        );
+        assert!(
+            store.get(&unlimited.task_id).is_some(),
+            "ttl 0/null tasks are never auto-purged"
+        );
+    }
+
+    #[test]
+    fn at_capacity_create_declines_until_an_expiry_frees_a_slot() {
+        let store = DraftTaskStore {
+            inner: Mutex::new(HashMap::new()),
+            capacity: 1,
+        };
+        let first = store.create(Some(20), None, CancellationToken::new());
+        assert!(first.is_some());
+        // Full: the caller must fall back to running the call synchronously.
+        assert!(
+            store
+                .create(Some(20), None, CancellationToken::new())
+                .is_none()
+        );
+        // An expired entry frees the slot on the next create's purge.
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            store
+                .create(Some(20), None, CancellationToken::new())
+                .is_some()
+        );
+    }
+
+    #[test]
     fn failed_outcome_inlines_error_and_status_message() {
         let store = DraftTaskStore::default();
         let task = store.create(None, None, CancellationToken::new()).unwrap();

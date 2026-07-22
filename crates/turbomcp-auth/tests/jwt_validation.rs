@@ -173,6 +173,124 @@ async fn malformed_header_is_401_invalid_token() {
     assert!(www_authenticate.contains("error=\"invalid_token\""));
 }
 
+/// The classic JWT algorithm-confusion bypass: the validator's alg allowlist
+/// (default `[RS256]`) must reject an HS256 token even though it is "validly"
+/// signed with a key the source can resolve — the allowlist fires first.
+#[tokio::test]
+async fn algorithm_outside_the_allowlist_is_rejected() {
+    let jwks = StaticJwks::from_json(&jwks_json()).expect("valid jwks");
+    // Default allowlist: RS256 only. The presented token is HS256.
+    let validator = JwtValidator::new(jwks, RESOURCE, ISSUER);
+    let metadata = ResourceMetadata::new(RESOURCE, [ISSUER]);
+    let rs = ResourceServer::new(validator, metadata, METADATA_URL);
+    let AuthDecision::Challenge {
+        status,
+        www_authenticate,
+    } = rs.authenticate(Some(&bearer(&sign(good_claims())))).await
+    else {
+        panic!("HS256 must not pass an RS256-only validator");
+    };
+    assert_eq!(status, 401);
+    assert!(www_authenticate.contains("error=\"invalid_token\""));
+}
+
+/// An unsigned token (`alg: "none"`) is rejected at the header parse.
+#[tokio::test]
+async fn alg_none_token_is_rejected() {
+    let rs = resource_server();
+    let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"none","typ":"JWT"}"#);
+    let payload = URL_SAFE_NO_PAD.encode(good_claims().to_string().as_bytes());
+    let unsigned = format!("{header}.{payload}.");
+    assert!(matches!(
+        rs.authenticate(Some(&bearer(&unsigned))).await,
+        AuthDecision::Challenge { status: 401, .. }
+    ));
+}
+
+/// A token missing any of the required spec claims (`exp`, `aud`, `iss`) is
+/// rejected even with a valid signature — absence must not mean "unchecked".
+#[tokio::test]
+async fn missing_required_claims_are_rejected() {
+    let rs = resource_server();
+    for claim in ["exp", "aud", "iss"] {
+        let mut claims = good_claims();
+        claims.as_object_mut().unwrap().remove(claim);
+        assert!(
+            matches!(
+                rs.authenticate(Some(&bearer(&sign(claims)))).await,
+                AuthDecision::Challenge { status: 401, .. }
+            ),
+            "a token without `{claim}` must be rejected"
+        );
+    }
+}
+
+/// `sub` is required to form a principal.
+#[tokio::test]
+async fn missing_sub_is_rejected() {
+    let rs = resource_server();
+    let mut claims = good_claims();
+    claims.as_object_mut().unwrap().remove("sub");
+    assert!(matches!(
+        rs.authenticate(Some(&bearer(&sign(claims)))).await,
+        AuthDecision::Challenge { status: 401, .. }
+    ));
+}
+
+/// `kid` resolution: an unknown `kid` is a 401, and a `kid`-less token against
+/// a multi-key set is ambiguous and rejected rather than guessed.
+#[tokio::test]
+async fn kid_resolution_failures_are_rejected() {
+    // Unknown kid against the single-key set.
+    let rs = resource_server();
+    let mut header = Header::new(Algorithm::HS256);
+    header.kid = Some("no-such-kid".to_owned());
+    let token = encode(&header, &good_claims(), &EncodingKey::from_secret(SECRET)).unwrap();
+    assert!(matches!(
+        rs.authenticate(Some(&bearer(&token))).await,
+        AuthDecision::Challenge { status: 401, .. }
+    ));
+
+    // kid-less token against a two-key set: ambiguous → rejected.
+    let k = URL_SAFE_NO_PAD.encode(SECRET);
+    let two = json!({ "keys": [
+        { "kty": "oct", "k": k, "alg": "HS256", "kid": "a" },
+        { "kty": "oct", "k": k, "alg": "HS256", "kid": "b" },
+    ]})
+    .to_string();
+    let jwks = StaticJwks::from_json(&two).expect("valid jwks");
+    let validator = JwtValidator::new(jwks, RESOURCE, ISSUER).algorithms(vec![Algorithm::HS256]);
+    let metadata = ResourceMetadata::new(RESOURCE, [ISSUER]);
+    let rs = ResourceServer::new(validator, metadata, METADATA_URL);
+    let kidless = encode(
+        &Header::new(Algorithm::HS256),
+        &good_claims(),
+        &EncodingKey::from_secret(SECRET),
+    )
+    .unwrap();
+    assert!(matches!(
+        rs.authenticate(Some(&bearer(&kidless))).await,
+        AuthDecision::Challenge { status: 401, .. }
+    ));
+}
+
+/// Scopes also come from the `scp` array claim (the second OAuth shape).
+#[tokio::test]
+async fn scp_array_scopes_are_extracted() {
+    let rs = resource_server();
+    let mut claims = good_claims();
+    claims.as_object_mut().unwrap().remove("scope");
+    claims["scp"] = json!(["mcp:use", "files:read"]);
+    match rs.authenticate(Some(&bearer(&sign(claims)))).await {
+        AuthDecision::Allow(principal) => {
+            assert_eq!(principal["sub"], "user-42");
+        }
+        AuthDecision::Challenge { status, .. } => {
+            panic!("scp-array scopes must satisfy required_scopes, got {status}")
+        }
+    }
+}
+
 #[test]
 fn resource_metadata_document_shape() {
     let rs = resource_server();

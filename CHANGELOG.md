@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Test-suite hardening across every crate** (per-crate audit): ~70 new tests
+  pinning previously unexercised spec invariants and defensive branches —
+  modern-path version rejection (`-32022` + the supported list), capability
+  enforcement (unadvertised capability → `-32601`), pagination-cursor
+  plumbing, the malformed-params matrix, the client's `Auto`→legacy fallback,
+  the `-32020` refresh-and-retry recovery, MRTR round-cap / no-handler edges,
+  packaged sampling/roots dispatch, task terminal-state mapping, response-
+  cache TTL/eviction/per-URI invalidation end-to-end, JWT algorithm-allowlist
+  and required-claim rejection, HTTP auth on GET/DELETE + 403
+  `insufficient_scope` on the wire + draft 404-on-unknown-method +
+  session-stream isolation, WebSocket close-1008/binary/malformed-frame
+  behavior, telemetry PII-redaction asserted against captured spans + W3C
+  trace continuation, ext-tasks TTL purge & capacity fallback, and a
+  `trybuild` compile-fail suite locking the macros' error contract. The
+  `just test` gate and CI now also build+test the true `no_std`
+  (`--no-default-features`) configurations of core/protocol/codec (the
+  no-simd codec and the atomic-flag `CancellationToken` were previously never
+  compiled).
 - **SEP-2549 response caching, both halves.** Servers configure the cache
   policy advertised on draft (`2026-07-28`) cacheable results — the four
   `*/list`s, `resources/read`, and `server/discover` — via

@@ -1,0 +1,5 @@
+error: a #[completion] handler takes exactly one `neutral::CompleteParams` argument (plus an optional `&CompleteContext`)
+  --> tests/ui/completion_wrong_arity.rs:10:5
+   |
+10 |     async fn complete(&self) -> McpResult<neutral::CompleteResult> {
+   |     ^^^^^

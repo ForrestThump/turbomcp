@@ -274,6 +274,35 @@ mod tests {
     }
 
     #[test]
+    fn extensions_get_mut_and_insert_replace() {
+        #[derive(Debug, PartialEq)]
+        struct Counter(u32);
+        let mut ext = Extensions::new();
+        ext.insert(Counter(1));
+        if let Some(c) = ext.get_mut::<Counter>() {
+            c.0 += 1;
+        }
+        assert_eq!(ext.get::<Counter>(), Some(&Counter(2)));
+        // insert returns the replaced value of the same type.
+        assert_eq!(ext.insert(Counter(9)), Some(Counter(2)));
+        assert_eq!(ext.len(), 1);
+    }
+
+    #[test]
+    fn context_builders_set_fields() {
+        let tc = TraceContext {
+            traceparent: "00-abc-def-01".into(),
+            tracestate: None,
+            baggage: None,
+        };
+        let ctx = RequestContext::new(ProtocolVersion::V2025_11_25)
+            .with_trace_context(tc.clone())
+            .with_client_info(Implementation::new("c", "1.0"));
+        assert_eq!(ctx.trace_context, Some(tc));
+        assert_eq!(ctx.client_info.as_ref().unwrap().name, "c");
+    }
+
+    #[test]
     fn implementation_preserves_unknown_fields() {
         let json = json!({"name":"s","version":"1.0","websiteUrl":"https://x"});
         let imp: Implementation = serde_json::from_value(json).unwrap();

@@ -44,6 +44,50 @@ impl Transport for MockTransport {
     }
 }
 
+/// What [`FaultyTransport::recv`] does once its scripted frames run out.
+enum RecvTail {
+    /// Fail with an I/O error (connection reset).
+    Error,
+    /// Hang forever (the peer goes silent).
+    Pending,
+}
+
+/// A [`Transport`] that serves scripted frames, then errors or hangs on `recv`;
+/// `send` can be made to fail unconditionally.
+struct FaultyTransport {
+    frames: std::collections::VecDeque<JsonRpcMessage>,
+    tail: RecvTail,
+    fail_sends: bool,
+    outbound: mpsc::UnboundedSender<JsonRpcMessage>,
+}
+
+impl Transport for FaultyTransport {
+    type Error = std::io::Error;
+
+    async fn send(&mut self, msg: JsonRpcMessage) -> Result<(), Self::Error> {
+        if self.fail_sends {
+            return Err(std::io::Error::other("send failed"));
+        }
+        self.outbound
+            .send(msg)
+            .map_err(|_| std::io::Error::other("outbound closed"))
+    }
+
+    async fn recv(&mut self) -> Result<Option<JsonRpcMessage>, Self::Error> {
+        if let Some(f) = self.frames.pop_front() {
+            return Ok(Some(f));
+        }
+        match self.tail {
+            RecvTail::Error => Err(std::io::Error::other("connection reset by peer")),
+            RecvTail::Pending => std::future::pending().await,
+        }
+    }
+
+    async fn close(self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
 // ---- mock service ------------------------------------------------------------
 
 /// Replies to every request after acquiring one permit from `gate` (so the test
@@ -276,6 +320,66 @@ async fn shutdown_aborts_stragglers_past_deadline() {
         out_rx.try_recv().is_err(),
         "the stuck handler produced no reply"
     );
+}
+
+/// A hard `recv` failure (vs clean EOF) is fatal and surfaces as
+/// [`ProtocolError::Transport`], not a clean `Ok`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn transport_recv_error_surfaces_as_protocol_transport_error() {
+    let service = GatedService {
+        gate: Arc::new(Semaphore::new(0)),
+        started: Arc::new(AtomicUsize::new(0)),
+        fast_method: Some("fast"),
+    };
+    let (out_tx, _out_rx) = mpsc::unbounded_channel();
+    let transport = FaultyTransport {
+        frames: std::collections::VecDeque::new(),
+        tail: RecvTail::Error,
+        fail_sends: false,
+        outbound: out_tx,
+    };
+    let err = tokio::time::timeout(
+        Duration::from_secs(5),
+        serve_with(transport, service, ServeConfig::default()),
+    )
+    .await
+    .expect("driver returns promptly on recv failure")
+    .expect_err("recv failure is fatal");
+    assert!(matches!(err, ProtocolError::Transport(_)), "{err}");
+}
+
+/// A `send` failure while flushing a reply is fatal too — and the driver must
+/// still return promptly (aborting a stuck in-flight handler at the drain
+/// deadline) rather than hanging on it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn transport_send_error_surfaces_and_stuck_handlers_are_abandoned() {
+    let gate = Arc::new(Semaphore::new(0)); // never granted: "stuck" hangs
+    let started = Arc::new(AtomicUsize::new(0));
+    let service = GatedService {
+        gate,
+        started: Arc::clone(&started),
+        fast_method: Some("fast"),
+    };
+    let (out_tx, _out_rx) = mpsc::unbounded_channel();
+    let transport = FaultyTransport {
+        frames: [request(1, "stuck"), request(2, "fast")].into(),
+        tail: RecvTail::Pending,
+        fail_sends: true,
+        outbound: out_tx,
+    };
+    let config = ServeConfig {
+        drain_timeout: Duration::from_millis(150),
+        ..ServeConfig::default()
+    };
+    let err = tokio::time::timeout(
+        Duration::from_secs(5),
+        serve_with(transport, service, config),
+    )
+    .await
+    .expect("driver returns despite the stuck handler")
+    .expect_err("send failure is fatal");
+    assert!(matches!(err, ProtocolError::Transport(_)), "{err}");
+    assert_eq!(started.load(Ordering::SeqCst), 2, "both handlers started");
 }
 
 /// The driver is the trust boundary: forged `io.turbomcp.internal/*` keys are

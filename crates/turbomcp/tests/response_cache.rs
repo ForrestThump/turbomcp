@@ -116,7 +116,9 @@ async fn unconfigured_server_and_legacy_path_are_never_cached() {
 fn spawn_scripted_server(
     server_io: tokio::io::DuplexStream,
     list_hits: Arc<AtomicUsize>,
+    read_hits: Arc<AtomicUsize>,
     notify_on_ping: Arc<AtomicUsize>,
+    update_uri_on_ping: Arc<std::sync::Mutex<Option<String>>>,
 ) {
     tokio::spawn(async move {
         let (rd, mut wr) = split(server_io);
@@ -126,7 +128,10 @@ fn spawn_scripted_server(
             let id = frame.get("id").cloned().unwrap_or(Value::Null);
             let result = match frame.get("method").and_then(Value::as_str) {
                 Some("server/discover") => json!({
-                    "capabilities": { "tools": { "listChanged": true } },
+                    "capabilities": {
+                        "tools": { "listChanged": true },
+                        "resources": { "listChanged": true },
+                    },
                     "supportedVersions": ["2026-07-28"],
                     "resultType": "complete", "cacheScope": "private", "ttlMs": 0
                 }),
@@ -137,12 +142,30 @@ fn spawn_scripted_server(
                         "cacheScope": "private", "ttlMs": 60_000
                     })
                 }
+                Some("resources/read") => {
+                    read_hits.fetch_add(1, Ordering::SeqCst);
+                    let uri = frame["params"]["uri"].clone();
+                    json!({
+                        "contents": [{ "uri": uri, "text": "hi" }],
+                        "resultType": "complete",
+                        "cacheScope": "private", "ttlMs": 60_000
+                    })
+                }
                 Some("ping") => {
                     if notify_on_ping.load(Ordering::SeqCst) > 0 {
                         notify_on_ping.fetch_sub(1, Ordering::SeqCst);
                         let note = json!({
                             "jsonrpc": "2.0",
                             "method": "notifications/tools/list_changed"
+                        });
+                        wr.write_all(format!("{note}\n").as_bytes()).await.unwrap();
+                    }
+                    let pending_update = update_uri_on_ping.lock().unwrap().take();
+                    if let Some(uri) = pending_update {
+                        let note = json!({
+                            "jsonrpc": "2.0",
+                            "method": "notifications/resources/updated",
+                            "params": { "uri": uri }
                         });
                         wr.write_all(format!("{note}\n").as_bytes()).await.unwrap();
                     }
@@ -164,7 +187,9 @@ async fn cache_hits_skip_the_wire_and_list_changed_invalidates() {
     spawn_scripted_server(
         server_io,
         Arc::clone(&list_hits),
+        Arc::new(AtomicUsize::new(0)),
         Arc::clone(&notify_on_ping),
+        Arc::new(std::sync::Mutex::new(None)),
     );
 
     let (c_rd, c_wr) = split(client_io);
@@ -207,6 +232,8 @@ async fn disabled_cache_always_hits_the_wire() {
         server_io,
         Arc::clone(&list_hits),
         Arc::new(AtomicUsize::new(0)),
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(std::sync::Mutex::new(None)),
     );
 
     let (c_rd, c_wr) = split(client_io);
@@ -221,4 +248,42 @@ async fn disabled_cache_always_hits_the_wire() {
     client.list_tools(None).await.unwrap();
     client.list_tools(None).await.unwrap();
     assert_eq!(list_hits.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn read_cache_is_per_uri_and_resources_updated_invalidates_only_that_uri() {
+    let read_hits = Arc::new(AtomicUsize::new(0));
+    let update_uri = Arc::new(std::sync::Mutex::new(None));
+    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+    spawn_scripted_server(
+        server_io,
+        Arc::new(AtomicUsize::new(0)),
+        Arc::clone(&read_hits),
+        Arc::new(AtomicUsize::new(0)),
+        Arc::clone(&update_uri),
+    );
+
+    let (c_rd, c_wr) = split(client_io);
+    let transport = LineTransport::new(BufReader::new(c_rd), c_wr, SerdeJsonCodec);
+    let client = ClientBuilder::new("scripted", "1.0.0")
+        .with_connect_mode(ConnectMode::Modern)
+        .connect(transport)
+        .await
+        .expect("handshake");
+
+    // Repeat reads of one URI are one round-trip; a second URI is its own entry.
+    client.read_resource("mem://a").await.unwrap();
+    client.read_resource("mem://a").await.unwrap();
+    assert_eq!(read_hits.load(Ordering::SeqCst), 1, "mem://a cached");
+    client.read_resource("mem://b").await.unwrap();
+    assert_eq!(read_hits.load(Ordering::SeqCst), 2, "mem://b is distinct");
+
+    // `resources/updated { uri: mem://a }` drops ONLY that entry.
+    *update_uri.lock().unwrap() = Some("mem://a".to_owned());
+    client.ping().await.unwrap();
+
+    client.read_resource("mem://b").await.unwrap();
+    assert_eq!(read_hits.load(Ordering::SeqCst), 2, "mem://b still cached");
+    client.read_resource("mem://a").await.unwrap();
+    assert_eq!(read_hits.load(Ordering::SeqCst), 3, "mem://a refetched");
 }

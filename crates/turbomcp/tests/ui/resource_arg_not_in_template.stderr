@@ -1,0 +1,5 @@
+error: resource argument `name` does not match any variable in the URI template `file://{path}`
+  --> tests/ui/resource_arg_not_in_template.rs:10:26
+   |
+10 |     async fn file(&self, name: String) -> McpResult<String> {
+   |                          ^^^^

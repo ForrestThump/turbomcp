@@ -119,3 +119,25 @@ mod tests {
         assert!(!parent2.is_cancelled());
     }
 }
+
+// Runs under `cargo test -p turbomcp-core --no-default-features`.
+#[cfg(all(test, not(feature = "std")))]
+mod no_std_tests {
+    use super::CancellationToken;
+
+    #[test]
+    fn no_std_token_is_flat_shared_flag() {
+        // Documented divergence from std: `child_token` shares the parent's
+        // flag, so cancellation propagates in BOTH directions.
+        let parent = CancellationToken::new();
+        let child = parent.child_token();
+        assert!(!parent.is_cancelled() && !child.is_cancelled());
+        parent.cancel();
+        assert!(child.is_cancelled());
+
+        let parent2 = CancellationToken::new();
+        let child2 = parent2.child_token();
+        child2.cancel();
+        assert!(parent2.is_cancelled()); // flat, not hierarchical
+    }
+}

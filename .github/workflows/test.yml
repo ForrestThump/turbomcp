@@ -185,6 +185,15 @@ jobs:
     - name: Build no_std foundation for wasm32
       run: cargo build -p turbomcp-core -p turbomcp-protocol --target wasm32-unknown-unknown
 
+    # The same crates with default features off — the true no_std configuration
+    # (std feature disabled, codec without sonic-rs). Guards the cfg(not(std))
+    # code paths that the default build never compiles.
+    - name: Build no-default-features foundation for wasm32
+      run: cargo build -p turbomcp-core -p turbomcp-protocol -p turbomcp-codec --no-default-features --target wasm32-unknown-unknown
+
+    - name: Test non-default foundation configs on the host
+      run: cargo test -p turbomcp-core -p turbomcp-protocol -p turbomcp-codec --no-default-features
+
   coverage:
     name: Coverage
     runs-on: ubuntu-latest

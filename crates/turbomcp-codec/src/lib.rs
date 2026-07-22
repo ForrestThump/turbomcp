@@ -158,6 +158,63 @@ mod tests {
         assert!(matches!(err, CodecError::Decode(_)));
     }
 
+    #[test]
+    fn batch_array_is_decode_error() {
+        // No `Batch` variant by design (PLAN.md §13.1): a received JSON-RPC
+        // batch must be a decode error here, mapping to `-32700` one layer up.
+        let batch = br#"[{"jsonrpc":"2.0","id":1,"method":"ping"}]"#;
+        assert!(matches!(
+            SerdeJsonCodec.decode::<JsonRpcMessage>(batch),
+            Err(CodecError::Decode(_))
+        ));
+        // The empty batch is likewise invalid.
+        assert!(matches!(
+            SerdeJsonCodec.decode::<JsonRpcMessage>(b"[]"),
+            Err(CodecError::Decode(_))
+        ));
+        #[cfg(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64")))]
+        {
+            assert!(matches!(
+                SonicRsCodec.decode::<JsonRpcMessage>(batch),
+                Err(CodecError::Decode(_))
+            ));
+            assert!(matches!(
+                SonicRsCodec.decode::<JsonRpcMessage>(b"[]"),
+                Err(CodecError::Decode(_))
+            ));
+        }
+    }
+
+    struct FailingSerialize;
+    impl Serialize for FailingSerialize {
+        fn serialize<S: serde::Serializer>(&self, _s: S) -> Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom("deliberate"))
+        }
+    }
+
+    #[test]
+    fn encode_error_is_reported() {
+        let err = SerdeJsonCodec.encode(&FailingSerialize).unwrap_err();
+        assert!(matches!(err, CodecError::Encode(_)));
+        assert!(err.to_string().starts_with("encode failed:"));
+        #[cfg(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64")))]
+        assert!(matches!(
+            SonicRsCodec.encode(&FailingSerialize),
+            Err(CodecError::Encode(_))
+        ));
+    }
+
+    #[test]
+    fn format_and_default_codec() {
+        assert_eq!(SerdeJsonCodec.format(), "json");
+        #[cfg(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64")))]
+        assert_eq!(SonicRsCodec.format(), "json");
+        // Whatever DefaultCodec resolves to on this build, it round-trips.
+        let codec = DefaultCodec::default();
+        assert_eq!(codec.format(), "json");
+        roundtrip(codec);
+    }
+
     /// Payloads that historically shake out JSON-backend divergence: non-BMP
     /// unicode, escape-heavy strings, integer extremes, high-precision floats,
     /// deep nesting, a large string, and null/absent params.

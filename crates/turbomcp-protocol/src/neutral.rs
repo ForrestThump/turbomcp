@@ -3493,4 +3493,185 @@ mod tests {
             assert_eq!(Content::from(legacy_block), content);
         }
     }
+
+    #[test]
+    fn task_support_round_trips_the_legacy_wire_and_drops_on_draft() {
+        for (ts, wire_str) in [
+            (TaskSupport::Forbidden, "forbidden"),
+            (TaskSupport::Optional, "optional"),
+            (TaskSupport::Required, "required"),
+        ] {
+            let make = || Tool::new("t", json!({"type": "object"})).with_task_support(ts);
+            let wire: legacy::Tool = make().into();
+            let v = serde_json::to_value(&wire).unwrap();
+            assert_eq!(v["execution"]["taskSupport"], wire_str);
+            let back: Tool = wire.into();
+            assert_eq!(back.task_support, Some(ts));
+
+            // The draft models Tasks as an extension, not a per-tool wire field.
+            let wire: draft::Tool = make().into();
+            let v = serde_json::to_value(&wire).unwrap();
+            assert!(v.get("execution").is_none(), "no draft execution key: {v}");
+            let back: Tool = wire.into();
+            assert_eq!(back.task_support, None);
+        }
+        // A legacy tool without `execution` reads back as None.
+        let wire: legacy::Tool = Tool::new("t", json!({"type": "object"})).into();
+        let back: Tool = wire.into();
+        assert_eq!(back.task_support, None);
+    }
+
+    #[test]
+    fn draft_structured_content_keeps_non_object_values() {
+        // The draft (unlike legacy) allows any JSON value here — a future
+        // narrowing to objects must fail this, mirroring the legacy-drop test.
+        for sc in [json!(7), json!([1, 2, 3]), json!("str"), json!(true)] {
+            let mut r = CallToolResult::text("ok");
+            r.structured_content = Some(sc.clone());
+            let wire: draft::CallToolResult = r.into();
+            let v = serde_json::to_value(&wire).unwrap();
+            assert_eq!(v["structuredContent"], sc);
+            let back: CallToolResult = wire.into();
+            assert_eq!(back.structured_content, Some(sc));
+        }
+    }
+
+    #[test]
+    fn cache_policy_round_trips_the_draft_wire_and_drops_on_legacy() {
+        // Outbound + inbound Public arm.
+        let result = ListToolsResult::new(alloc::vec![])
+            .with_cache(CachePolicy::public(core::time::Duration::from_secs(60)));
+        let wire: draft::ListToolsResult = result.into();
+        let v = serde_json::to_value(&wire).unwrap();
+        assert_eq!(v["ttlMs"], 60_000);
+        assert_eq!(v["cacheScope"], "public");
+        let back: ListToolsResult = wire.into();
+        assert_eq!(
+            back.cache,
+            Some(CachePolicy::from_wire(60_000, CacheScope::Public))
+        );
+
+        // resources/read carries the same envelope (Private arm).
+        let rr = ReadResourceResult::text("file://a", "hi")
+            .with_cache(CachePolicy::private(core::time::Duration::from_millis(500)));
+        let wire: draft::ReadResourceResult = rr.into();
+        let v = serde_json::to_value(&wire).unwrap();
+        assert_eq!(v["ttlMs"], 500);
+        assert_eq!(v["cacheScope"], "private");
+        let back: ReadResourceResult = wire.into();
+        assert_eq!(
+            back.cache,
+            Some(CachePolicy::from_wire(500, CacheScope::Private))
+        );
+
+        // The legacy wire has no cache fields: dropped outbound, None inbound.
+        let result = ListToolsResult::new(alloc::vec![])
+            .with_cache(CachePolicy::public(core::time::Duration::from_secs(60)));
+        let wire: legacy::ListToolsResult = result.into();
+        let back: ListToolsResult = wire.into();
+        assert_eq!(back.cache, None);
+
+        // Pinned asymmetry: neutral `cache: None` re-enters from the draft
+        // wire as the explicit conservative default (the wire always carries
+        // the fields), never as None.
+        let wire: draft::ListToolsResult = ListToolsResult::new(alloc::vec![]).into();
+        let back: ListToolsResult = wire.into();
+        assert_eq!(back.cache, Some(CachePolicy::NO_CACHE));
+    }
+
+    #[test]
+    fn legacy_annotations_wire_names_are_exact() {
+        // The draft names are asserted elsewhere; pin the legacy JSON too so a
+        // codegen rename regression (e.g. lastModified -> last_modified) fails.
+        let wire: legacy::Resource = metadata_resource().into();
+        let v = serde_json::to_value(&wire).unwrap();
+        assert_eq!(v["annotations"]["audience"], json!(["user"]));
+        assert_eq!(v["annotations"]["priority"], json!(0.75));
+        assert_eq!(v["annotations"]["lastModified"], "2026-07-20T00:00:00Z");
+
+        let content = Content::text("hi").with_annotations(
+            Annotations::new()
+                .for_audience(Role::User)
+                .last_modified("2026-07-21T00:00:00Z"),
+        );
+        let wire: legacy::ContentBlock = content.into();
+        let v = serde_json::to_value(&wire).unwrap();
+        assert_eq!(v["annotations"]["audience"], json!(["user"]));
+        assert_eq!(v["annotations"]["lastModified"], "2026-07-21T00:00:00Z");
+    }
+
+    #[test]
+    fn absent_tool_metadata_stays_absent_on_the_legacy_wire() {
+        let wire: legacy::Tool = Tool::new("plain", json!({"type": "object"})).into();
+        let v = serde_json::to_value(&wire).unwrap();
+        assert!(v.get("annotations").is_none(), "no annotations key: {v}");
+        assert!(v.get("icons").is_none(), "no icons key: {v}");
+        assert!(v.get("_meta").is_none(), "no _meta key: {v}");
+        assert!(v.get("execution").is_none(), "no execution key: {v}");
+    }
+
+    #[test]
+    fn resource_size_round_trips_and_clamps() {
+        let mut resource = Resource::new("file://big", "big");
+        resource.size = Some(4096);
+        for wire_v in [
+            serde_json::to_value(draft::Resource::from(resource.clone())).unwrap(),
+            serde_json::to_value(legacy::Resource::from(resource.clone())).unwrap(),
+        ] {
+            assert_eq!(wire_v["size"], 4096);
+        }
+        let back: Resource = draft::Resource::from(resource.clone()).into();
+        assert_eq!(back.size, Some(4096));
+        let back: Resource = legacy::Resource::from(resource.clone()).into();
+        assert_eq!(back.size, Some(4096));
+
+        // Documented clamp: the wire types `size` as i64, so a u64 beyond
+        // i64::MAX saturates on Resource…
+        resource.size = Some(u64::MAX);
+        let back: Resource = draft::Resource::from(resource.clone()).into();
+        assert_eq!(back.size, Some(u64::try_from(i64::MAX).unwrap()));
+        // …and drops entirely on ResourceLink (pinned; values this large are
+        // nonsensical, the invariant is "never panic, never go negative").
+        let wire: draft::ContentBlock = Content::resource_link(resource).into();
+        let Content::ResourceLink(r) = Content::from(wire) else {
+            panic!("resource link survives");
+        };
+        assert_eq!(r.size, None);
+    }
+
+    #[test]
+    fn icon_theme_light_round_trips_both_wires() {
+        let tool = Tool::new("t", json!({"type": "object"})).with_icon(Icon {
+            src: "https://example.com/i.png".into(),
+            mime_type: None,
+            sizes: alloc::vec![],
+            theme: Some(IconTheme::Light),
+        });
+        let wire: draft::Tool = tool.clone().into();
+        let v = serde_json::to_value(&wire).unwrap();
+        assert_eq!(v["icons"][0]["theme"], "light");
+        let back: Tool = wire.into();
+        assert_eq!(back.icons[0].theme, Some(IconTheme::Light));
+
+        let wire: legacy::Tool = tool.into();
+        let v = serde_json::to_value(&wire).unwrap();
+        assert_eq!(v["icons"][0]["theme"], "light");
+        let back: Tool = wire.into();
+        assert_eq!(back.icons[0].theme, Some(IconTheme::Light));
+    }
+
+    #[test]
+    fn empty_annotations_serialize_as_empty_object_not_empty_arrays() {
+        let content = Content::text("hi").with_annotations(Annotations::new());
+        for v in [
+            serde_json::to_value(draft::ContentBlock::from(content.clone())).unwrap(),
+            serde_json::to_value(legacy::ContentBlock::from(content.clone())).unwrap(),
+        ] {
+            // Present (the caller set it) but empty — never `"audience": []`.
+            assert_eq!(v["annotations"], json!({}), "{v}");
+        }
+        let wire: draft::ContentBlock = content.clone().into();
+        let back: Content = wire.into();
+        assert_eq!(back, content);
+    }
 }

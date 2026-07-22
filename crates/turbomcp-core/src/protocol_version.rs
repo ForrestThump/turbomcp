@@ -164,6 +164,16 @@ mod tests {
     }
 
     #[test]
+    fn display_matches_wire_string() {
+        assert_eq!(ProtocolVersion::Draft.to_string(), "2026-07-28");
+        assert_eq!(ProtocolVersion::V2025_11_25.to_string(), "2025-11-25");
+        assert_eq!(
+            ProtocolVersion::Unknown("2099-01-01".to_string()).to_string(),
+            "2099-01-01"
+        );
+    }
+
+    #[test]
     fn supported_set() {
         assert!(ProtocolVersion::V2025_11_25.is_supported());
         assert!(ProtocolVersion::Draft.is_supported());

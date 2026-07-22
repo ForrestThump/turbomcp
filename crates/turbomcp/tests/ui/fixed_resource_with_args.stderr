@@ -1,0 +1,5 @@
+error: a fixed-URI #[resource] takes only `&self` and an optional context; use a URI template (e.g. `#[resource("file://{path}")]`) to accept args
+  --> tests/ui/fixed_resource_with_args.rs:10:5
+   |
+10 |     async fn config(&self, path: String) -> McpResult<String> {
+   |     ^^^^^

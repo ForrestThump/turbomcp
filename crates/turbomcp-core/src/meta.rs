@@ -242,6 +242,37 @@ mod tests {
     }
 
     #[test]
+    fn every_wellknown_key_is_framework_consumed() {
+        // Dropping any of these from `is_framework_key` would leak it into
+        // `propagated_meta` (and echo it back on responses) — pin the full set.
+        let framework = [
+            keys::PROTOCOL_VERSION,
+            keys::PROGRESS_TOKEN,
+            keys::TRACEPARENT,
+            keys::TRACESTATE,
+            keys::BAGGAGE,
+            keys::SUBSCRIPTION_ID,
+            keys::CLIENT_INFO,
+            keys::CLIENT_CAPABILITIES,
+            keys::LOG_LEVEL,
+            internal::SESSION_ID,
+            internal::CONNECTION_ID,
+            internal::IDENTITY,
+        ];
+        let mut meta = Map::new();
+        for k in framework {
+            meta.insert(k.into(), json!("v"));
+        }
+        meta.insert("com.acme/tenant".into(), json!("t-1"));
+        let (consumed, propagated) = partition(meta);
+        for k in framework {
+            assert!(consumed.contains_key(k), "{k} must be framework-consumed");
+        }
+        assert_eq!(propagated.len(), 1);
+        assert!(propagated.contains_key("com.acme/tenant"));
+    }
+
+    #[test]
     fn set_request_meta_creates_params_and_meta() {
         use crate::JsonRpcRequest;
         let mut msg: JsonRpcMessage = JsonRpcRequest::new(1, "tools/list", None).into();

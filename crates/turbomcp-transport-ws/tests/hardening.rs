@@ -128,6 +128,97 @@ async fn oversized_frames_end_the_connection() {
     }
 }
 
+/// A text frame that isn't JSON ends the connection (the transport is the
+/// trust boundary; there is no resync on a corrupted stream) — it is never
+/// answered and never crashes the server.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn malformed_text_frame_ends_the_connection() {
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let addr = spawn_server(WsConfig::new()).await;
+    let req = format!("ws://{addr}").into_client_request().unwrap();
+    let (mut stream, _) = tokio_tungstenite::connect_async(req).await.unwrap();
+    stream
+        .send(Message::text("!!! not json !!!"))
+        .await
+        .unwrap();
+    // The next frame (if any) must be a Close — never a served response.
+    loop {
+        match stream.next().await {
+            None | Some(Err(_)) => break,
+            Some(Ok(Message::Close(_))) => break,
+            Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
+            Some(Ok(other)) => panic!("malformed frame was served: {other:?}"),
+        }
+    }
+
+    // The listener survives: a fresh, well-formed connection is served.
+    let req = format!("ws://{addr}").into_client_request().unwrap();
+    let (stream, _) = tokio_tungstenite::connect_async(req).await.unwrap();
+    let mut client = WebSocketTransport::new(stream, DefaultCodec::default());
+    client
+        .send(JsonRpcMessage::Request(JsonRpcRequest::new(1, "ok", None)))
+        .await
+        .unwrap();
+    assert!(client.recv().await.unwrap().is_some());
+}
+
+/// Binary frames carry the same JSON payload as text frames and decode
+/// identically (the recv path accepts both).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn binary_frames_decode_like_text() {
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let addr = spawn_server(WsConfig::new()).await;
+    let req = format!("ws://{addr}").into_client_request().unwrap();
+    let (mut stream, _) = tokio_tungstenite::connect_async(req).await.unwrap();
+    let frame = serde_json::to_vec(&JsonRpcMessage::Request(JsonRpcRequest::new(
+        7, "binary", None,
+    )))
+    .unwrap();
+    stream.send(Message::binary(frame)).await.unwrap();
+    loop {
+        match stream.next().await.expect("a reply").expect("frame") {
+            Message::Text(t) => {
+                let v: Value = serde_json::from_str(t.as_str()).unwrap();
+                assert_eq!(v["id"], 7, "the binary request was served: {v}");
+                break;
+            }
+            Message::Ping(_) | Message::Pong(_) => continue,
+            other => panic!("expected a text reply, got {other:?}"),
+        }
+    }
+}
+
+/// The auth-rejection close is a real policy-violation close frame — code
+/// `1008` with the reason — not a bare TCP drop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auth_rejection_closes_with_policy_code_1008() {
+    use futures::StreamExt;
+    use tokio_tungstenite::tungstenite::Message;
+    use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+
+    let config = WsConfig::new().with_authenticator(std::sync::Arc::new(GoodToken));
+    let addr = spawn_server(config).await;
+
+    let mut req = format!("ws://{addr}").into_client_request().unwrap();
+    req.headers_mut()
+        .insert("authorization", "Bearer wrong".parse().unwrap());
+    let (mut stream, _) = tokio_tungstenite::connect_async(req).await.unwrap();
+    loop {
+        match stream.next().await.expect("a close frame").expect("frame") {
+            Message::Close(Some(frame)) => {
+                assert_eq!(frame.code, CloseCode::Policy, "1008 policy violation");
+                break;
+            }
+            Message::Ping(_) | Message::Pong(_) => continue,
+            other => panic!("expected Close(1008), got {other:?}"),
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bearer_auth_gates_the_connection_and_stamps_identity() {
     let config = WsConfig::new().with_authenticator(std::sync::Arc::new(GoodToken));

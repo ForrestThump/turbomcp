@@ -169,6 +169,31 @@ async fn malformed_body_is_400_parse_error() {
     assert!(v["id"].is_null());
 }
 
+/// Draft transport rule: an unimplemented RPC method answers HTTP 404 with the
+/// JSON-RPC `-32601` body (not a 200), so plain-HTTP callers see the miss.
+#[tokio::test]
+async fn draft_unknown_method_is_http_404_with_32601_body() {
+    let body = format!(
+        r#"{{"jsonrpc":"2.0","id":1,"method":"does/not/exist","params":{{"_meta":{DRAFT_META}}}}}"#
+    );
+    let resp = app(HttpConfig::new())
+        .oneshot(draft_post(&body, "does/not/exist", None))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let v: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(v["error"]["code"], -32601);
+
+    // The same miss on the legacy wire stays HTTP 200 (errors ride the body).
+    let legacy = r#"{"jsonrpc":"2.0","id":2,"method":"does/not/exist","params":{}}"#;
+    let resp = app(HttpConfig::new()).oneshot(post(legacy)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let v: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(v["error"]["code"], -32601);
+}
+
 #[tokio::test]
 async fn get_is_405_until_subscriptions() {
     let req = Request::builder()

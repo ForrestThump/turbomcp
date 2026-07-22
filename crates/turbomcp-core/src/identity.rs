@@ -198,6 +198,84 @@ mod tests {
     }
 
     #[test]
+    fn dpop_identity_exposes_subject_and_redacts_claims() {
+        let mut claims = Claims::new();
+        claims.insert("email".into(), json!("secret@example.com"));
+        let id = Identity::Dpop {
+            sub: "user-2".into(),
+            jkt: "thumb-1".into(),
+            claims,
+        };
+        assert_eq!(id.subject(), Some("user-2"));
+        assert!(id.is_authenticated());
+        assert_eq!(id.claim_keys(), ["email"]);
+        let dbg = format!("{id:?}");
+        assert!(dbg.contains("thumb-1")); // jkt is a binding, not a claim value
+        assert!(dbg.contains("email")); // key shown
+        assert!(!dbg.contains("secret@example.com")); // value hidden
+    }
+
+    #[derive(Debug)]
+    struct StaticClaims(Value);
+    impl IdentityClaims for StaticClaims {
+        fn subject(&self) -> Option<&str> {
+            Some("custom-sub")
+        }
+        fn claim(&self, key: &str) -> Option<&Value> {
+            (key == "scope").then_some(&self.0)
+        }
+    }
+
+    #[test]
+    fn custom_identity_delegates_and_exposes_no_keys() {
+        use alloc::sync::Arc;
+        let id = Identity::Custom(Arc::new(StaticClaims(json!("read"))));
+        assert_eq!(id.subject(), Some("custom-sub"));
+        assert!(id.is_authenticated());
+        assert_eq!(id.claim("scope"), Some(&json!("read")));
+        assert!(id.claim("other").is_none());
+        // The redaction-safe view exposes no keys for Custom (documented).
+        assert!(id.claim_keys().is_empty());
+        // Scope checks still work through the delegated `scope` claim.
+        assert!(id.has_scopes(&["read"]));
+        assert!(!id.has_scopes(&["write"]));
+        let dbg = format!("{id:?}");
+        assert!(dbg.contains("custom-sub"));
+        assert!(!dbg.contains("read")); // Custom Debug never shows values
+    }
+
+    #[test]
+    fn granted_scopes_reads_scp_array_and_merges_with_scope_string() {
+        // `scp` array alone (Azure-style).
+        let mut claims = Claims::new();
+        claims.insert("scp".into(), json!(["mcp:use", "admin"]));
+        let id = Identity::Bearer {
+            sub: "u".into(),
+            claims,
+        };
+        assert!(id.has_scopes(&["mcp:use", "admin"]));
+        assert!(!id.has_scopes(&["other"]));
+
+        // Both `scope` (space-delimited) and `scp` (array) contribute.
+        let mut claims = Claims::new();
+        claims.insert("scope".into(), json!("read write"));
+        claims.insert("scp".into(), json!(["admin"]));
+        let id = Identity::Bearer {
+            sub: "u".into(),
+            claims,
+        };
+        assert!(id.has_scopes(&["read", "write", "admin"]));
+        // Non-string entries in `scp` are skipped, not an error.
+        let mut claims = Claims::new();
+        claims.insert("scp".into(), json!(["ok", 42]));
+        let id = Identity::Bearer {
+            sub: "u".into(),
+            claims,
+        };
+        assert_eq!(id.granted_scopes(), ["ok"]);
+    }
+
+    #[test]
     fn redacted_subject_is_stable_and_opaque() {
         let id = Identity::Bearer {
             sub: "alice".into(),

@@ -11,6 +11,8 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use http_body_util::BodyExt;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde_json::{Value, json};
+use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+
 use tower::ServiceExt;
 use turbomcp_auth::{JwtValidator, ResourceMetadata, ResourceServer, StaticJwks};
 use turbomcp_core::{Implementation, McpResult};
@@ -18,6 +20,7 @@ use turbomcp_protocol::neutral;
 use turbomcp_server::{
     CallToolContext, ListToolsContext, McpServerCore, MethodRouter, VersionDispatcher, WithTools,
 };
+use turbomcp_service::{SessionTerminator, TerminateFuture};
 use turbomcp_transport_http::{HttpConfig, router};
 
 const SECRET: &[u8] = b"test-hmac-secret-key-thirty-two!";
@@ -111,6 +114,135 @@ fn call_request(auth: Option<&str>) -> Request<Body> {
 async fn body_json(resp: axum::response::Response) -> Value {
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     serde_json::from_slice(&bytes).unwrap()
+}
+
+/// The GET notification stream is part of the protected resource: without a
+/// token it is 401 (never an open SSE pipe), with one it opens.
+#[tokio::test]
+async fn get_stream_requires_auth() {
+    let get = |auth: Option<String>| {
+        let mut req = Request::builder()
+            .method("GET")
+            .uri("/mcp")
+            .header(header::ACCEPT, "text/event-stream")
+            .header("mcp-session-id", "s-1");
+        if let Some(auth) = auth {
+            req = req.header(header::AUTHORIZATION, auth);
+        }
+        req.body(Body::empty()).unwrap()
+    };
+
+    let resp = app().oneshot(get(None)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    let challenge = resp.headers()[header::WWW_AUTHENTICATE].to_str().unwrap();
+    assert!(challenge.contains(&format!("resource_metadata=\"{METADATA_URL}\"")));
+
+    let resp = app()
+        .oneshot(get(Some(format!("Bearer {}", token()))))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(
+        resp.headers()[header::CONTENT_TYPE]
+            .to_str()
+            .unwrap()
+            .starts_with("text/event-stream")
+    );
+}
+
+/// Counts terminations; reports every session as having existed.
+struct CountingTerminator(AtomicUsize);
+
+impl SessionTerminator for CountingTerminator {
+    fn terminate<'a>(&'a self, _session_id: &'a str) -> TerminateFuture<'a> {
+        self.0.fetch_add(1, SeqCst);
+        Box::pin(async { true })
+    }
+}
+
+/// DELETE (session termination) is protected too: an unauthenticated DELETE is
+/// 401 and must NOT reach the terminator; an authenticated one is 204 and does.
+#[tokio::test]
+async fn delete_requires_auth_before_terminating() {
+    let terminator = Arc::new(CountingTerminator(AtomicUsize::new(0)));
+    let k = URL_SAFE_NO_PAD.encode(SECRET);
+    let jwks = StaticJwks::from_json(
+        &json!({ "keys": [ { "kty": "oct", "k": k, "alg": "HS256", "kid": KID } ]}).to_string(),
+    )
+    .unwrap();
+    let validator = JwtValidator::new(jwks, RESOURCE, ISSUER).algorithms(vec![Algorithm::HS256]);
+    let rs = ResourceServer::new(
+        validator,
+        ResourceMetadata::new(RESOURCE, [ISSUER]),
+        METADATA_URL,
+    );
+    let dispatcher = VersionDispatcher::new(Whoami, MethodRouter::new().with_tools());
+    let app = router(
+        dispatcher,
+        HttpConfig::new()
+            .with_authenticator(Arc::new(rs))
+            .with_session_terminator(Arc::clone(&terminator) as Arc<dyn SessionTerminator>),
+    );
+
+    let delete = |auth: Option<String>| {
+        let mut req = Request::builder()
+            .method("DELETE")
+            .uri("/mcp")
+            .header("mcp-session-id", "s-1");
+        if let Some(auth) = auth {
+            req = req.header(header::AUTHORIZATION, auth);
+        }
+        req.body(Body::empty()).unwrap()
+    };
+
+    let resp = app.clone().oneshot(delete(None)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        terminator.0.load(SeqCst),
+        0,
+        "an unauthenticated DELETE must not terminate the session"
+    );
+
+    let resp = app
+        .oneshot(delete(Some(format!("Bearer {}", token()))))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert_eq!(terminator.0.load(SeqCst), 1);
+}
+
+/// A valid token lacking a required scope is 403 `insufficient_scope` on the
+/// wire (RFC 6750 §3.1), with the challenge naming the needed scope.
+#[tokio::test]
+async fn insufficient_scope_is_403_over_the_wire() {
+    let k = URL_SAFE_NO_PAD.encode(SECRET);
+    let jwks = StaticJwks::from_json(
+        &json!({ "keys": [ { "kty": "oct", "k": k, "alg": "HS256", "kid": KID } ]}).to_string(),
+    )
+    .unwrap();
+    let validator = JwtValidator::new(jwks, RESOURCE, ISSUER).algorithms(vec![Algorithm::HS256]);
+    let rs = ResourceServer::new(
+        validator,
+        ResourceMetadata::new(RESOURCE, [ISSUER]).scopes_supported(["mcp:use"]),
+        METADATA_URL,
+    )
+    .required_scopes(["mcp:use"]);
+    let dispatcher = VersionDispatcher::new(Whoami, MethodRouter::new().with_tools());
+    let app = router(
+        dispatcher,
+        HttpConfig::new().with_authenticator(Arc::new(rs)),
+    );
+
+    // token() carries no `scope` claim at all.
+    let auth = format!("Bearer {}", token());
+    let resp = app.oneshot(call_request(Some(&auth))).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let challenge = resp.headers()[header::WWW_AUTHENTICATE].to_str().unwrap();
+    assert!(
+        challenge.contains("error=\"insufficient_scope\""),
+        "{challenge}"
+    );
+    assert!(challenge.contains("scope=\"mcp:use\""), "{challenge}");
 }
 
 #[tokio::test]

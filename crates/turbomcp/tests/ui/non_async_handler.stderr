@@ -1,0 +1,5 @@
+error: handler methods must be `async`
+  --> tests/ui/non_async_handler.rs:10:5
+   |
+10 |     fn not_async(&self) -> String {
+   |     ^^
