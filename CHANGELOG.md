@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   answers `406 Not Acceptable` with a JSON-RPC error body. Matching honors
   RFC 9110 media ranges (`*/*`, `type/*`, `;q=` parameters), so permissive
   clients keep working; `DELETE` is exempt (no spec requirement).
+- **SSE primer event on `2025-11-25` POST-response streams (transports
+  spec).** When a POST upgrades to `text/event-stream`, the stream now opens
+  with the spec's SHOULD-required primer — an event ID (`{stream}-0`,
+  globally unique and stream-identifying per §Resumability) with no message
+  payload — so clients always hold a `Last-Event-ID` to reconnect from.
+  Ports the v3 fix (#17) to v4. Draft streams are never primed: the draft
+  spec dropped SSE resumability outright.
 - **`Client::call_tool_task` — client-side core Tasks (`2025-11-25`).** Opt a
   tool call into task-augmented execution: the request carries the spec's
   `task` field (with an optional requested `ttl`), and the client drives the

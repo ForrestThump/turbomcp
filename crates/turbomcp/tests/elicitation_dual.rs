@@ -186,10 +186,11 @@ async fn next_sse_event(body: &mut Body, buffer: &mut String) -> Value {
             if let Some(data) = event
                 .lines()
                 .find_map(|l| l.strip_prefix("data: ").or_else(|| l.strip_prefix("data:")))
+                && !data.is_empty()
             {
                 return serde_json::from_str(data).unwrap();
             }
-            continue; // comment / keep-alive
+            continue; // comment / keep-alive / legacy primer event
         }
         let frame = tokio::time::timeout(Duration::from_secs(5), body.frame())
             .await

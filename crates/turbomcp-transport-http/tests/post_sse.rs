@@ -190,6 +190,137 @@ async fn progress_notifications_ride_the_posts_own_stream() {
     assert_eq!(events[2]["result"]["content"][0]["text"], "done");
 }
 
+// ---- the 2025-11-25 primer event ------------------------------------------------
+
+fn legacy_initialize() -> Request<Body> {
+    let body = json!({
+        "jsonrpc": "2.0", "id": 0, "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "clientInfo": { "name": "primer-test", "version": "0.0.0" },
+        }
+    });
+    Request::builder()
+        .method("POST")
+        .header("accept", "application/json, text/event-stream")
+        .uri("/mcp")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+fn legacy_call_with_token(id: i64, session: &str) -> Request<Body> {
+    let body = json!({
+        "jsonrpc": "2.0", "id": id, "method": "tools/call",
+        "params": {
+            "name": "slow",
+            "arguments": {},
+            "_meta": { "progressToken": "tok-legacy" },
+        }
+    });
+    Request::builder()
+        .method("POST")
+        .header("accept", "application/json, text/event-stream")
+        .uri("/mcp")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("mcp-session-id", session)
+        .header("MCP-Protocol-Version", "2025-11-25")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+/// `2025-11-25` SHOULD-requires priming a POST-response SSE stream so the
+/// client always holds a `Last-Event-ID` (transports spec §Sending Messages).
+/// The primer is the stream's first event: an `id:` field (globally unique,
+/// stream-identifying, per §Resumability) with no message payload.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_streams_are_primed_with_an_event_id() {
+    let app = router(
+        VersionDispatcher::new(Slow, MethodRouter::new().with_tools()),
+        HttpConfig::new(),
+    );
+
+    let init = app.clone().oneshot(legacy_initialize()).await.unwrap();
+    assert_eq!(init.status(), StatusCode::OK);
+    let session = init.headers()["mcp-session-id"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+
+    let resp = app
+        .oneshot(legacy_call_with_token(7, &session))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(
+        resp.headers()[header::CONTENT_TYPE]
+            .to_str()
+            .unwrap()
+            .starts_with("text/event-stream"),
+        "progress upgrades the response to SSE"
+    );
+
+    let bytes = tokio::time::timeout(Duration::from_secs(5), resp.into_body().collect())
+        .await
+        .expect("the stream should terminate")
+        .unwrap()
+        .to_bytes();
+    let text = String::from_utf8_lossy(&bytes);
+
+    // The primer is its own first event block: an event ID, no payload.
+    let first_event = text.split("\n\n").next().expect("at least one event");
+    let id_line = first_event
+        .lines()
+        .find_map(|l| l.strip_prefix("id: ").or_else(|| l.strip_prefix("id:")))
+        .expect("the first event carries the primer's event ID");
+    assert!(
+        id_line.starts_with("http-post-") && id_line.ends_with("-0"),
+        "the id encodes the originating stream and a cursor: {id_line}"
+    );
+    assert!(
+        first_event
+            .lines()
+            .all(|l| l.strip_prefix("data:").is_none_or(|d| d.trim().is_empty())),
+        "the primer carries no message payload: {first_event:?}"
+    );
+
+    // The JSON-RPC frames follow, untouched.
+    let frames: Vec<Value> = text
+        .lines()
+        .filter_map(|l| l.strip_prefix("data: ").or_else(|| l.strip_prefix("data:")))
+        .filter(|d| !d.is_empty())
+        .map(|d| serde_json::from_str(d).expect("SSE data is JSON"))
+        .collect();
+    assert_eq!(frames.len(), 3, "two progress events + the final response");
+    assert_eq!(frames[0]["method"], "notifications/progress");
+    assert_eq!(frames[2]["id"], 7);
+    assert_eq!(frames[2]["result"]["content"][0]["text"], "done");
+}
+
+/// The draft dropped SSE resumability ("Resumable SSE streams via
+/// `Last-Event-ID` are not supported"), so draft streams carry no primer and
+/// no event IDs at all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn draft_streams_are_not_primed() {
+    let app = router(
+        VersionDispatcher::new(Slow, MethodRouter::new().with_tools()),
+        HttpConfig::new(),
+    );
+    let resp = app.oneshot(call_with_token(6)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = tokio::time::timeout(Duration::from_secs(5), resp.into_body().collect())
+        .await
+        .expect("the stream should terminate")
+        .unwrap()
+        .to_bytes();
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(
+        text.lines().all(|l| !l.starts_with("id:")),
+        "no event IDs on a draft stream: {text:?}"
+    );
+}
+
 // ---- a pushing handler upgrades; dropping the stream cancels it ----------------
 
 /// Sets the flag when the in-flight call future is dropped before completing.

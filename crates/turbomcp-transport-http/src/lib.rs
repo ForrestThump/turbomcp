@@ -20,8 +20,11 @@
 //!   request yields either `200 application/json` with the response, or — if
 //!   the handler emits server→client messages mid-flight (inline bidi
 //!   requests on the legacy path, progress, log messages) — a
-//!   `200 text/event-stream` *scoped to that request*: the request-related
-//!   messages as events, then the final response, which terminates the stream
+//!   `200 text/event-stream` *scoped to that request*: on `2025-11-25`, a
+//!   primer event first (an event ID + empty `data`, the spec's SHOULD so the
+//!   client always holds a `Last-Event-ID`; the draft dropped resumability, so
+//!   its streams are never primed), then the request-related messages as
+//!   events, then the final response, which terminates the stream
 //!   (transports spec §Sending Messages). A modern `subscriptions/listen`
 //!   request yields a long-lived `200 text/event-stream` instead: the
 //!   acknowledged notification first, then the opted-in change notifications.
@@ -797,6 +800,16 @@ where
     };
     let request_id = req.id.clone();
     let connection_id = format!("http-post-{}", uuid::Uuid::new_v4());
+    // If this request upgrades to SSE, `2025-11-25` SHOULD-requires priming
+    // the stream with an event carrying an event ID and an empty `data` field
+    // so the client always holds a `Last-Event-ID` (transports spec §Sending
+    // Messages to the Server). The id is `{connection_id}-0`: globally unique
+    // and stream-identifying, as §Resumability requires of event IDs. The
+    // draft dropped resumability ("Resumable SSE streams via `Last-Event-ID`
+    // are not supported"), so draft streams are never primed.
+    let primer = declared_version(&msg)
+        .is_none_or(|v| ProtocolVersion::from_wire(&v) != ProtocolVersion::Draft)
+        .then(|| format!("{connection_id}-0"));
     let (tx, mut rx) = tokio::sync::mpsc::channel::<JsonRpcMessage>(SSE_CHANNEL_CAPACITY);
     let registration = outbound::register(&connection_id, tx);
     meta::set_request_meta(
@@ -833,12 +846,12 @@ where
                 }
                 Ok(Some(reply)) => {
                     events.push_back(reply);
-                    finished_sse(state.codec, events)
+                    finished_sse(state.codec, primer, events)
                 }
                 // A request always gets a response from the dispatcher; these
                 // arms are defensive.
                 Ok(None) if events.is_empty() => StatusCode::ACCEPTED.into_response(),
-                Ok(None) => finished_sse(state.codec, events),
+                Ok(None) => finished_sse(state.codec, primer, events),
                 Err(e) => protocol_error_response(&e),
             }
         }
@@ -851,11 +864,14 @@ where
             };
             streaming_post_sse(
                 state.codec,
+                primer,
                 first,
-                rx,
-                call,
-                registration,
-                request_id,
+                PostStream::Run {
+                    rx,
+                    call,
+                    id: request_id,
+                    registration,
+                },
                 state.sse_keepalive,
             )
         }
@@ -882,66 +898,63 @@ enum PostStream<F> {
 /// event; dropping the response body drops the call future.
 fn streaming_post_sse<F>(
     codec: DefaultCodec,
+    primer: Option<String>,
     first: JsonRpcMessage,
-    rx: tokio::sync::mpsc::Receiver<JsonRpcMessage>,
-    call: Pin<Box<F>>,
-    registration: outbound::WriterGuard,
-    id: RequestId,
+    run: PostStream<F>,
     keepalive: Duration,
 ) -> Response
 where
     F: Future<Output = Result<Option<JsonRpcMessage>, ProtocolError>> + Send + 'static,
 {
-    let head = futures::stream::iter([Ok::<_, Infallible>(sse_event(&codec, &first))]);
-    let tail = futures::stream::unfold(
-        PostStream::Run {
-            rx,
-            call,
-            id,
-            registration,
-        },
-        move |state| async move {
-            match state {
-                PostStream::Run {
-                    mut rx,
-                    mut call,
-                    id,
-                    registration,
-                } => {
-                    tokio::select! {
-                        result = call.as_mut() => {
-                            let mut events = drain(&mut rx);
-                            drop(registration);
-                            match result {
-                                Ok(Some(reply)) => events.push_back(reply),
-                                Ok(None) => {}
-                                Err(e) => events.push_back(e.into_response(id).into()),
-                            }
-                            let msg = events.pop_front()?;
-                            Some((
-                                Ok::<_, Infallible>(sse_event(&codec, &msg)),
-                                PostStream::Tail(events),
-                            ))
+    let head = futures::stream::iter(
+        primer
+            .as_deref()
+            .map(primer_event)
+            .into_iter()
+            .chain([sse_event(&codec, &first)])
+            .map(Ok::<_, Infallible>),
+    );
+    let tail = futures::stream::unfold(run, move |state| async move {
+        match state {
+            PostStream::Run {
+                mut rx,
+                mut call,
+                id,
+                registration,
+            } => {
+                tokio::select! {
+                    result = call.as_mut() => {
+                        let mut events = drain(&mut rx);
+                        drop(registration);
+                        match result {
+                            Ok(Some(reply)) => events.push_back(reply),
+                            Ok(None) => {}
+                            Err(e) => events.push_back(e.into_response(id).into()),
                         }
-                        msg = rx.recv() => {
-                            let msg = msg.expect("sender held by registration");
-                            Some((
-                                Ok::<_, Infallible>(sse_event(&codec, &msg)),
-                                PostStream::Run { rx, call, id, registration },
-                            ))
-                        }
+                        let msg = events.pop_front()?;
+                        Some((
+                            Ok::<_, Infallible>(sse_event(&codec, &msg)),
+                            PostStream::Tail(events),
+                        ))
+                    }
+                    msg = rx.recv() => {
+                        let msg = msg.expect("sender held by registration");
+                        Some((
+                            Ok::<_, Infallible>(sse_event(&codec, &msg)),
+                            PostStream::Run { rx, call, id, registration },
+                        ))
                     }
                 }
-                PostStream::Tail(mut events) => {
-                    let msg = events.pop_front()?;
-                    Some((
-                        Ok::<_, Infallible>(sse_event(&codec, &msg)),
-                        PostStream::Tail(events),
-                    ))
-                }
             }
-        },
-    );
+            PostStream::Tail(mut events) => {
+                let msg = events.pop_front()?;
+                Some((
+                    Ok::<_, Infallible>(sse_event(&codec, &msg)),
+                    PostStream::Tail(events),
+                ))
+            }
+        }
+    });
     let stream = futures::StreamExt::chain(head, tail);
     let sse = Sse::new(stream).keep_alive(KeepAlive::new().interval(keepalive).text("keep-alive"));
     (
@@ -957,11 +970,18 @@ where
 /// A short, complete SSE response for a request that finished before the
 /// upgrade decision but raced messages into its channel: the messages, the
 /// final response, end of stream.
-fn finished_sse(codec: DefaultCodec, events: VecDeque<JsonRpcMessage>) -> Response {
+fn finished_sse(
+    codec: DefaultCodec,
+    primer: Option<String>,
+    events: VecDeque<JsonRpcMessage>,
+) -> Response {
     let stream = futures::stream::iter(
-        events
+        primer
+            .as_deref()
+            .map(primer_event)
             .into_iter()
-            .map(move |msg| Ok::<_, Infallible>(sse_event(&codec, &msg))),
+            .chain(events.into_iter().map(move |msg| sse_event(&codec, &msg)))
+            .map(Ok::<_, Infallible>),
     );
     (
         [(
@@ -980,6 +1000,18 @@ fn drain(rx: &mut tokio::sync::mpsc::Receiver<JsonRpcMessage>) -> VecDeque<JsonR
         events.push_back(msg);
     }
     events
+}
+
+/// The `2025-11-25` stream primer (transports spec §Sending Messages: the
+/// server SHOULD immediately send an event ID + empty `data` field so the
+/// client always holds a `Last-Event-ID`). axum elides the empty `data:`
+/// line, so the wire shape is an `id:`-only block — per the WHATWG SSE
+/// processing model that's equivalent: the `id` field sets the client's last
+/// event ID the moment it's parsed, and an empty data buffer never dispatches
+/// a message event anyway. The id-only shape also sidesteps the empty-`data:`
+/// misparse bugs in older SSE clients that v3 needed a comment workaround for.
+fn primer_event(id: &str) -> Event {
+    Event::default().id(id).data("")
 }
 
 /// Encode one message as one `data:` event; an encode failure becomes a
