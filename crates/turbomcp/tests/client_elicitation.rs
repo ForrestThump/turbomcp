@@ -83,7 +83,7 @@ async fn call_delete(client: &Client) -> String {
     args.insert("path".into(), json!("/tmp/x"));
     let result = client.call_tool("delete", args).await.expect("call_tool");
     match &result.content[0] {
-        neutral::Content::Text(t) => t.clone(),
+        neutral::Content::Text { text, .. } => text.clone(),
         other => panic!("unexpected content {other:?}"),
     }
 }

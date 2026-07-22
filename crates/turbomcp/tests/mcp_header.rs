@@ -113,6 +113,8 @@ async fn typed_client_mirrors_marked_param_to_header() {
     args.insert("city".into(), json!("SF"));
     args.insert("region".into(), json!("us-west"));
     let result = client.call_tool("locate", args).await.expect("call_tool");
-    assert!(matches!(&result.content[0], neutral::Content::Text(t) if t == "SF@us-west"));
+    assert!(
+        matches!(&result.content[0], neutral::Content::Text { text, .. } if text == "SF@us-west")
+    );
     shutdown.cancel();
 }

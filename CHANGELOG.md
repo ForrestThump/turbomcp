@@ -49,6 +49,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ToolAnnotations::new().read_only()…`, `Annotations::new().for_audience(…)`,
   `Icon::new(src)`. (`neutral::Content` and `Resource` are now `PartialEq`
   only — annotation priority is an `f64`.)
+- **Content blocks and resource contents carry `annotations` + `_meta` too**
+  (the last inexpressible core-spec surface). Every `neutral::Content` block
+  — `Text`, `Image`, `Audio`, and embedded `Resource` — now carries the
+  spec's block-level `annotations` and `_meta`, and
+  `ResourceContents::Text`/`Blob` carry the per-contents `_meta` (where the
+  Apps extension's `_meta.ui` CSP/permissions ride), lossless through both
+  wire versions in both directions. Set them with
+  `Content::text("…").with_annotations(…).with_meta_entry(…)` and
+  `ResourceContents::text(…).with_meta_entry(…)`. **Breaking (alpha):**
+  `Content::Text` is now a struct variant (`Content::Text { text, .. }`) and
+  all data-bearing variants of `Content`/`ResourceContents` are
+  `#[non_exhaustive]` — construct via `Content::text()` & co. and match with
+  `..` so future spec fields land without another break.
 - **crates.io metadata polish** — every published crate now ships a README,
   keywords, and categories.
 

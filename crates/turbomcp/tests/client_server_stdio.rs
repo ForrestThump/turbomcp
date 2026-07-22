@@ -72,7 +72,7 @@ async fn exercise(client: &Client) {
     args.insert("word".into(), json!("hi"));
     let result = client.call_tool("shout", args).await.expect("call_tool");
     assert!(!result.is_error);
-    assert!(matches!(&result.content[0], neutral::Content::Text(t) if t == "HI"));
+    assert!(matches!(&result.content[0], neutral::Content::Text { text, .. } if text == "HI"));
 
     // resources/read
     let read = client
@@ -93,7 +93,9 @@ async fn exercise(client: &Client) {
         .get_prompt("welcome", pargs)
         .await
         .expect("get_prompt");
-    assert!(matches!(&prompt.messages[0].content, neutral::Content::Text(t) if t.contains("Ada")));
+    assert!(
+        matches!(&prompt.messages[0].content, neutral::Content::Text { text, .. } if text.contains("Ada"))
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

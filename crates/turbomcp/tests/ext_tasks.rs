@@ -182,7 +182,7 @@ async fn call_tool_transparently_drives_a_task_to_completion() {
         .await
         .expect("call_tool auto-drives the task");
     match &result.content[0] {
-        neutral::Content::Text(t) => assert_eq!(t, "Report: latency"),
+        neutral::Content::Text { text, .. } => assert_eq!(text, "Report: latency"),
         other => panic!("unexpected content {other:?}"),
     }
 }
@@ -200,7 +200,7 @@ async fn mid_task_elicitation_flows_through_tasks_update() {
         .await
         .expect("mid-task elicitation should round-trip");
     match &result.content[0] {
-        neutral::Content::Text(t) => assert_eq!(t, "Confirmed report: throughput"),
+        neutral::Content::Text { text, .. } => assert_eq!(text, "Confirmed report: throughput"),
         other => panic!("unexpected content {other:?}"),
     }
 }
@@ -237,7 +237,7 @@ async fn mrtr_elicitation_composes_with_the_tasks_extension() {
     args.insert("path".into(), json!("/tmp/x"));
     let result = client.call_tool("delete", args).await.expect("call_tool");
     match &result.content[0] {
-        neutral::Content::Text(t) => assert_eq!(t, "deleted /tmp/x"),
+        neutral::Content::Text { text, .. } => assert_eq!(text, "deleted /tmp/x"),
         other => panic!("unexpected content {other:?}"),
     }
 }

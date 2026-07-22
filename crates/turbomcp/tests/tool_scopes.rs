@@ -48,7 +48,7 @@ async fn call(name: &str, ctx: &CallToolContext) -> CallToolResult {
 
 fn text(r: &CallToolResult) -> String {
     match &r.content[0] {
-        turbomcp::neutral::Content::Text(t) => t.clone(),
+        turbomcp::neutral::Content::Text { text, .. } => text.clone(),
         other => panic!("expected text, got {other:?}"),
     }
 }

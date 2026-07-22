@@ -124,7 +124,7 @@ async fn turbomcp_client_drives_rmcp_server() {
     args.insert("a".into(), serde_json::json!(2));
     args.insert("b".into(), serde_json::json!(3));
     let result = client.call_tool("add", args).await.expect("call_tool");
-    assert!(matches!(&result.content[0], neutral::Content::Text(t) if t == "5"));
+    assert!(matches!(&result.content[0], neutral::Content::Text { text, .. } if text == "5"));
 
     drop(client); // closes the pipe; the rmcp server's `waiting()` returns.
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;

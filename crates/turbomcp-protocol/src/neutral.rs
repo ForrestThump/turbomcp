@@ -37,41 +37,77 @@ pub mod result_type {
 }
 
 /// A neutral content block. The enum is `#[non_exhaustive]` so further block
-/// kinds (embedded resources, resource links) slot in without breaking callers.
-/// (`PartialEq` only: resource-link annotations carry an `f64` priority.)
+/// kinds (embedded resources, resource links) slot in without breaking callers,
+/// and each variant is `#[non_exhaustive]` so future per-block spec fields slot
+/// in too — construct via [`Content::text`] & co. and match with `..`.
+/// (`PartialEq` only: block annotations carry an `f64` priority.)
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum Content {
     /// Plain UTF-8 text.
-    Text(String),
+    #[non_exhaustive]
+    Text {
+        /// The text.
+        text: String,
+        /// Display annotations for this block (audience/priority/lastModified).
+        annotations: Option<Annotations>,
+        /// Arbitrary `_meta` for this block (namespaced keys per the spec's
+        /// `_meta` conventions). Empty = absent on the wire.
+        meta: Map<String, Value>,
+    },
     /// Base64-encoded image data with its MIME type (e.g. `image/png`).
+    #[non_exhaustive]
     Image {
         /// Base64-encoded image bytes.
         data: String,
         /// The image MIME type.
         mime_type: String,
+        /// Display annotations for this block (audience/priority/lastModified).
+        annotations: Option<Annotations>,
+        /// Arbitrary `_meta` for this block. Empty = absent on the wire.
+        meta: Map<String, Value>,
     },
     /// Base64-encoded audio data with its MIME type (e.g. `audio/wav`).
+    #[non_exhaustive]
     Audio {
         /// Base64-encoded audio bytes.
         data: String,
         /// The audio MIME type.
         mime_type: String,
+        /// Display annotations for this block (audience/priority/lastModified).
+        annotations: Option<Annotations>,
+        /// Arbitrary `_meta` for this block. Empty = absent on the wire.
+        meta: Map<String, Value>,
     },
     /// An embedded resource: the resource's contents inline (text or a base64
-    /// blob), carried in a message rather than referenced by URI.
-    Resource(ResourceContents),
+    /// blob), carried in a message rather than referenced by URI. The block
+    /// carries its own annotations/`_meta`, distinct from the contents'
+    /// [`ResourceContents`] `_meta`.
+    #[non_exhaustive]
+    Resource {
+        /// The embedded resource contents.
+        contents: ResourceContents,
+        /// Display annotations for this block (audience/priority/lastModified).
+        annotations: Option<Annotations>,
+        /// Arbitrary `_meta` for this block. Empty = absent on the wire.
+        meta: Map<String, Value>,
+    },
     /// A link to a resource by URI + descriptor (name/title/MIME/size), without
     /// its contents — the client can `resources/read` it. Boxed: a full
     /// [`Resource`] (annotations/icons/`_meta`) would otherwise dominate the
-    /// enum's size, taxing every text block in a content vector.
+    /// enum's size, taxing every text block in a content vector. The wire
+    /// block's annotations/`_meta` are the resource's own fields.
     ResourceLink(Box<Resource>),
 }
 
 impl Content {
     /// A text content block.
     pub fn text(s: impl Into<String>) -> Self {
-        Self::Text(s.into())
+        Self::Text {
+            text: s.into(),
+            annotations: None,
+            meta: Map::new(),
+        }
     }
 
     /// An image content block from base64 data and a MIME type.
@@ -79,6 +115,8 @@ impl Content {
         Self::Image {
             data: data.into(),
             mime_type: mime_type.into(),
+            annotations: None,
+            meta: Map::new(),
         }
     }
 
@@ -87,17 +125,57 @@ impl Content {
         Self::Audio {
             data: data.into(),
             mime_type: mime_type.into(),
+            annotations: None,
+            meta: Map::new(),
         }
     }
 
     /// An embedded-resource content block carrying the resource contents inline.
     pub fn resource(contents: ResourceContents) -> Self {
-        Self::Resource(contents)
+        Self::Resource {
+            contents,
+            annotations: None,
+            meta: Map::new(),
+        }
     }
 
     /// A resource-link content block referencing a resource by URI.
     pub fn resource_link(resource: Resource) -> Self {
         Self::ResourceLink(Box::new(resource))
+    }
+
+    /// Set this block's display annotations (builder style). On a resource
+    /// link, sets the linked resource's annotations — on the wire they are the
+    /// same fields.
+    #[must_use]
+    pub fn with_annotations(mut self, a: Annotations) -> Self {
+        match &mut self {
+            Self::Text { annotations, .. }
+            | Self::Image { annotations, .. }
+            | Self::Audio { annotations, .. }
+            | Self::Resource { annotations, .. } => *annotations = Some(a),
+            Self::ResourceLink(r) => r.annotations = Some(a),
+        }
+        self
+    }
+
+    /// Add one `_meta` entry to this block (builder style). On a resource
+    /// link, adds to the linked resource's `_meta` — on the wire they are the
+    /// same field.
+    #[must_use]
+    pub fn with_meta_entry(mut self, key: impl Into<String>, value: Value) -> Self {
+        match &mut self {
+            Self::Text { meta, .. }
+            | Self::Image { meta, .. }
+            | Self::Audio { meta, .. }
+            | Self::Resource { meta, .. } => {
+                meta.insert(key.into(), value);
+            }
+            Self::ResourceLink(r) => {
+                r.meta.insert(key.into(), value);
+            }
+        }
+        self
     }
 }
 
@@ -630,11 +708,15 @@ impl Annotations {
 }
 
 /// The contents of a read resource (`resources/read`): UTF-8 text or a
-/// base64-encoded binary blob. `#[non_exhaustive]` so future kinds slot in.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// base64-encoded binary blob. `#[non_exhaustive]` (enum and variants) so
+/// future kinds and per-variant spec fields slot in — construct via
+/// [`ResourceContents::text`]/[`blob`](ResourceContents::blob) and match with
+/// `..`.
+#[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum ResourceContents {
     /// Text contents.
+    #[non_exhaustive]
     Text {
         /// URI these contents belong to.
         uri: String,
@@ -642,8 +724,13 @@ pub enum ResourceContents {
         mime_type: Option<String>,
         /// The text.
         text: String,
+        /// Arbitrary `_meta` for these contents (namespaced keys per the
+        /// spec's `_meta` conventions — e.g. the Apps extension's `_meta.ui`).
+        /// Empty = absent on the wire.
+        meta: Map<String, Value>,
     },
     /// Binary contents, base64-encoded.
+    #[non_exhaustive]
     Blob {
         /// URI these contents belong to.
         uri: String,
@@ -651,6 +738,8 @@ pub enum ResourceContents {
         mime_type: Option<String>,
         /// Base64-encoded bytes.
         blob: String,
+        /// Arbitrary `_meta` for these contents. Empty = absent on the wire.
+        meta: Map<String, Value>,
     },
 }
 
@@ -661,6 +750,7 @@ impl ResourceContents {
             uri: uri.into(),
             mime_type: None,
             text: text.into(),
+            meta: Map::new(),
         }
     }
 
@@ -670,6 +760,7 @@ impl ResourceContents {
             uri: uri.into(),
             mime_type: None,
             blob: blob.into(),
+            meta: Map::new(),
         }
     }
 
@@ -679,6 +770,17 @@ impl ResourceContents {
         match &mut self {
             Self::Text { mime_type, .. } | Self::Blob { mime_type, .. } => {
                 *mime_type = Some(mime.into());
+            }
+        }
+        self
+    }
+
+    /// Add one `_meta` entry to either variant (builder style).
+    #[must_use]
+    pub fn with_meta_entry(mut self, key: impl Into<String>, value: Value) -> Self {
+        match &mut self {
+            Self::Text { meta, .. } | Self::Blob { meta, .. } => {
+                meta.insert(key.into(), value);
             }
         }
         self
@@ -1345,38 +1447,50 @@ impl CompleteParams {
 impl From<Content> for draft::ContentBlock {
     fn from(c: Content) -> Self {
         match c {
-            Content::Text(text) => draft::ContentBlock::TextContent(draft::TextContent {
-                annotations: None,
-                meta: None,
+            Content::Text {
+                text,
+                annotations,
+                meta,
+            } => draft::ContentBlock::TextContent(draft::TextContent {
+                annotations: annotations.map(Into::into),
+                meta: (!meta.is_empty()).then_some(draft::MetaObject(meta)),
                 text,
                 type_: "text".to_string(),
             }),
-            Content::Image { data, mime_type } => {
-                draft::ContentBlock::ImageContent(draft::ImageContent {
-                    annotations: None,
-                    data,
-                    meta: None,
-                    mime_type,
-                    type_: "image".to_string(),
-                })
-            }
-            Content::Audio { data, mime_type } => {
-                draft::ContentBlock::AudioContent(draft::AudioContent {
-                    annotations: None,
-                    data,
-                    meta: None,
-                    mime_type,
-                    type_: "audio".to_string(),
-                })
-            }
-            Content::Resource(contents) => {
-                draft::ContentBlock::EmbeddedResource(draft::EmbeddedResource {
-                    annotations: None,
-                    meta: None,
-                    resource: contents.into(),
-                    type_: "resource".to_string(),
-                })
-            }
+            Content::Image {
+                data,
+                mime_type,
+                annotations,
+                meta,
+            } => draft::ContentBlock::ImageContent(draft::ImageContent {
+                annotations: annotations.map(Into::into),
+                data,
+                meta: (!meta.is_empty()).then_some(draft::MetaObject(meta)),
+                mime_type,
+                type_: "image".to_string(),
+            }),
+            Content::Audio {
+                data,
+                mime_type,
+                annotations,
+                meta,
+            } => draft::ContentBlock::AudioContent(draft::AudioContent {
+                annotations: annotations.map(Into::into),
+                data,
+                meta: (!meta.is_empty()).then_some(draft::MetaObject(meta)),
+                mime_type,
+                type_: "audio".to_string(),
+            }),
+            Content::Resource {
+                contents,
+                annotations,
+                meta,
+            } => draft::ContentBlock::EmbeddedResource(draft::EmbeddedResource {
+                annotations: annotations.map(Into::into),
+                meta: (!meta.is_empty()).then_some(draft::MetaObject(meta)),
+                resource: contents.into(),
+                type_: "resource".to_string(),
+            }),
             Content::ResourceLink(r) => {
                 let r = *r;
                 draft::ContentBlock::ResourceLink(draft::ResourceLink {
@@ -1512,9 +1626,10 @@ impl From<ResourceContents> for draft::ReadResourceResultContentsItem {
                 uri,
                 mime_type,
                 text,
+                meta,
             } => draft::ReadResourceResultContentsItem::TextResourceContents(
                 draft::TextResourceContents {
-                    meta: None,
+                    meta: (!meta.is_empty()).then_some(draft::MetaObject(meta)),
                     mime_type,
                     text,
                     uri,
@@ -1524,10 +1639,11 @@ impl From<ResourceContents> for draft::ReadResourceResultContentsItem {
                 uri,
                 mime_type,
                 blob,
+                meta,
             } => draft::ReadResourceResultContentsItem::BlobResourceContents(
                 draft::BlobResourceContents {
                     blob,
-                    meta: None,
+                    meta: (!meta.is_empty()).then_some(draft::MetaObject(meta)),
                     mime_type,
                     uri,
                 },
@@ -1543,9 +1659,10 @@ impl From<ResourceContents> for draft::EmbeddedResourceResource {
                 uri,
                 mime_type,
                 text,
+                meta,
             } => {
                 draft::EmbeddedResourceResource::TextResourceContents(draft::TextResourceContents {
-                    meta: None,
+                    meta: (!meta.is_empty()).then_some(draft::MetaObject(meta)),
                     mime_type,
                     text,
                     uri,
@@ -1555,10 +1672,11 @@ impl From<ResourceContents> for draft::EmbeddedResourceResource {
                 uri,
                 mime_type,
                 blob,
+                meta,
             } => {
                 draft::EmbeddedResourceResource::BlobResourceContents(draft::BlobResourceContents {
                     blob,
-                    meta: None,
+                    meta: (!meta.is_empty()).then_some(draft::MetaObject(meta)),
                     mime_type,
                     uri,
                 })
@@ -1737,38 +1855,50 @@ impl From<CompleteResult> for draft::CompleteResult {
 impl From<Content> for legacy::ContentBlock {
     fn from(c: Content) -> Self {
         match c {
-            Content::Text(text) => legacy::ContentBlock::TextContent(legacy::TextContent {
-                annotations: None,
-                meta: Map::new(),
+            Content::Text {
+                text,
+                annotations,
+                meta,
+            } => legacy::ContentBlock::TextContent(legacy::TextContent {
+                annotations: annotations.map(Into::into),
+                meta,
                 text,
                 type_: "text".to_string(),
             }),
-            Content::Image { data, mime_type } => {
-                legacy::ContentBlock::ImageContent(legacy::ImageContent {
-                    annotations: None,
-                    data,
-                    meta: Map::new(),
-                    mime_type,
-                    type_: "image".to_string(),
-                })
-            }
-            Content::Audio { data, mime_type } => {
-                legacy::ContentBlock::AudioContent(legacy::AudioContent {
-                    annotations: None,
-                    data,
-                    meta: Map::new(),
-                    mime_type,
-                    type_: "audio".to_string(),
-                })
-            }
-            Content::Resource(contents) => {
-                legacy::ContentBlock::EmbeddedResource(legacy::EmbeddedResource {
-                    annotations: None,
-                    meta: Map::new(),
-                    resource: contents.into(),
-                    type_: "resource".to_string(),
-                })
-            }
+            Content::Image {
+                data,
+                mime_type,
+                annotations,
+                meta,
+            } => legacy::ContentBlock::ImageContent(legacy::ImageContent {
+                annotations: annotations.map(Into::into),
+                data,
+                meta,
+                mime_type,
+                type_: "image".to_string(),
+            }),
+            Content::Audio {
+                data,
+                mime_type,
+                annotations,
+                meta,
+            } => legacy::ContentBlock::AudioContent(legacy::AudioContent {
+                annotations: annotations.map(Into::into),
+                data,
+                meta,
+                mime_type,
+                type_: "audio".to_string(),
+            }),
+            Content::Resource {
+                contents,
+                annotations,
+                meta,
+            } => legacy::ContentBlock::EmbeddedResource(legacy::EmbeddedResource {
+                annotations: annotations.map(Into::into),
+                meta,
+                resource: contents.into(),
+                type_: "resource".to_string(),
+            }),
             Content::ResourceLink(r) => {
                 let r = *r;
                 legacy::ContentBlock::ResourceLink(legacy::ResourceLink {
@@ -1931,9 +2061,10 @@ impl From<ResourceContents> for legacy::ReadResourceResultContentsItem {
                 uri,
                 mime_type,
                 text,
+                meta,
             } => legacy::ReadResourceResultContentsItem::TextResourceContents(
                 legacy::TextResourceContents {
-                    meta: Map::new(),
+                    meta,
                     mime_type,
                     text,
                     uri,
@@ -1943,10 +2074,11 @@ impl From<ResourceContents> for legacy::ReadResourceResultContentsItem {
                 uri,
                 mime_type,
                 blob,
+                meta,
             } => legacy::ReadResourceResultContentsItem::BlobResourceContents(
                 legacy::BlobResourceContents {
                     blob,
-                    meta: Map::new(),
+                    meta,
                     mime_type,
                     uri,
                 },
@@ -1962,9 +2094,10 @@ impl From<ResourceContents> for legacy::EmbeddedResourceResource {
                 uri,
                 mime_type,
                 text,
+                meta,
             } => legacy::EmbeddedResourceResource::TextResourceContents(
                 legacy::TextResourceContents {
-                    meta: Map::new(),
+                    meta,
                     mime_type,
                     text,
                     uri,
@@ -1974,10 +2107,11 @@ impl From<ResourceContents> for legacy::EmbeddedResourceResource {
                 uri,
                 mime_type,
                 blob,
+                meta,
             } => legacy::EmbeddedResourceResource::BlobResourceContents(
                 legacy::BlobResourceContents {
                     blob,
-                    meta: Map::new(),
+                    meta,
                     mime_type,
                     uri,
                 },
@@ -2124,16 +2258,28 @@ impl From<CompleteResult> for legacy::CompleteResult {
 impl From<draft::ContentBlock> for Content {
     fn from(c: draft::ContentBlock) -> Self {
         match c {
-            draft::ContentBlock::TextContent(t) => Content::Text(t.text),
+            draft::ContentBlock::TextContent(t) => Content::Text {
+                text: t.text,
+                annotations: t.annotations.map(Into::into),
+                meta: t.meta.map(|m| m.0).unwrap_or_default(),
+            },
             draft::ContentBlock::ImageContent(i) => Content::Image {
                 data: i.data,
                 mime_type: i.mime_type,
+                annotations: i.annotations.map(Into::into),
+                meta: i.meta.map(|m| m.0).unwrap_or_default(),
             },
             draft::ContentBlock::AudioContent(a) => Content::Audio {
                 data: a.data,
                 mime_type: a.mime_type,
+                annotations: a.annotations.map(Into::into),
+                meta: a.meta.map(|m| m.0).unwrap_or_default(),
             },
-            draft::ContentBlock::EmbeddedResource(e) => Content::Resource(e.resource.into()),
+            draft::ContentBlock::EmbeddedResource(e) => Content::Resource {
+                contents: e.resource.into(),
+                annotations: e.annotations.map(Into::into),
+                meta: e.meta.map(|m| m.0).unwrap_or_default(),
+            },
             draft::ContentBlock::ResourceLink(l) => Content::ResourceLink(Box::new(l.into())),
         }
     }
@@ -2259,11 +2405,13 @@ impl From<draft::EmbeddedResourceResource> for ResourceContents {
                 uri: t.uri,
                 mime_type: t.mime_type,
                 text: t.text,
+                meta: t.meta.map(|m| m.0).unwrap_or_default(),
             },
             draft::EmbeddedResourceResource::BlobResourceContents(b) => ResourceContents::Blob {
                 uri: b.uri,
                 mime_type: b.mime_type,
                 blob: b.blob,
+                meta: b.meta.map(|m| m.0).unwrap_or_default(),
             },
         }
     }
@@ -2277,6 +2425,7 @@ impl From<draft::ReadResourceResultContentsItem> for ResourceContents {
                     uri: t.uri,
                     mime_type: t.mime_type,
                     text: t.text,
+                    meta: t.meta.map(|m| m.0).unwrap_or_default(),
                 }
             }
             draft::ReadResourceResultContentsItem::BlobResourceContents(b) => {
@@ -2284,6 +2433,7 @@ impl From<draft::ReadResourceResultContentsItem> for ResourceContents {
                     uri: b.uri,
                     mime_type: b.mime_type,
                     blob: b.blob,
+                    meta: b.meta.map(|m| m.0).unwrap_or_default(),
                 }
             }
         }
@@ -2437,16 +2587,28 @@ impl From<draft::CompleteResult> for CompleteResult {
 impl From<legacy::ContentBlock> for Content {
     fn from(c: legacy::ContentBlock) -> Self {
         match c {
-            legacy::ContentBlock::TextContent(t) => Content::Text(t.text),
+            legacy::ContentBlock::TextContent(t) => Content::Text {
+                text: t.text,
+                annotations: t.annotations.map(Into::into),
+                meta: t.meta,
+            },
             legacy::ContentBlock::ImageContent(i) => Content::Image {
                 data: i.data,
                 mime_type: i.mime_type,
+                annotations: i.annotations.map(Into::into),
+                meta: i.meta,
             },
             legacy::ContentBlock::AudioContent(a) => Content::Audio {
                 data: a.data,
                 mime_type: a.mime_type,
+                annotations: a.annotations.map(Into::into),
+                meta: a.meta,
             },
-            legacy::ContentBlock::EmbeddedResource(e) => Content::Resource(e.resource.into()),
+            legacy::ContentBlock::EmbeddedResource(e) => Content::Resource {
+                contents: e.resource.into(),
+                annotations: e.annotations.map(Into::into),
+                meta: e.meta,
+            },
             legacy::ContentBlock::ResourceLink(l) => Content::ResourceLink(Box::new(l.into())),
         }
     }
@@ -2569,11 +2731,13 @@ impl From<legacy::EmbeddedResourceResource> for ResourceContents {
                 uri: t.uri,
                 mime_type: t.mime_type,
                 text: t.text,
+                meta: t.meta,
             },
             legacy::EmbeddedResourceResource::BlobResourceContents(b) => ResourceContents::Blob {
                 uri: b.uri,
                 mime_type: b.mime_type,
                 blob: b.blob,
+                meta: b.meta,
             },
         }
     }
@@ -2587,6 +2751,7 @@ impl From<legacy::ReadResourceResultContentsItem> for ResourceContents {
                     uri: t.uri,
                     mime_type: t.mime_type,
                     text: t.text,
+                    meta: t.meta,
                 }
             }
             legacy::ReadResourceResultContentsItem::BlobResourceContents(b) => {
@@ -2594,6 +2759,7 @@ impl From<legacy::ReadResourceResultContentsItem> for ResourceContents {
                     uri: b.uri,
                     mime_type: b.mime_type,
                     blob: b.blob,
+                    meta: b.meta,
                 }
             }
         }
@@ -3105,13 +3271,129 @@ mod tests {
     }
 
     #[test]
+    fn content_block_annotations_and_meta_round_trip_both_wires() {
+        let annotations = Annotations::new()
+            .for_audience(Role::User)
+            .priority(0.5)
+            .last_modified("2026-07-21T00:00:00Z");
+        for content in [
+            Content::text("hi"),
+            Content::image("aGk=", "image/png"),
+            Content::audio("aGk=", "audio/wav"),
+        ] {
+            let content = content
+                .with_annotations(annotations.clone())
+                .with_meta_entry("com.example/source", json!("cache"));
+
+            let wire: draft::ContentBlock = content.clone().into();
+            let v = serde_json::to_value(&wire).unwrap();
+            // Exact spec wire names on the block itself.
+            assert_eq!(v["annotations"]["audience"], json!(["user"]), "{v}");
+            assert_eq!(v["annotations"]["priority"], json!(0.5));
+            assert_eq!(v["annotations"]["lastModified"], "2026-07-21T00:00:00Z");
+            assert_eq!(v["_meta"]["com.example/source"], json!("cache"));
+            let back: Content = wire.into();
+            assert_eq!(back, content);
+
+            let wire: legacy::ContentBlock = content.clone().into();
+            let v = serde_json::to_value(&wire).unwrap();
+            assert_eq!(v["annotations"]["priority"], json!(0.5));
+            assert_eq!(v["_meta"]["com.example/source"], json!("cache"));
+            let back: Content = wire.into();
+            assert_eq!(back, content);
+        }
+    }
+
+    #[test]
+    fn embedded_resource_block_and_contents_meta_round_trip_both_wires() {
+        // Block-level annotations/_meta and the inner contents' _meta are
+        // distinct spec surfaces; both must survive.
+        let contents = ResourceContents::text("ui://app", "<html></html>")
+            .with_mime_type("text/html;profile=mcp-app")
+            .with_meta_entry("io.modelcontextprotocol/ui", json!({"prefersBorder": true}));
+        let content = Content::resource(contents)
+            .with_annotations(Annotations::new().for_audience(Role::User))
+            .with_meta_entry("com.example/origin", json!("embedded"));
+
+        let wire: draft::ContentBlock = content.clone().into();
+        let v = serde_json::to_value(&wire).unwrap();
+        assert_eq!(v["_meta"]["com.example/origin"], json!("embedded"));
+        assert_eq!(
+            v["resource"]["_meta"]["io.modelcontextprotocol/ui"]["prefersBorder"],
+            json!(true)
+        );
+        let back: Content = wire.into();
+        assert_eq!(back, content);
+
+        let wire: legacy::ContentBlock = content.clone().into();
+        let v = serde_json::to_value(&wire).unwrap();
+        assert_eq!(v["_meta"]["com.example/origin"], json!("embedded"));
+        assert_eq!(
+            v["resource"]["_meta"]["io.modelcontextprotocol/ui"]["prefersBorder"],
+            json!(true)
+        );
+        let back: Content = wire.into();
+        assert_eq!(back, content);
+    }
+
+    #[test]
+    fn read_resource_contents_meta_round_trips_both_wires() {
+        let make = || {
+            ReadResourceResult::new(alloc::vec![
+                ResourceContents::text("file://a", "hi")
+                    .with_meta_entry("com.example/etag", json!("abc")),
+                ResourceContents::blob("file://b", "Zm9v")
+                    .with_meta_entry("com.example/etag", json!("def")),
+            ])
+        };
+        let assert_meta = |back: &ReadResourceResult| {
+            let (ResourceContents::Text { meta, .. }, ResourceContents::Blob { meta: bmeta, .. }) =
+                (&back.contents[0], &back.contents[1])
+            else {
+                panic!("variants survive");
+            };
+            assert_eq!(meta["com.example/etag"], json!("abc"));
+            assert_eq!(bmeta["com.example/etag"], json!("def"));
+        };
+
+        let wire: draft::ReadResourceResult = make().into();
+        let v = serde_json::to_value(&wire).unwrap();
+        assert_eq!(v["contents"][0]["_meta"]["com.example/etag"], json!("abc"));
+        let back: ReadResourceResult = wire.into();
+        assert_meta(&back);
+
+        let wire: legacy::ReadResourceResult = make().into();
+        let v = serde_json::to_value(&wire).unwrap();
+        assert_eq!(v["contents"][1]["_meta"]["com.example/etag"], json!("def"));
+        let back: ReadResourceResult = wire.into();
+        assert_meta(&back);
+    }
+
+    #[test]
+    fn absent_content_metadata_stays_absent_on_the_wire() {
+        let wire: draft::ContentBlock = Content::text("plain").into();
+        let v = serde_json::to_value(&wire).unwrap();
+        assert!(v.get("annotations").is_none(), "no annotations key: {v}");
+        assert!(v.get("_meta").is_none(), "no _meta key: {v}");
+
+        let wire: legacy::ContentBlock = Content::text("plain").into();
+        let v = serde_json::to_value(&wire).unwrap();
+        assert!(v.get("annotations").is_none(), "no annotations key: {v}");
+        assert!(v.get("_meta").is_none(), "no _meta key: {v}");
+
+        let wire: draft::ReadResourceResult = ReadResourceResult::text("file://a", "hi").into();
+        let v = serde_json::to_value(&wire).unwrap();
+        assert!(v["contents"][0].get("_meta").is_none(), "no _meta key: {v}");
+    }
+
+    #[test]
     fn draft_call_result_round_trips_content_and_is_error() {
         let original = CallToolResult::error("boom");
         let wire: draft::CallToolResult = original.into();
         let back: CallToolResult = wire.into();
         assert!(back.is_error);
         assert_eq!(back.content.len(), 1);
-        assert!(matches!(&back.content[0], Content::Text(t) if t == "boom"));
+        assert!(matches!(&back.content[0], Content::Text { text, .. } if text == "boom"));
     }
 
     #[test]
@@ -3134,7 +3416,7 @@ mod tests {
         let back: ReadResourceResult = wire.into();
         assert_eq!(back.contents.len(), 2);
         assert!(
-            matches!(&back.contents[0], ResourceContents::Text { uri, text, mime_type }
+            matches!(&back.contents[0], ResourceContents::Text { uri, text, mime_type, .. }
                 if uri == "file://a" && text == "hi" && mime_type.as_deref() == Some("text/plain"))
         );
         assert!(
@@ -3160,7 +3442,7 @@ mod tests {
         let wire: legacy::GetPromptResult = get.into();
         let back: GetPromptResult = wire.into();
         assert_eq!(back.description.as_deref(), Some("greeting"));
-        assert!(matches!(&back.messages[0].content, Content::Text(t) if t == "hello"));
+        assert!(matches!(&back.messages[0].content, Content::Text { text, .. } if text == "hello"));
         assert!(matches!(back.messages[0].role, Role::User));
 
         let complete = CompleteResult::new(alloc::vec!["foo".to_string()])

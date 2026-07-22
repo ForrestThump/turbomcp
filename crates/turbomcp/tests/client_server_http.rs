@@ -61,7 +61,7 @@ async fn exercise(client: &Client) {
     let mut args = Map::new();
     args.insert("word".into(), json!("hi"));
     let result = client.call_tool("shout", args).await.expect("call_tool");
-    assert!(matches!(&result.content[0], neutral::Content::Text(t) if t == "HI"));
+    assert!(matches!(&result.content[0], neutral::Content::Text { text, .. } if text == "HI"));
 
     let read = client
         .read_resource("demo://greeting")
