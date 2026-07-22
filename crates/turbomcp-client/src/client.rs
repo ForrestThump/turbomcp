@@ -457,9 +457,70 @@ impl Client {
         name: impl Into<String>,
         arguments: Map<String, Value>,
     ) -> ClientResult<neutral::CallToolResult> {
-        let name = name.into();
-        let params = self.tool_call_params(&name, &arguments);
-        let mut v = match self.mrtr_request(request::TOOLS_CALL, params).await {
+        self.call_tool_with(&name.into(), &arguments, None).await
+    }
+
+    /// Call a tool requesting task-augmented execution (core Tasks,
+    /// `2025-11-25` spec §Creating Tasks).
+    ///
+    /// On the legacy path the request carries the spec's `task` field; a
+    /// Tasks-enabled server answers a `CreateTaskResult` immediately and this
+    /// method drives the lifecycle transparently — polling `tasks/get` at the
+    /// server-suggested cadence, then retrieving the outcome via
+    /// `tasks/result`, which answers exactly what the un-augmented call would
+    /// have. A server without Tasks ignores the augmentation and answers
+    /// inline (spec §Task Support and Handling), so the call degrades to a
+    /// plain [`call_tool`](Self::call_tool).
+    ///
+    /// `ttl_ms` requests a retention window for the task and its result; the
+    /// server reports (and may clamp) the TTL it actually applied, which also
+    /// bounds how long this method will poll.
+    ///
+    /// On the draft path task augmentation is server-initiated (the SEP-2663
+    /// Tasks *extension*), so no `task` field is sent and this behaves exactly
+    /// like [`call_tool`](Self::call_tool) — including transparently driving a
+    /// `resultType: "task"` answer.
+    ///
+    /// # Errors
+    /// Propagates RPC and decode failures. A `failed` task surfaces the
+    /// underlying call's JSON-RPC error as [`ClientError::Rpc`]; a `cancelled`
+    /// task is a [`ClientError::Protocol`]; a task still unfinished at its
+    /// server-reported TTL is a [`ClientError::Timeout`].
+    pub async fn call_tool_task(
+        &self,
+        name: impl Into<String>,
+        arguments: Map<String, Value>,
+        ttl_ms: Option<i64>,
+    ) -> ClientResult<neutral::CallToolResult> {
+        let task = match ttl_ms {
+            Some(ttl) => json!({ "ttl": ttl }),
+            None => json!({}),
+        };
+        self.call_tool_with(&name.into(), &arguments, Some(&task))
+            .await
+    }
+
+    /// The shared `tools/call` path: issue the (optionally task-augmented)
+    /// call with the `-32020` refresh-and-retry-once recovery, then settle
+    /// whatever came back into a final `CallToolResult`.
+    async fn call_tool_with(
+        &self,
+        name: &str,
+        arguments: &Map<String, Value>,
+        task: Option<&Value>,
+    ) -> ClientResult<neutral::CallToolResult> {
+        let build = |client: &Self| {
+            let mut params = client.tool_call_params(name, arguments);
+            // The `task` augmentation is a 2025-11-25 request shape; the draft
+            // moved task creation to the server side (SEP-2663 extension).
+            if let Some(task) = task
+                && client.version != ProtocolVersion::Draft
+            {
+                params.insert("task".into(), task.clone());
+            }
+            params
+        };
+        let v = match self.mrtr_request(request::TOOLS_CALL, build(self)).await {
             // `-32020` HeaderMismatch: our mirror headers may be built from a
             // stale schema. Per the transports spec, refresh `tools/list`
             // (which rebuilds the header cache) and retry once.
@@ -469,20 +530,35 @@ impl Client {
                     "HeaderMismatch (-32020); refreshing tools/list and retrying once"
                 );
                 let _ = self.list_tools(None).await;
-                let params = self.tool_call_params(&name, &arguments);
-                self.mrtr_request(request::TOOLS_CALL, params).await?
+                self.mrtr_request(request::TOOLS_CALL, build(self)).await?
             }
             other => other?,
         };
-        // A server MAY answer with a task handle instead of the result
+        self.settle_tool_call(v).await
+    }
+
+    /// Settle a `tools/call` answer into its final result value and decode it.
+    /// Either wire family may hand back a task instead of the result; both are
+    /// driven transparently — use [`task_get`](Self::task_get) /
+    /// [`task_cancel`](Self::task_cancel) directly to manage a lifecycle
+    /// yourself.
+    async fn settle_tool_call(&self, mut v: Value) -> ClientResult<neutral::CallToolResult> {
+        // Draft: a server MAY answer with a task handle instead of the result
         // (`resultType: "task"`, SEP-2663 — only ever sent to clients that
-        // declared the Tasks extension capability). Per the SEP's guidance
-        // for fixed-shape APIs, drive the polling flow transparently and
-        // surface only the final result; use [`task_get`](Self::task_get) /
-        // [`task_cancel`](Self::task_cancel) directly to manage the
-        // lifecycle yourself.
+        // declared the Tasks extension capability). Per the SEP's guidance for
+        // fixed-shape APIs, drive the polling flow and surface only the final
+        // result.
         if v.get("resultType").and_then(Value::as_str) == Some(RESULT_TYPE_TASK) {
             v = self.drive_task(v).await?;
+        }
+        // Legacy: a task-augmented call answers `CreateTaskResult { task }`
+        // (core Tasks, `2025-11-25`). `content` is required on a real
+        // `CallToolResult`, so its absence + a `task` handle is unambiguous.
+        else if v.get("content").is_none()
+            && let Some(handle) = v.get("task")
+            && handle.get("taskId").is_some()
+        {
+            v = self.drive_legacy_task(handle.clone()).await?;
         }
         self.decode::<draft::CallToolResult, legacy::CallToolResult, _>(v)
     }
@@ -780,6 +856,63 @@ impl Client {
             }
             let interval = current
                 .get("pollIntervalMs")
+                .and_then(Value::as_u64)
+                .unwrap_or(DEFAULT_TASK_POLL_MS)
+                .max(MIN_TASK_POLL_MS);
+            tokio::time::sleep(Duration::from_millis(interval)).await;
+            current = self.task_get(&task_id).await?;
+        }
+    }
+
+    /// Drive a `2025-11-25` core-Tasks handle to its terminal state (spec
+    /// §Polling and §Result Retrieval): poll `tasks/get` at the
+    /// server-suggested `pollInterval`, then fetch the outcome via
+    /// `tasks/result` — which answers exactly what the underlying request
+    /// would have, so a `failed` task surfaces its original JSON-RPC error
+    /// through normal RPC propagation. A `cancelled` task is a protocol
+    /// error; a finite `ttl` is the polling backstop. Mid-task server→client
+    /// requests (elicitation tagged with the related-task `_meta`) arrive
+    /// over the normal channel and are answered by the connection actor, so
+    /// `input_required` simply keeps polling.
+    async fn drive_legacy_task(&self, mut current: Value) -> ClientResult<Value> {
+        let task_id = current
+            .get("taskId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ClientError::Decode("CreateTaskResult without a taskId".into()))?
+            .to_owned();
+        // TTL backstop, measured from now (at or after `createdAt`, so never
+        // stricter than the spec allows). Legacy types it `ttl` (ms);
+        // `null` ⇒ poll indefinitely.
+        let deadline = current
+            .get("ttl")
+            .and_then(Value::as_u64)
+            .map(|ms| std::time::Instant::now() + Duration::from_millis(ms));
+        loop {
+            match current.get("status").and_then(Value::as_str) {
+                // Terminal either way: `tasks/result` answers the underlying
+                // call's success value or its JSON-RPC error verbatim.
+                Some("completed" | "failed") => {
+                    let mut params = Map::new();
+                    params.insert("taskId".into(), json!(task_id));
+                    return self.versioned_request(request::TASKS_RESULT, params).await;
+                }
+                Some("cancelled") => {
+                    return Err(ClientError::Protocol(format!(
+                        "task {task_id} was cancelled"
+                    )));
+                }
+                // `working`, `input_required` (input flows over the normal
+                // server→client channel on this path), or a status from a
+                // newer revision → keep polling.
+                _ => {}
+            }
+            if let Some(deadline) = deadline
+                && std::time::Instant::now() >= deadline
+            {
+                return Err(ClientError::Timeout);
+            }
+            let interval = current
+                .get("pollInterval")
                 .and_then(Value::as_u64)
                 .unwrap_or(DEFAULT_TASK_POLL_MS)
                 .max(MIN_TASK_POLL_MS);

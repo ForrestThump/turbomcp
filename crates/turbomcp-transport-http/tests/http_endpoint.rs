@@ -68,6 +68,7 @@ fn app(config: HttpConfig) -> axum::Router {
 fn post(body: &str) -> Request<Body> {
     Request::builder()
         .method("POST")
+        .header("accept", "application/json, text/event-stream")
         .uri("/mcp")
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(body.to_owned()))
@@ -79,6 +80,7 @@ fn post(body: &str) -> Request<Body> {
 fn draft_post(body: &str, method: &str, name: Option<&str>) -> Request<Body> {
     let mut req = Request::builder()
         .method("POST")
+        .header("accept", "application/json, text/event-stream")
         .uri("/mcp")
         .header(header::CONTENT_TYPE, "application/json")
         .header("MCP-Protocol-Version", "2026-07-28")
@@ -198,6 +200,7 @@ async fn draft_unknown_method_is_http_404_with_32601_body() {
 async fn get_is_405_until_subscriptions() {
     let req = Request::builder()
         .method("GET")
+        .header("accept", "text/event-stream")
         .uri("/mcp")
         .body(Body::empty())
         .unwrap();
@@ -211,6 +214,7 @@ async fn disallowed_origin_is_rejected() {
     // Default policy: an Origin that isn't allowlisted is forbidden.
     let req = Request::builder()
         .method("POST")
+        .header("accept", "application/json, text/event-stream")
         .uri("/mcp")
         .header(header::CONTENT_TYPE, "application/json")
         .header(header::ORIGIN, "https://evil.example.com")
@@ -226,6 +230,7 @@ async fn disallowed_origin_is_rejected() {
 async fn allowlisted_origin_passes() {
     let req = Request::builder()
         .method("POST")
+        .header("accept", "application/json, text/event-stream")
         .uri("/mcp")
         .header(header::CONTENT_TYPE, "application/json")
         .header(header::ORIGIN, "https://app.example.com")
@@ -244,6 +249,7 @@ async fn disallowed_host_is_rejected() {
     // in depth (covers non-browser clients that don't send an Origin).
     let req = Request::builder()
         .method("POST")
+        .header("accept", "application/json, text/event-stream")
         .uri("/mcp")
         .header(header::CONTENT_TYPE, "application/json")
         .header(header::HOST, "evil.example.com")
@@ -260,6 +266,7 @@ async fn disallowed_host_is_rejected() {
 async fn allowlisted_host_passes() {
     let req = Request::builder()
         .method("POST")
+        .header("accept", "application/json, text/event-stream")
         .uri("/mcp")
         .header(header::CONTENT_TYPE, "application/json")
         .header(header::HOST, "mcp.example.com")

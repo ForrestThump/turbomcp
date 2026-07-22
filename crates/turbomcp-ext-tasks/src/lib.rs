@@ -168,6 +168,16 @@ impl TasksExtension {
         self
     }
 
+    /// Bound the number of live tasks the registry holds (default: 1024).
+    /// At capacity, taskification degrades gracefully — the next eligible
+    /// `tools/call` runs synchronously instead of failing — until an expiry
+    /// or terminal purge frees a slot. Call before registration.
+    #[must_use]
+    pub fn capacity(mut self, capacity: usize) -> Self {
+        self.store = Arc::new(DraftTaskStore::with_capacity(capacity));
+        self
+    }
+
     /// Whether `name` should run as a task under `ctx`.
     fn should_task(&self, name: &str, ctx: &RequestContext) -> bool {
         self.taskify

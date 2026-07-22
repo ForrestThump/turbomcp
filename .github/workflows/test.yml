@@ -146,11 +146,12 @@ jobs:
     # Short deterministic runs (not a soak): each target must build under the
     # sanitizer and survive a bounded run without a crash. Catches regressions
     # in the untrusted-input decoders (wire codec, Mcp-Param header sentinel,
-    # URI-template matcher) on every push. Longer campaigns run out of band.
+    # URI-template matcher, and the sonic-vs-serde differential) on every
+    # push. Longer campaigns run out of band.
     - name: Fuzz each target briefly
       working-directory: fuzz
       run: |
-        for target in codec_decode mcp_header_codec uri_template; do
+        for target in codec_decode mcp_header_codec uri_template sonic_decode; do
           echo "::group::fuzz $target"
           cargo +nightly fuzz run "$target" -- -max_total_time=30 -rss_limit_mb=4096
           echo "::endgroup::"

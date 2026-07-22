@@ -13,7 +13,10 @@
 //! ## Endpoint behavior (dual-stack)
 //!
 //! - **`POST {path}`** — body is one JSON-RPC message (batches are not supported,
-//!   per PLAN §13.1). A notification yields `202 Accepted` with no body. A
+//!   per PLAN §13.1). The client MUST list both `application/json` and
+//!   `text/event-stream` in `Accept` (`406` otherwise; RFC 9110 media ranges —
+//!   wildcards, `q=` parameters — are honored), and a `GET` MUST list
+//!   `text/event-stream`. A notification yields `202 Accepted` with no body. A
 //!   request yields either `200 application/json` with the response, or — if
 //!   the handler emits server→client messages mid-flight (inline bidi
 //!   requests on the legacy path, progress, log messages) — a
@@ -598,6 +601,15 @@ where
     if let Some(rejection) = check_host(&state.hosts, &headers) {
         return rejection;
     }
+    // Transports spec §Sending Messages to the Server: the client MUST list
+    // both `application/json` and `text/event-stream` in `Accept` — a POST
+    // may answer with either.
+    if !(accepts(&headers, &mime::APPLICATION_JSON) && accepts(&headers, &mime::TEXT_EVENT_STREAM))
+    {
+        return not_acceptable_rejection(
+            "POST requires an Accept header listing both application/json and text/event-stream",
+        );
+    }
 
     let mut msg: JsonRpcMessage = match state.codec.decode(&body) {
         Ok(msg) => msg,
@@ -1045,6 +1057,11 @@ where
     if let Some(rejection) = check_host(&state.hosts, &headers) {
         return rejection;
     }
+    // Transports spec §Listening for Messages from the Server: the client
+    // MUST list `text/event-stream` in `Accept`.
+    if !accepts(&headers, &mime::TEXT_EVENT_STREAM) {
+        return not_acceptable_rejection("GET requires an Accept header listing text/event-stream");
+    }
     // The GET stream is part of the protected resource; require auth too.
     let subject = match enforce_auth(&state, &headers, None).await {
         Ok(subject) => subject,
@@ -1343,6 +1360,37 @@ fn session_required_rejection() -> Response {
         },
     });
     (StatusCode::BAD_REQUEST, Json(body)).into_response()
+}
+
+/// Whether the request's `Accept` header lists `required` as supported.
+/// Media ranges are matched per RFC 9110 §12.5.1 — `*/*` and `type/*`
+/// wildcards count, and parameters (`;q=…`) are ignored for the "listed as
+/// supported" check the MCP transports spec makes. A missing `Accept` header
+/// fails: the spec says the client MUST include one.
+fn accepts(headers: &HeaderMap, required: &mime::Mime) -> bool {
+    let Some(accept) = headers.get(header::ACCEPT).and_then(|v| v.to_str().ok()) else {
+        return false;
+    };
+    accept
+        .split(',')
+        .filter_map(|part| part.trim().parse::<mime::Mime>().ok())
+        .any(|range| {
+            (range.type_() == mime::STAR || range.type_() == required.type_())
+                && (range.subtype() == mime::STAR || range.subtype() == required.subtype())
+        })
+}
+
+/// `406` + a JSON-RPC error body for a request whose `Accept` header doesn't
+/// cover the response types this endpoint produces (transports spec: POST
+/// clients MUST list both `application/json` and `text/event-stream`; GET
+/// clients MUST list `text/event-stream`).
+fn not_acceptable_rejection(detail: &str) -> Response {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": null,
+        "error": { "code": -32000, "message": format!("not acceptable: {detail}") },
+    });
+    (StatusCode::NOT_ACCEPTABLE, Json(body)).into_response()
 }
 
 /// Returns `Some(rejection)` if the request's `Origin` is disallowed, else `None`.

@@ -124,6 +124,7 @@ async fn both_versions_over_http() {
     let post = |body: Value, headers: Vec<(&'static str, String)>| {
         let mut req = Request::builder()
             .method("POST")
+            .header("accept", "application/json, text/event-stream")
             .uri("/mcp")
             .header(header::CONTENT_TYPE, "application/json");
         for (k, v) in headers {

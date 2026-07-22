@@ -64,6 +64,7 @@ async fn server_validates_mirror_headers_against_the_body() {
     // 400 + -32020. Headers are validation mirrors — never argument sources.
     let resp = http
         .post(&url)
+        .header("accept", "application/json, text/event-stream")
         .header("MCP-Protocol-Version", "2026-07-28")
         .header("Mcp-Method", "tools/call")
         .header("Mcp-Name", "locate")
@@ -79,6 +80,7 @@ async fn server_validates_mirror_headers_against_the_body() {
     // A matching mirror is served normally.
     let resp = http
         .post(&url)
+        .header("accept", "application/json, text/event-stream")
         .header("MCP-Protocol-Version", "2026-07-28")
         .header("Mcp-Method", "tools/call")
         .header("Mcp-Name", "locate")

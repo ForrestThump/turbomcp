@@ -359,3 +359,32 @@ async fn unknown_methods_are_method_not_found() {
     let out = call(&mut svc, JsonRpcRequest::new(2, "also/bogus", None)).await;
     assert_eq!(out["error"]["code"], -32601, "{out}");
 }
+
+/// JSON-RPC 2.0 §4: a frame *declaring* a version other than "2.0" is an
+/// Invalid Request. A request answers `-32600`; a notification has no id to
+/// answer with and is dropped. (A frame omitting the field entirely stays
+/// tolerated — decode defaults it to "2.0" — pinned in `turbomcp-core`.)
+#[tokio::test]
+async fn wrong_jsonrpc_version_is_invalid_request() {
+    let mut svc = kitchen();
+
+    let mut req = JsonRpcRequest::new(1, "tools/list", Some(json!({ "_meta": draft_meta() })));
+    req.jsonrpc = "1.0".into();
+    let out = call(&mut svc, req).await;
+    assert_eq!(out["error"]["code"], -32600, "{out}");
+    assert!(
+        out["error"]["message"].as_str().unwrap().contains("2.0"),
+        "{out}"
+    );
+
+    let mut note = turbomcp_core::JsonRpcNotification::new("notifications/initialized", None);
+    note.jsonrpc = "1.0".into();
+    let reply = svc
+        .ready()
+        .await
+        .unwrap()
+        .call(JsonRpcMessage::Notification(note))
+        .await
+        .unwrap();
+    assert!(reply.is_none(), "bad-version notification is dropped");
+}

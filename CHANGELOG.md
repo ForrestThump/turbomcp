@@ -9,6 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **HTTP `Accept` validation (transports spec).** The Streamable HTTP
+  endpoint now enforces the spec's content-negotiation MUSTs: a `POST` whose
+  `Accept` header doesn't list both `application/json` and
+  `text/event-stream`, or a `GET` that doesn't list `text/event-stream`,
+  answers `406 Not Acceptable` with a JSON-RPC error body. Matching honors
+  RFC 9110 media ranges (`*/*`, `type/*`, `;q=` parameters), so permissive
+  clients keep working; `DELETE` is exempt (no spec requirement).
+- **`Client::call_tool_task` — client-side core Tasks (`2025-11-25`).** Opt a
+  tool call into task-augmented execution: the request carries the spec's
+  `task` field (with an optional requested `ttl`), and the client drives the
+  lifecycle transparently — `CreateTaskResult` → `tasks/get` polling at the
+  server-suggested cadence → outcome via `tasks/result`, so a `failed` task
+  surfaces the underlying call's JSON-RPC error verbatim and the
+  server-reported TTL bounds polling. Servers without Tasks ignore the
+  augmentation and answer inline (per spec), so the call degrades to a plain
+  `call_tool`; on the draft path (where task creation is server-initiated via
+  the SEP-2663 extension) it behaves exactly like `call_tool`. A plain
+  `call_tool` that receives a spec-violating unsolicited `CreateTaskResult`
+  is now also driven to its final result instead of failing to decode.
+- **JSON-RPC version enforcement.** A frame *declaring* a `jsonrpc` version
+  other than `"2.0"` is now answered with `-32600` Invalid Request (JSON-RPC
+  2.0 §4); a bad-version notification is dropped. Frames omitting the field
+  entirely remain tolerated (decode defaults it).
+- **`TasksExtension::capacity(n)`** — bound the draft task registry (default
+  1024 live tasks). At capacity, taskification degrades gracefully: the next
+  eligible `tools/call` runs synchronously instead of failing, now pinned by
+  an RPC-level test against the real dispatcher.
+- **`sonic_decode` differential fuzz target** — fuzzes the SIMD codec against
+  the `serde_json` baseline (no panics; both backends must agree whenever
+  both accept an input; sonic's re-encoding must be stable and serde-readable).
+  Wired into the CI fuzz-smoke job alongside the existing targets.
+- **`connect_child` subprocess smoke test** — spawns the `hello_world`
+  example as a real child process and runs handshake → `tools/list` →
+  `tools/call` → teardown over its stdio.
+
 - **Test-suite hardening across every crate** (per-crate audit): ~70 new tests
   pinning previously unexercised spec invariants and defensive branches —
   modern-path version rejection (`-32022` + the supported list), capability
@@ -94,6 +129,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`ResourceLink` now clamps out-of-range `size` like `Resource`.** A `size`
+  beyond `i64::MAX` saturates to `i64::MAX` on both wire families instead of
+  being silently dropped (the invariant is "never panic, never go negative,
+  never silently drop").
+- **`Codec::format` removed.** The trait method had no callers and no
+  consumer story (both bundled codecs are JSON; the codec is chosen at
+  compile time) — dropped from the `Codec` contract before the API freezes.
+- **`McpError::http_status` documented as an embedder affordance** — the
+  bundled HTTP transport never consults it (handler errors render as JSON-RPC
+  error bodies over 200, per spec); it exists for surfacing `McpError`
+  through custom HTTP layers.
 - **Dropped the non-spec TCP and Unix-socket server transports**
   (`turbomcp::net`, `turbomcp-transport-stdio::net`). MCP defines stdio and
   Streamable HTTP; no MCP client speaks a raw TCP/Unix socket, and those

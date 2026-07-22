@@ -56,6 +56,7 @@ fn app_with_termination() -> axum::Router {
 fn post(body: Value, headers: &[(&str, &str)]) -> Request<Body> {
     let mut req = Request::builder()
         .method("POST")
+        .header("accept", "application/json, text/event-stream")
         .uri("/mcp")
         .header(header::CONTENT_TYPE, "application/json");
     for (k, v) in headers {

@@ -216,3 +216,27 @@ async fn non_declaring_client_never_gets_a_task() {
     assert_eq!(out["result"]["resultType"], "complete");
     assert!(out["result"].get("taskId").is_none());
 }
+
+/// SEP-2663 graceful degradation at the RPC seam: with the registry at
+/// capacity, an eligible `tools/call` declines taskification and runs
+/// synchronously — no error, no task handle — until a slot frees up.
+#[tokio::test]
+async fn at_capacity_the_augmented_call_runs_synchronously() {
+    let mut svc =
+        VersionDispatcher::new(Tools, MethodRouter::new().with_tools()).with_extension(Arc::new(
+            TasksExtension::new()
+                .task_tools(["echo", "slow"])
+                .capacity(1)
+                .poll_interval_ms(Some(10)),
+        ));
+
+    // Fill the single slot with a long-running task…
+    let created = call_tool(&mut svc, 1, "slow").await;
+    assert_eq!(created["result"]["resultType"], "task", "got {created}");
+
+    // …then the next eligible call answers inline.
+    let out = call_tool(&mut svc, 2, "echo").await;
+    assert_eq!(out["result"]["resultType"], "complete", "got {out}");
+    assert_eq!(out["result"]["content"][0]["text"], "echoed");
+    assert!(out["result"].get("taskId").is_none());
+}

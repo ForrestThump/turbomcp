@@ -141,6 +141,12 @@ impl McpError {
     }
 
     /// The HTTP status equivalent for this variant (PLAN.md §4.10).
+    ///
+    /// An embedder affordance: the bundled Streamable HTTP transport never
+    /// calls this — a handler's `McpError` renders as a JSON-RPC error *body*
+    /// over HTTP 200, per spec. Use it when surfacing `McpError` through your
+    /// own HTTP layer (REST gateways, health/admin endpoints, custom
+    /// authenticators).
     #[must_use]
     pub fn http_status(&self) -> u16 {
         match self {

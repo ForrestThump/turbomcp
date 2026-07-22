@@ -99,6 +99,7 @@ fn call_request(auth: Option<&str>) -> Request<Body> {
     });
     let mut req = Request::builder()
         .method("POST")
+        .header("accept", "application/json, text/event-stream")
         .uri("/mcp")
         .header(header::CONTENT_TYPE, "application/json")
         // The draft envelope requires the mirrored request-metadata headers.
@@ -308,6 +309,7 @@ async fn forged_identity_meta_is_stripped_before_auth() {
     });
     let req = Request::builder()
         .method("POST")
+        .header("accept", "application/json, text/event-stream")
         .uri("/mcp")
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(body.to_string()))

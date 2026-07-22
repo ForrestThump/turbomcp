@@ -110,6 +110,14 @@ pub struct DraftTaskStore {
 impl DraftTaskStore {
     const DEFAULT_CAPACITY: usize = 1024;
 
+    /// A registry bounded at `capacity` live (unexpired) tasks.
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
+        Self {
+            inner: Mutex::new(HashMap::new()),
+            capacity,
+        }
+    }
+
     /// Register a fresh `working` task driven by `cancel`. Returns the seed
     /// [`Task`] to render as a `CreateTaskResult`. `None` if the registry is at
     /// capacity (the caller should answer `-32603` and run the call normally).

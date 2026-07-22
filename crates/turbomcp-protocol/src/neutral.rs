@@ -1500,7 +1500,7 @@ impl From<Content> for draft::ContentBlock {
                     meta: (!r.meta.is_empty()).then_some(draft::MetaObject(r.meta)),
                     mime_type: r.mime_type,
                     name: r.name,
-                    size: r.size.and_then(|s| i64::try_from(s).ok()),
+                    size: r.size.map(|s| i64::try_from(s).unwrap_or(i64::MAX)),
                     title: r.title,
                     type_: "resource_link".to_string(),
                     uri: r.uri,
@@ -1908,7 +1908,7 @@ impl From<Content> for legacy::ContentBlock {
                     meta: r.meta,
                     mime_type: r.mime_type,
                     name: r.name,
-                    size: r.size.and_then(|s| i64::try_from(s).ok()),
+                    size: r.size.map(|s| i64::try_from(s).unwrap_or(i64::MAX)),
                     title: r.title,
                     type_: "resource_link".to_string(),
                     uri: r.uri,
@@ -3626,17 +3626,17 @@ mod tests {
         assert_eq!(back.size, Some(4096));
 
         // Documented clamp: the wire types `size` as i64, so a u64 beyond
-        // i64::MAX saturates on Resource…
+        // i64::MAX saturates — identically on Resource…
         resource.size = Some(u64::MAX);
         let back: Resource = draft::Resource::from(resource.clone()).into();
         assert_eq!(back.size, Some(u64::try_from(i64::MAX).unwrap()));
-        // …and drops entirely on ResourceLink (pinned; values this large are
-        // nonsensical, the invariant is "never panic, never go negative").
+        // …and on ResourceLink (the invariant is "never panic, never go
+        // negative, never silently drop").
         let wire: draft::ContentBlock = Content::resource_link(resource).into();
         let Content::ResourceLink(r) = Content::from(wire) else {
             panic!("resource link survives");
         };
-        assert_eq!(r.size, None);
+        assert_eq!(r.size, Some(u64::try_from(i64::MAX).unwrap()));
     }
 
     #[test]

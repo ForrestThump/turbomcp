@@ -17,6 +17,7 @@ turbomcp-core = { workspace = true }
 turbomcp-codec = { workspace = true }
 turbomcp-service = { workspace = true }
 axum = { workspace = true }
+mime = { workspace = true }
 tower = { workspace = true }
 tower-http = { workspace = true }
 tokio = { workspace = true, features = ["rt", "net", "sync"] }

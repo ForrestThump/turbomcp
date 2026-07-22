@@ -418,6 +418,26 @@ async fn handle<S: McpServerCore>(
     shared: Shared,
     msg: JsonRpcMessage,
 ) -> Result<Option<JsonRpcMessage>, ProtocolError> {
+    // JSON-RPC 2.0 §4: a frame declaring a version other than "2.0" is an
+    // Invalid Request (`-32600`). A frame *omitting* the field is tolerated —
+    // decode defaults it to "2.0" — so only explicit wrong versions land here.
+    if !msg.has_valid_version() {
+        return Ok(match msg {
+            JsonRpcMessage::Request(req) => Some(
+                JsonRpcResponse::error(
+                    req.id,
+                    JsonRpcError {
+                        code: -32600,
+                        message: "invalid jsonrpc version (expected \"2.0\")".to_owned(),
+                        data: None,
+                    },
+                )
+                .into(),
+            ),
+            // No id to answer with: drop the frame.
+            JsonRpcMessage::Notification(_) | JsonRpcMessage::Response(_) => None,
+        });
+    }
     match msg {
         JsonRpcMessage::Request(req) => {
             // Track the request for `notifications/cancelled` while it

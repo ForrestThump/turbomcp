@@ -42,9 +42,6 @@ pub enum CodecError {
 /// time as a concrete type and transports are generic over `C: Codec`. This
 /// keeps the hot path monomorphized — no `dyn` dispatch per message.
 pub trait Codec: Send + Sync + 'static {
-    /// The name of the wire format, for diagnostics (`"json"`, …).
-    fn format(&self) -> &'static str;
-
     /// Serialize `value` into a freshly allocated [`Bytes`] buffer.
     ///
     /// # Errors
@@ -64,10 +61,6 @@ pub trait Codec: Send + Sync + 'static {
 pub struct SerdeJsonCodec;
 
 impl Codec for SerdeJsonCodec {
-    fn format(&self) -> &'static str {
-        "json"
-    }
-
     fn encode<T: Serialize>(&self, value: &T) -> Result<Bytes, CodecError> {
         serde_json::to_vec(value)
             .map(Bytes::from)
@@ -87,10 +80,6 @@ pub struct SonicRsCodec;
 
 #[cfg(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64")))]
 impl Codec for SonicRsCodec {
-    fn format(&self) -> &'static str {
-        "json"
-    }
-
     fn encode<T: Serialize>(&self, value: &T) -> Result<Bytes, CodecError> {
         sonic_rs::to_vec(value)
             .map(Bytes::from)
@@ -205,14 +194,9 @@ mod tests {
     }
 
     #[test]
-    fn format_and_default_codec() {
-        assert_eq!(SerdeJsonCodec.format(), "json");
-        #[cfg(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64")))]
-        assert_eq!(SonicRsCodec.format(), "json");
+    fn default_codec_round_trips() {
         // Whatever DefaultCodec resolves to on this build, it round-trips.
-        let codec = DefaultCodec::default();
-        assert_eq!(codec.format(), "json");
-        roundtrip(codec);
+        roundtrip(DefaultCodec::default());
     }
 
     /// Payloads that historically shake out JSON-backend divergence: non-BMP

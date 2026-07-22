@@ -62,6 +62,7 @@ fn listen_request(id: i64, notifications: Value) -> Request<Body> {
     });
     Request::builder()
         .method("POST")
+        .header("accept", "application/json, text/event-stream")
         .uri("/mcp")
         .header(header::CONTENT_TYPE, "application/json")
         // The draft envelope requires the mirrored request-metadata headers.
@@ -215,6 +216,7 @@ async fn malformed_listen_filter_answers_json_error() {
     });
     let req = Request::builder()
         .method("POST")
+        .header("accept", "application/json, text/event-stream")
         .uri("/mcp")
         .header(header::CONTENT_TYPE, "application/json")
         .header("MCP-Protocol-Version", "2026-07-28")
@@ -311,6 +313,7 @@ async fn legacy_get_stream_delivers_subscribed_resource_updates() {
     });
     let req = Request::builder()
         .method("POST")
+        .header("accept", "application/json, text/event-stream")
         .uri("/mcp")
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(init.to_string()))
@@ -329,6 +332,7 @@ async fn legacy_get_stream_delivers_subscribed_resource_updates() {
     });
     let req = Request::builder()
         .method("POST")
+        .header("accept", "application/json, text/event-stream")
         .uri("/mcp")
         .header(header::CONTENT_TYPE, "application/json")
         .header("mcp-session-id", &sid)
@@ -386,6 +390,7 @@ async fn concurrent_legacy_sessions_get_only_their_own_events() {
     for name in ["client-a", "client-b"] {
         let req = Request::builder()
             .method("POST")
+            .header("accept", "application/json, text/event-stream")
             .uri("/mcp")
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(initialize(name).to_string()))
@@ -409,6 +414,7 @@ async fn concurrent_legacy_sessions_get_only_their_own_events() {
         });
         let req = Request::builder()
             .method("POST")
+            .header("accept", "application/json, text/event-stream")
             .uri("/mcp")
             .header(header::CONTENT_TYPE, "application/json")
             .header("mcp-session-id", sid)

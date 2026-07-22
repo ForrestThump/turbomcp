@@ -34,6 +34,7 @@ fn call_request(id: i64) -> Request<Body> {
     });
     Request::builder()
         .method("POST")
+        .header("accept", "application/json, text/event-stream")
         .uri("/mcp")
         .header(header::CONTENT_TYPE, "application/json")
         // The draft envelope requires the mirrored request-metadata headers.
@@ -138,6 +139,7 @@ fn call_with_token(id: i64) -> Request<Body> {
     });
     Request::builder()
         .method("POST")
+        .header("accept", "application/json, text/event-stream")
         .uri("/mcp")
         .header(header::CONTENT_TYPE, "application/json")
         // The draft envelope requires the mirrored request-metadata headers.

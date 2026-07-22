@@ -39,6 +39,7 @@ async fn macro_server_answers_tools_call_over_http() {
     let app = router(Demo.into_server().build(), HttpConfig::new());
     let req = Request::builder()
         .method("POST")
+        .header("accept", "application/json, text/event-stream")
         .uri("/mcp")
         .header(header::CONTENT_TYPE, "application/json")
         // The draft envelope requires the mirrored request-metadata headers.

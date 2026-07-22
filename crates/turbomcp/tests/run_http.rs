@@ -42,6 +42,7 @@ async fn run_http_serves_and_auto_wires_delete_termination() {
     // initialize → a 2025-11-25 session is minted in the Mcp-Session-Id header.
     let resp = client
         .post(&url)
+        .header("accept", "application/json, text/event-stream")
         .json(&serde_json::json!({
             "jsonrpc": "2.0", "id": 1, "method": "initialize",
             "params": {
@@ -74,6 +75,7 @@ async fn run_http_serves_and_auto_wires_delete_termination() {
     // The session is gone: a follow-up request 404s (re-initialize).
     let resp = client
         .post(&url)
+        .header("accept", "application/json, text/event-stream")
         .header("mcp-session-id", &sid)
         .header("mcp-protocol-version", "2025-11-25")
         .json(&serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }))

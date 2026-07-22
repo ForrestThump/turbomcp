@@ -3569,6 +3569,7 @@ dependencies = [
  "futures",
  "http-body-util",
  "jsonwebtoken",
+ "mime",
  "reqwest 0.13.4",
  "serde_json",
  "thiserror 2.0.18",
