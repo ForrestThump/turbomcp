@@ -5447,8 +5447,11 @@ dependencies = [
  "tower-service",
  "tracing",
  "tracing-subscriber",
+ "turbomcp-core",
  "turbomcp-protocol",
+ "turbomcp-server",
  "turbomcp-transport",
+ "turbomcp-types",
  "uuid",
 ]
 
