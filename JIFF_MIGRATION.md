@@ -66,6 +66,15 @@ Deserialization keeps accepting everything chrono accepted:
 The adapter is re-exported as `turbomcp_protocol::timestamp` so crates that
 only depend on the protocol layer can use it too.
 
+Note that `turbomcp_protocol::types::Timestamp` keeps two distinct
+representations, exactly as it did with chrono:
+
+* the **serialized** form uses the `Z` designator
+  (`2026-11-20T22:15:03.123456Z`), which is what `chrono`'s serde
+  implementation produced;
+* the **`Display`** form uses chrono's `to_rfc3339()` shape, i.e. a numeric
+  `+00:00` offset (`2026-11-20T22:15:03.123456+00:00`).
+
 ### JSON Schema
 
 `schemars` 1.2 supports jiff natively, so the `chrono04` feature was replaced
@@ -109,11 +118,6 @@ Behaviour notes:
 
 * `chrono::Duration::hours(24)` becomes `jiff::SignedDuration::from_hours(24)`;
   `chrono::Duration::zero()` becomes `jiff::SignedDuration::ZERO`.
-* `types::Timestamp`'s `Display` used to print `chrono`'s `to_rfc3339()`
-  (`2026-11-20T22:15:03.123456+00:00`). It now prints the same RFC 3339
-  instant with the `Z` designator
-  (`2026-11-20T22:15:03.123456Z`), which is what the serialized form has
-  always been.
 * The `"date"` format validation no longer calls
   `chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")`. The replacement
   parses the components with `jiff::civil::Date` and keeps chrono's leniency

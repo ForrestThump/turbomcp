@@ -58,7 +58,14 @@ impl Timestamp {
 
 impl fmt::Display for Timestamp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", turbomcp_core::timestamp::format(&self.0))
+        // `chrono`'s `to_rfc3339()` shape: RFC 3339 in UTC with a numeric
+        // `+00:00` offset. The serialized form keeps using the `Z` designator
+        // (see the `Serialize` implementation below).
+        write!(
+            f,
+            "{}",
+            turbomcp_core::timestamp::format_with_offset(&self.0)
+        )
     }
 }
 

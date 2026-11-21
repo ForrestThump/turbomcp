@@ -145,9 +145,30 @@ fn protocol_timestamp_rejects_a_missing_offset() {
 }
 
 #[test]
-fn protocol_timestamp_display_uses_the_chrono_rfc3339_layout() {
+fn protocol_timestamp_display_for_whole_seconds() {
+    // `chrono::DateTime<Utc>::to_rfc3339()` renders UTC with a numeric
+    // `+00:00` offset (while its serde output uses the `Z` designator).
+    // `Display` keeps the pre-migration shape byte for byte.
+    let value = ProtocolTimestamp(timestamp(0));
+    assert_eq!(value.to_string(), "2026-11-20T22:15:03+00:00");
+}
+
+#[test]
+fn protocol_timestamp_display_for_milliseconds() {
+    let value = ProtocolTimestamp(timestamp(100_000_000));
+    assert_eq!(value.to_string(), "2026-11-20T22:15:03.100+00:00");
+}
+
+#[test]
+fn protocol_timestamp_display_for_microseconds() {
     let value = ProtocolTimestamp(timestamp(123_400_000));
-    assert_eq!(value.to_string(), "2026-11-20T22:15:03.123400Z");
+    assert_eq!(value.to_string(), "2026-11-20T22:15:03.123400+00:00");
+}
+
+#[test]
+fn protocol_timestamp_display_for_nanoseconds() {
+    let value = ProtocolTimestamp(timestamp(123_456_789));
+    assert_eq!(value.to_string(), "2026-11-20T22:15:03.123456789+00:00");
 }
 
 #[test]
