@@ -123,6 +123,9 @@
 /// In-memory test client for ergonomic MCP server testing.
 pub mod testing;
 
+/// JSON schema helpers for the chrono compatible representations.
+pub mod schema;
+
 /// TurboMCP version from Cargo.toml
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 

@@ -116,6 +116,28 @@ new `turbomcp_core::duration` module (re-exported as
 pub session_timeout: jiff::SignedDuration,
 ```
 
+The *schema* of a duration is still jiff's: `schemars` describes
+`jiff::SignedDuration` as `{"type": "string", "format": "duration"}`, while
+chrono's `TimeDelta` was described as an array. Nothing in this workspace
+derives `JsonSchema` for `SessionConfig` or `SessionAnalytics`, so the
+difference is latent, but a schema derived for a struct that contains one of
+these durations has to be pointed at the chrono array schema:
+
+```rust
+#[derive(schemars::JsonSchema)]
+struct MyConfig {
+    #[schemars(schema_with = "turbomcp::schema::duration")]
+    session_timeout: jiff::SignedDuration,
+}
+```
+
+The `turbomcp::schema::duration` helper emits exactly the schema `schemars`
+generates for `chrono::TimeDelta`.
+
+The deserializer accepts the full range of `i64` seconds (chrono's
+`TimeDelta` rejected anything outside its own bounds, for example
+`[9223372036854776,0]`); the value is otherwise interpreted the same way.
+
 ### JSON Schema
 
 `schemars` 1.2 supports jiff natively, so the `chrono04` feature was replaced
