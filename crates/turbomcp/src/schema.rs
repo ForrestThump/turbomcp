@@ -16,12 +16,31 @@ use schemars::{Schema, SchemaGenerator};
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// #[derive(schemars::JsonSchema)]
+/// ```
+/// use schemars::JsonSchema;
+/// use serde::Serialize;
+///
+/// #[derive(JsonSchema, Serialize)]
 /// struct MyConfig {
+///     #[serde(with = "turbomcp_core::duration")]
 ///     #[schemars(schema_with = "turbomcp::schema::duration")]
 ///     session_timeout: jiff::SignedDuration,
 /// }
+///
+/// // The schema describes the chrono array shape ...
+/// let schema = schemars::schema_for!(MyConfig);
+/// let value = serde_json::to_value(&schema).expect("schema serializes");
+/// assert_eq!(
+///     value["properties"]["session_timeout"]["type"],
+///     serde_json::json!("array")
+/// );
+///
+/// // ... and that is the shape the value is serialized in.
+/// let config = MyConfig {
+///     session_timeout: jiff::SignedDuration::from_hours(24),
+/// };
+/// let value = serde_json::to_value(&config).expect("config serializes");
+/// assert_eq!(value["session_timeout"], serde_json::json!([86_400, 0]));
 /// ```
 pub fn duration(_: &mut SchemaGenerator) -> Schema {
     schemars::json_schema!({
