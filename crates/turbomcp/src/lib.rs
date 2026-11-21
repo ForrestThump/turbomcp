@@ -152,6 +152,15 @@ pub use turbomcp_core::handler::McpHandler;
 /// chrono based output.
 pub use turbomcp_protocol::timestamp;
 
+/// Re-export of the `jiff` crate.
+///
+/// The public API of TurboMCP exposes `jiff::Timestamp` (and
+/// `jiff::SignedDuration`), so applications that want to name those types do
+/// not have to depend on `jiff` themselves. The version is pinned exactly, so
+/// `turbomcp::jiff` and a direct `jiff` dependency resolve to the same
+/// crate.
+pub use jiff;
+
 // Re-export types
 pub use turbomcp_types::{
     IntoPromptResult, IntoResourceResult, IntoToolResult, Message, Prompt, PromptArgument,

@@ -628,7 +628,7 @@ struct User {
     id: u64,
     name: String,
     email: String,
-    created_at: jiff::Timestamp,
+    created_at: turbomcp::jiff::Timestamp,
 }
 
 #[tool("Create a new user")]
@@ -638,7 +638,7 @@ async fn create_user(&self, request: CreateUserRequest) -> McpResult<User> {
         id: generate_id(),
         name: request.name,
         email: request.email,
-        created_at: jiff::Timestamp::now(),
+        created_at: turbomcp::jiff::Timestamp::now(),
     };
     
     // Save to database

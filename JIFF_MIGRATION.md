@@ -7,6 +7,15 @@ This branch replaces every use of `chrono` in the TurboMCP workspace with
 jiff = { version = "=0.2.35", features = ["serde"] }
 ```
 
+The version is pinned *exactly*, and so should it be in an application that
+uses the public jiff types of this workspace (`jiff::Timestamp`,
+`jiff::SignedDuration`): cargo only unifies a dependency when the
+requirements are compatible, so an application that requires a different
+`jiff` version would end up with two `jiff` crates and could not name the
+timestamp types of `turbomcp` at all. The umbrella crate re-exports the
+pinned crate as `turbomcp::jiff`, which is the easiest way to name the types
+without adding a dependency of your own.
+
 The goal of the migration is twofold:
 
 1. **`chrono` is gone from this repository's dependency graph.** Only two
