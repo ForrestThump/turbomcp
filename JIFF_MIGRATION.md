@@ -61,7 +61,15 @@ Deserialization keeps accepting everything chrono accepted:
 * `Z`, `+00:00` and any other numeric offset (`-05:00`, `+05:30`, ...),
 * with or without a fractional second component,
 * fractional seconds with more than nine digits are truncated (chrono silently
-  dropped the extra digits, `jiff` rejects them).
+  dropped the extra digits, `jiff` rejects them),
+* a leap second (`23:59:60`) is resolved to the instant of the following
+  second, like chrono did.
+
+Everything chrono rejected is rejected as well: an offset without a colon
+(`+0000`), an offset with hours only (`+00`), an offset with a seconds
+component (`+01:00:00`), a comma as the fractional second separator, the
+basic format (`20261120T221503Z`), trailing annotations (`Z[UTC]`), a time
+without seconds and negative years.
 
 The adapter is re-exported as `turbomcp_protocol::timestamp` so crates that
 only depend on the protocol layer can use it too.

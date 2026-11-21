@@ -219,10 +219,15 @@ impl<'de> serde::de::Visitor<'de> for TimestampVisitor {
 }
 
 /// Parse an RFC 3339 timestamp, accepting the same inputs as chrono.
-fn parse(value: &str) -> Result<Timestamp, jiff::Error> {
+fn parse(value: &str) -> Result<Timestamp, String> {
+    if !has_chrono_rfc3339_shape(value) {
+        return Err(format!("`{value}` is not an RFC 3339 timestamp"));
+    }
     let (rewritten, leap_second) = rewrite_leap_second(value);
     let normalized = truncate_fractional_seconds(&rewritten);
-    let timestamp = normalized.parse::<Timestamp>()?;
+    let timestamp = normalized
+        .parse::<Timestamp>()
+        .map_err(|error| error.to_string())?;
     if leap_second {
         // chrono resolved a leap second (`23:59:60`) to the instant of the
         // following second; jiff clamps it to `23:59:59`, so the second is
@@ -231,6 +236,72 @@ fn parse(value: &str) -> Result<Timestamp, jiff::Error> {
     } else {
         Ok(timestamp)
     }
+}
+
+/// Check that a value has the RFC 3339 shape `chrono` accepted.
+///
+/// `jiff` is more permissive than chrono: it also accepts an offset without
+/// a colon (`+0000`), an offset with hours only (`+00`), an offset with
+/// seconds (`+01:00:00`), a comma as the fractional second separator, the
+/// basic format (`20261120T221503Z`), a time without seconds and trailing
+/// annotations (`Z[UTC]`). None of those were accepted by chrono, so they
+/// are rejected here to keep the set of accepted inputs identical.
+fn has_chrono_rfc3339_shape(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    // The shortest accepted value is `YYYY-MM-DDTHH:MM:SSZ`.
+    if bytes.len() < 20 {
+        return false;
+    }
+    // `YYYY-MM-DD`
+    if !is_digits(&bytes[0..4])
+        || bytes[4] != b'-'
+        || !is_digits(&bytes[5..7])
+        || bytes[7] != b'-'
+        || !is_digits(&bytes[8..10])
+    {
+        return false;
+    }
+    // `T`, `t` or a space as the date/time separator.
+    if !matches!(bytes[10], b'T' | b't' | b' ') {
+        return false;
+    }
+    // `HH:MM:SS`
+    if !is_digits(&bytes[11..13])
+        || bytes[13] != b':'
+        || !is_digits(&bytes[14..16])
+        || bytes[16] != b':'
+        || !is_digits(&bytes[17..19])
+    {
+        return false;
+    }
+    let mut index = 19;
+    // An optional fractional second component, separated by a dot.
+    if bytes.get(index) == Some(&b'.') {
+        index += 1;
+        let digits_start = index;
+        while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+            index += 1;
+        }
+        if index == digits_start {
+            return false;
+        }
+    }
+    // The offset: `Z`, `z` or a numeric `+HH:MM` / `-HH:MM`.
+    match bytes.get(index) {
+        Some(b'Z') | Some(b'z') => index + 1 == bytes.len(),
+        Some(b'+') | Some(b'-') => {
+            index + 6 == bytes.len()
+                && is_digits(&bytes[index + 1..index + 3])
+                && bytes[index + 3] == b':'
+                && is_digits(&bytes[index + 4..index + 6])
+        }
+        _ => false,
+    }
+}
+
+/// Check that a slice only contains ASCII digits.
+fn is_digits(bytes: &[u8]) -> bool {
+    !bytes.is_empty() && bytes.iter().all(u8::is_ascii_digit)
 }
 
 /// Rewrite a leap second (`23:59:60`) to `23:59:59`.
@@ -352,6 +423,47 @@ mod tests {
 
         let parsed = parse("2016-12-31T18:59:60-05:00").expect("leap second parses");
         assert_eq!(parsed, Timestamp::new(1_483_228_800, 0).unwrap());
+    }
+
+    #[test]
+    fn inputs_chrono_accepted_are_accepted() {
+        for value in [
+            "2026-11-20T22:15:03Z",
+            "2026-11-20T22:15:03z",
+            "2026-11-20t22:15:03Z",
+            "2026-11-20 22:15:03Z",
+            "2026-11-20T22:15:03.5Z",
+            "2026-11-20T22:15:03.123456789Z",
+            "2026-11-20T22:15:03+00:00",
+            "2026-11-20T22:15:03-05:00",
+            "2026-11-20T22:15:03+05:30",
+        ] {
+            assert!(parse(value).is_ok(), "{value} should be accepted");
+        }
+    }
+
+    #[test]
+    fn inputs_chrono_rejected_are_rejected() {
+        for value in [
+            // An offset without a colon or with hours only.
+            "2026-11-20T22:15:03+0000",
+            "2026-11-20T22:15:03+00",
+            // An offset with a seconds component.
+            "2026-11-20T22:15:03+01:00:00",
+            // A comma as the fractional second separator.
+            "2026-11-20T22:15:03,5Z",
+            // The basic format.
+            "20261120T221503Z",
+            // A trailing annotation.
+            "2026-11-20T22:15:03Z[UTC]",
+            // A time without seconds and a timestamp without an offset.
+            "2026-11-20T22:15Z",
+            "2026-11-20T22:15:03",
+            // A negative year.
+            "-000001-01-01T00:00:00Z",
+        ] {
+            assert!(parse(value).is_err(), "{value} should be rejected");
+        }
     }
 
     #[test]

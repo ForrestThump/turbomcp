@@ -156,6 +156,30 @@ fn protocol_timestamp_parses_leap_seconds_like_chrono() {
 }
 
 #[test]
+fn protocol_timestamp_rejects_the_inputs_chrono_rejected() {
+    for value in [
+        // An offset without a colon or with hours only.
+        "\"2026-11-20T22:15:03+0000\"",
+        "\"2026-11-20T22:15:03+00\"",
+        // An offset with a seconds component.
+        "\"2026-11-20T22:15:03+01:00:00\"",
+        // A comma as the fractional second separator.
+        "\"2026-11-20T22:15:03,5Z\"",
+        // The basic format.
+        "\"20261120T221503Z\"",
+        // A trailing annotation.
+        "\"2026-11-20T22:15:03Z[UTC]\"",
+        // A time without seconds.
+        "\"2026-11-20T22:15Z\"",
+    ] {
+        assert!(
+            serde_json::from_str::<ProtocolTimestamp>(value).is_err(),
+            "{value} should be rejected"
+        );
+    }
+}
+
+#[test]
 fn protocol_timestamp_rejects_a_missing_offset() {
     assert!(serde_json::from_str::<ProtocolTimestamp>("\"2026-11-20T22:15:03\"").is_err());
 }
