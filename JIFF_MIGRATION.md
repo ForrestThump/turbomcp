@@ -63,7 +63,11 @@ Deserialization keeps accepting everything chrono accepted:
 * fractional seconds with more than nine digits are truncated (chrono silently
   dropped the extra digits, `jiff` rejects them),
 * a leap second (`23:59:60`) is resolved to the instant of the following
-  second, like chrono did.
+  second, like chrono did. The *spelling* is not preserved though: chrono
+  rendered a leap second back as `2016-12-31T23:59:60Z` (and
+  `2016-12-31T23:59:60.500Z`), while `jiff::Timestamp` cannot represent a
+  leap second, so the adapter renders `2017-01-01T00:00:00Z` (and
+  `2017-01-01T00:00:00.500Z`).
 
 Everything chrono rejected is rejected as well: an offset without a colon
 (`+0000`), an offset with hours only (`+00`), an offset with a seconds

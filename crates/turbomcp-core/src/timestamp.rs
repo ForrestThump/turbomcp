@@ -25,6 +25,21 @@
 //! boundary uses the helpers in this module to keep the wire shape byte for
 //! byte identical to the pre-migration output.
 //!
+//! # Leap seconds
+//!
+//! There is one case that cannot be preserved: a leap second
+//! (`2016-12-31T23:59:60Z`). `jiff::Timestamp` cannot represent one, so the
+//! adapter resolves it to the instant of the following second and renders
+//! *that*:
+//!
+//! | input                     | chrono round trip             | adapter round trip            |
+//! |---------------------------|-------------------------------|-------------------------------|
+//! | `2016-12-31T23:59:60Z`    | `2016-12-31T23:59:60Z`        | `2017-01-01T00:00:00Z`        |
+//! | `2016-12-31T23:59:60.5Z`  | `2016-12-31T23:59:60.500Z`    | `2017-01-01T00:00:00.500Z`    |
+//!
+//! The *instant* is the same in both cases, only the spelling of the leap
+//! second is lost.
+//!
 //! # Usage
 //!
 //! ```rust
@@ -465,6 +480,19 @@ mod tests {
         ] {
             assert!(parse(value).is_err(), "{value} should be rejected");
         }
+    }
+
+    #[test]
+    fn leap_seconds_are_re_rendered_as_the_following_second() {
+        // chrono kept the `:60` spelling when it rendered a leap second back
+        // to the wire (`2016-12-31T23:59:60Z`). jiff cannot represent a leap
+        // second, so the adapter resolves the instant and renders the
+        // following second instead.
+        let parsed = parse("2016-12-31T23:59:60Z").expect("leap second parses");
+        assert_eq!(format(&parsed), "2017-01-01T00:00:00Z");
+
+        let parsed = parse("2016-12-31T23:59:60.5Z").expect("leap second parses");
+        assert_eq!(format(&parsed), "2017-01-01T00:00:00.500Z");
     }
 
     #[test]

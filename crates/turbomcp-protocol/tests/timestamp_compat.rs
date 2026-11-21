@@ -147,11 +147,23 @@ fn protocol_timestamp_parses_leap_seconds_like_chrono() {
         parsed.0,
         "2017-01-01T00:00:00Z".parse::<Timestamp>().unwrap()
     );
+    // The instant is right, but the spelling is not: chrono rendered the leap
+    // second back as `2016-12-31T23:59:60Z`, while jiff cannot represent one
+    // and the adapter renders the following second.
+    assert_eq!(
+        serde_json::to_string(&parsed).unwrap(),
+        "\"2017-01-01T00:00:00Z\""
+    );
 
     let parsed: ProtocolTimestamp = serde_json::from_str("\"2016-12-31T23:59:60.5Z\"").unwrap();
     assert_eq!(
         parsed.0,
         "2017-01-01T00:00:00.5Z".parse::<Timestamp>().unwrap()
+    );
+    // chrono rendered this one back as `2016-12-31T23:59:60.500Z`.
+    assert_eq!(
+        serde_json::to_string(&parsed).unwrap(),
+        "\"2017-01-01T00:00:00.500Z\""
     );
 }
 
