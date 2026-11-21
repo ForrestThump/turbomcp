@@ -141,6 +141,14 @@ pub use turbomcp_core::context::{REQUEST_META_KEY, RequestContext};
 pub use turbomcp_core::error::{McpError, McpResult};
 pub use turbomcp_core::handler::McpHandler;
 
+/// Chrono-compatible RFC 3339 helpers for `jiff::Timestamp`.
+///
+/// `turbomcp::timestamp::format_with_offset` renders a timestamp the way
+/// `chrono::DateTime<Utc>::to_rfc3339()` did (a numeric `+00:00` offset),
+/// which is handy for applications that print timestamps next to their old
+/// chrono based output.
+pub use turbomcp_protocol::timestamp;
+
 // Re-export types
 pub use turbomcp_types::{
     IntoPromptResult, IntoResourceResult, IntoToolResult, Message, Prompt, PromptArgument,

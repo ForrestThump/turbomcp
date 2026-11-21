@@ -27,7 +27,9 @@ impl CleanServer {
     /// Get current server time
     #[tool]
     async fn current_time(&self) -> McpResult<String> {
-        Ok(jiff::Timestamp::now().to_string())
+        Ok(turbomcp::timestamp::format_with_offset(
+            &jiff::Timestamp::now(),
+        ))
     }
 
     /// Echo back a message

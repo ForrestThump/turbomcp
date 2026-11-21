@@ -25,7 +25,7 @@ impl DemoServer {
     /// Get the current time
     #[tool]
     async fn current_time(&self) -> String {
-        jiff::Timestamp::now().to_string()
+        turbomcp::timestamp::format_with_offset(&jiff::Timestamp::now())
     }
 }
 

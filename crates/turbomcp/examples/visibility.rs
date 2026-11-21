@@ -26,7 +26,9 @@ impl FeatureServer {
         read_only = true
     )]
     async fn get_time(&self) -> McpResult<String> {
-        Ok(jiff::Timestamp::now().to_string())
+        Ok(turbomcp::timestamp::format_with_offset(
+            &jiff::Timestamp::now(),
+        ))
     }
 
     /// Available to everyone
