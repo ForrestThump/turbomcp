@@ -1206,10 +1206,15 @@ mod tests {
 
             assert!(result.is_err());
 
-            // Error should be descriptive, not generic blocking I/O error
+            // Error should be descriptive, not generic blocking I/O error.
+            // The wording of the "file not found" error is platform specific:
+            // Unix reports "No such file or directory", Windows reports "The
+            // system cannot find the file specified".
             let error_msg = format!("{}", result.unwrap_err());
             assert!(
-                error_msg.contains("No such file") || error_msg.contains("not found"),
+                error_msg.contains("No such file")
+                    || error_msg.contains("not found")
+                    || error_msg.contains("cannot find the file"),
                 "Error should be descriptive: {}",
                 error_msg
             );
