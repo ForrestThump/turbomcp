@@ -8,7 +8,9 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use turbomcp_dpop::{DpopAlgorithm, DpopHeader, DpopJwk, DpopPayload, DpopProof};
+use turbomcp_dpop::{
+    DpopAlgorithm, DpopHeader, DpopJwk, DpopKeyManager, DpopPayload, DpopProof, DpopProofGenerator,
+};
 
 /// The current Unix time in whole seconds.
 fn now_seconds() -> i64 {
@@ -51,14 +53,38 @@ fn issued_at_claim_is_a_whole_number_of_seconds() {
     assert!(payload["iat"].is_i64());
 }
 
-#[test]
-fn jiff_and_chrono_agree_on_the_current_integer_second() {
-    // `chrono::Utc::now().timestamp()` (used before the migration) and
-    // `jiff::Timestamp::now().as_second()` (used after it) report the same
-    // integer second for the current time.
-    let jiff_seconds = jiff::Timestamp::now().as_second();
-    let chrono_seconds = now_seconds();
-    assert!((jiff_seconds - chrono_seconds).abs() <= 1);
+#[tokio::test]
+async fn generated_proof_carries_the_current_integer_second() {
+    // The proof generator stamps a proof with the current whole Unix second.
+    // That is the value `chrono::Utc::now().timestamp()` produced before the
+    // migration and the value `jiff::Timestamp::now().as_second()` produces
+    // now, so the `iat` claim has to keep its exact integer-second semantics.
+    let key_manager = std::sync::Arc::new(DpopKeyManager::new_memory().await.expect("key manager"));
+    let generator = DpopProofGenerator::new(key_manager);
+
+    let proof = generator
+        .generate_proof("GET", "https://api.example.com/resource", None)
+        .await
+        .expect("proof is generated");
+
+    let now = now_seconds();
+    assert!(
+        (proof.payload.iat - now).abs() <= 1,
+        "iat should be the current second, got {} (now {now})",
+        proof.payload.iat
+    );
+    assert!(
+        (proof.payload.iat - jiff::Timestamp::now().as_second()).abs() <= 1,
+        "iat should match the jiff integer second, got {}",
+        proof.payload.iat
+    );
+
+    // The claim travels as a whole number of seconds.
+    let payload = serde_json::to_value(&proof.payload).expect("payload serializes");
+    assert!(payload["iat"].is_i64());
+
+    // And a freshly generated proof is not expired.
+    assert!(!proof.is_expired(Duration::from_secs(300)));
 }
 
 #[test]

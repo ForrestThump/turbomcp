@@ -310,6 +310,22 @@ fn civil_date_validation_keeps_chrono_leniency() {
 fn month_end_and_leap_day_arithmetic_follow_the_calendar() {
     use jiff::Span;
     use jiff::civil::Date;
+    use turbomcp_protocol::validation::ProtocolValidator;
+
+    // The protocol's date validation is the crate's own calendar code path:
+    // it accepts the dates that month-end and leap-day arithmetic land on
+    // and rejects the ones that do not exist.
+    //
+    // January has 31 days, February 28 (29 in a leap year) and April 30.
+    assert!(ProtocolValidator::validate_string_format("2026-01-31", "date").is_ok());
+    assert!(ProtocolValidator::validate_string_format("2026-02-28", "date").is_ok());
+    assert!(ProtocolValidator::validate_string_format("2024-02-29", "date").is_ok());
+    assert!(ProtocolValidator::validate_string_format("2026-04-30", "date").is_ok());
+
+    // The dates month-end and leap-day arithmetic clamps to do not exist.
+    assert!(ProtocolValidator::validate_string_format("2026-02-31", "date").is_err());
+    assert!(ProtocolValidator::validate_string_format("2025-02-29", "date").is_err());
+    assert!(ProtocolValidator::validate_string_format("2026-04-31", "date").is_err());
 
     // January 31 + 1 month lands on the last day of February.
     let january_31 = Date::new(2026, 1, 31).unwrap();
@@ -333,6 +349,19 @@ fn daylight_saving_transitions_do_not_disturb_utc_timestamps() {
     use jiff::tz::TimeZone;
 
     let chicago = TimeZone::get("America/Chicago").expect("tzdb is available");
+
+    // The protocol's timestamps are absolute instants, so a daylight saving
+    // transition cannot move them: they keep their instant (and therefore
+    // their serialized form) across the transition.
+    for value in [
+        ProtocolTimestamp("2026-03-08T06:30:00Z".parse::<Timestamp>().unwrap()),
+        ProtocolTimestamp("2026-03-08T08:30:00Z".parse::<Timestamp>().unwrap()),
+    ] {
+        let json = serde_json::to_string(&value).unwrap();
+        let parsed: ProtocolTimestamp = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, value);
+        assert_eq!(parsed.0.as_second() % 60, 0);
+    }
 
     // 2026-03-08 02:30 America/Chicago does not exist (spring forward).
     // jiff resolves it to the first valid instant after the gap.
