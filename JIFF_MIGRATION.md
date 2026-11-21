@@ -204,8 +204,9 @@ that `chrono::Utc::now().timestamp()` produced.
 ### `turbomcp-proxy`
 
 No public type changed. The `generation_date` written into generated
-projects is now jiff's RFC 3339 rendering (`Z` designator instead of
-`+00:00`).
+projects keeps chrono's `to_rfc3339()` shape, i.e. an RFC 3339 timestamp with
+a numeric `+00:00` offset (`2026-11-20T22:15:03.123456+00:00`); it is
+produced with the chrono compatible `format_with_offset` helper.
 
 ### `turbomcp-auth`, `turbomcp-client`
 
@@ -217,9 +218,11 @@ so the dependency was removed instead of being replaced. `turbomcp-auth` uses
 
 ### `turbomcp` (umbrella crate), `demo`, examples
 
-No public type changed. The `current_time` tool of the examples returns
-jiff's RFC 3339 rendering (`Z` designator) instead of chrono's
-`to_rfc3339()` (`+00:00`).
+No public type changed. The `current_time` tool of the examples and of the
+demo keeps chrono's `to_rfc3339()` shape, i.e. an RFC 3339 timestamp with a
+numeric `+00:00` offset (`2026-11-20T22:15:03.123456+00:00`); it is produced
+with the chrono compatible `format_with_offset` helper, which the umbrella
+crate re-exports as `turbomcp::timestamp`.
 
 ---
 

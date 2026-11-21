@@ -181,7 +181,7 @@ impl MyServer {
     /// Gets the current time
     #[tool]
     async fn get_time(&self) -> String {
-        jiff::Timestamp::now().to_string()
+        turbomcp::timestamp::format_with_offset(&jiff::Timestamp::now())
     }
 
     /// Reads a file resource
