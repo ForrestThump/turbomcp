@@ -16,49 +16,73 @@
 //! - [`Timestamp`] - UTC timestamp wrapper
 
 use crate::MessageId;
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use jiff::{SignedDuration, Timestamp as JiffTimestamp};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 
 /// Timestamp wrapper for consistent time handling
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct Timestamp(pub DateTime<Utc>);
+///
+/// The inner value is a [`jiff::Timestamp`], an absolute point in time. It is
+/// serialized as an RFC 3339 string in UTC (for example
+/// `2026-11-20T22:15:03.123456Z`) using exactly the same byte layout that
+/// `chrono::DateTime<Utc>` produced before the jiff migration, so existing
+/// MCP peers keep seeing the timestamps they always saw.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Timestamp(pub JiffTimestamp);
 
 impl Timestamp {
     /// Create a new timestamp with current time
     #[must_use]
     pub fn now() -> Self {
-        Self(Utc::now())
+        Self(JiffTimestamp::now())
     }
 
-    /// Create a timestamp from a DateTime
+    /// Create a timestamp from an absolute instant
     #[must_use]
-    pub const fn from_datetime(dt: DateTime<Utc>) -> Self {
+    pub const fn from_datetime(dt: JiffTimestamp) -> Self {
         Self(dt)
     }
 
-    /// Get the inner DateTime
+    /// Get the inner instant
     #[must_use]
-    pub const fn datetime(&self) -> DateTime<Utc> {
+    pub const fn datetime(&self) -> JiffTimestamp {
         self.0
     }
 
     /// Get duration since this timestamp
     #[must_use]
-    pub fn elapsed(&self) -> chrono::Duration {
-        Utc::now() - self.0
+    pub fn elapsed(&self) -> SignedDuration {
+        JiffTimestamp::now().duration_since(self.0)
     }
 }
 
 impl fmt::Display for Timestamp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0.to_rfc3339())
+        write!(f, "{}", turbomcp_core::timestamp::format(&self.0))
     }
 }
 
-impl From<DateTime<Utc>> for Timestamp {
-    fn from(dt: DateTime<Utc>) -> Self {
+impl From<JiffTimestamp> for Timestamp {
+    fn from(dt: JiffTimestamp) -> Self {
         Self(dt)
+    }
+}
+
+impl Serialize for Timestamp {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        turbomcp_core::timestamp::serialize(&self.0, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Timestamp {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        turbomcp_core::timestamp::deserialize(deserializer).map(Self)
     }
 }
 

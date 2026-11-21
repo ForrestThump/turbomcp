@@ -585,9 +585,9 @@ impl ProtocolValidator {
                 return Err(format!("Invalid URI format: {value}"));
             }
             "date" => {
-                // Use chrono for full month/day-range validation rather than
-                // just ASCII-digit shape checks (rejects 9999-13-99, 2025-1-7).
-                chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
+                // Full month/day-range validation rather than just ASCII-digit
+                // shape checks (rejects 9999-13-99, 2025-02-30).
+                parse_iso_date(value)
                     .map_err(|e| format!("Date must be in ISO 8601 format (YYYY-MM-DD): {e}"))?;
             }
             "date-time" => {
@@ -941,6 +941,60 @@ fn describe_schema_type(schema_type: &Value) -> String {
         Value::String(value) => format!("'{value}'"),
         other => other.to_string(),
     }
+}
+
+/// Parse an ISO 8601 calendar date (`YYYY-MM-DD`).
+///
+/// This keeps the leniency that `chrono::NaiveDate::parse_from_str(value,
+/// "%Y-%m-%d")` had: the year may be written with one to four digits (with an
+/// optional leading `+`) and the month and day with one or two digits, so
+/// `2025-1-7` is still accepted. `jiff::civil::Date` only parses the strict
+/// `YYYY-MM-DD` shape, so the components are split out here and the calendar
+/// date itself is built (and range-checked) with `jiff`.
+///
+/// Trailing input is rejected, matching chrono.
+fn parse_iso_date(value: &str) -> std::result::Result<jiff::civil::Date, String> {
+    let trimmed = value.trim_start();
+    let (year, rest) = take_number(trimmed, 4, "year")?;
+    let rest = rest
+        .strip_prefix('-')
+        .ok_or_else(|| "expected '-' after year".to_string())?;
+    let (month, rest) = take_number(rest, 2, "month")?;
+    let rest = rest
+        .strip_prefix('-')
+        .ok_or_else(|| "expected '-' after month".to_string())?;
+    let (day, rest) = take_number(rest, 2, "day")?;
+    if !rest.is_empty() {
+        return Err("unexpected trailing characters".to_string());
+    }
+
+    let year = i16::try_from(year).map_err(|_| "year is out of range".to_string())?;
+    let month = i8::try_from(month).map_err(|_| "month is out of range".to_string())?;
+    let day = i8::try_from(day).map_err(|_| "day is out of range".to_string())?;
+    jiff::civil::Date::new(year, month, day).map_err(|error| error.to_string())
+}
+
+/// Parse a leading run of at most `max_digits` ASCII digits.
+fn take_number<'a>(
+    input: &'a str,
+    max_digits: usize,
+    name: &str,
+) -> std::result::Result<(i64, &'a str), String> {
+    // chrono accepted an explicit `+` sign on the year.
+    let digits_source = input.strip_prefix('+').unwrap_or(input);
+    let digits = digits_source
+        .bytes()
+        .take_while(u8::is_ascii_digit)
+        .take(max_digits)
+        .count();
+    if digits == 0 {
+        return Err(format!("expected {name} digits"));
+    }
+    let (number, rest) = digits_source.split_at(digits);
+    let value: i64 = number
+        .parse()
+        .map_err(|_| format!("{name} is not a valid number"))?;
+    Ok((value, rest))
 }
 
 impl ValidationContext {

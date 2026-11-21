@@ -48,9 +48,6 @@ tower-service = { version = "0.3", optional = true }
 futures-util = { version = "0.3", optional = true }
 pin-project-lite = { version = "0.2", optional = true }
 
-# Time handling
-chrono = { workspace = true }
-
 # UUID for session/token management
 uuid = { workspace = true, features = ["v4", "v7", "serde"] }
 
@@ -89,6 +86,9 @@ tempfile = { workspace = true }
 wiremock = { workspace = true }
 proptest = { workspace = true }
 rand = { workspace = true }
+# Used by the expiry boundary tests to compute the exact integer-second
+# `iat`/`exp` boundaries (the crate itself works with `std::time::SystemTime`).
+jiff = { workspace = true }
 
 [features]
 # Default features - minimal but useful

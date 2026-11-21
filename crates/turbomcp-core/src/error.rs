@@ -59,7 +59,8 @@ pub struct McpError {
     pub context: Option<alloc::boxed::Box<ErrorContext>>,
     /// Timestamp when error occurred (only with `rich-errors` feature)
     #[cfg(feature = "rich-errors")]
-    pub timestamp: chrono::DateTime<chrono::Utc>,
+    #[serde(with = "crate::timestamp")]
+    pub timestamp: jiff::Timestamp,
 }
 
 /// Additional error context
@@ -155,7 +156,7 @@ impl McpError {
             source_location: None,
             context: None,
             #[cfg(feature = "rich-errors")]
-            timestamp: chrono::Utc::now(),
+            timestamp: jiff::Timestamp::now(),
         }
     }
 
@@ -169,7 +170,7 @@ impl McpError {
     /// Get the error timestamp (only available with `rich-errors` feature)
     #[cfg(feature = "rich-errors")]
     #[must_use]
-    pub const fn timestamp(&self) -> chrono::DateTime<chrono::Utc> {
+    pub const fn timestamp(&self) -> jiff::Timestamp {
         self.timestamp
     }
 

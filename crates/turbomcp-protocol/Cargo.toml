@@ -59,7 +59,7 @@ sonic-rs = { workspace = true, optional = true }
 simdutf8 = { version = "0.1", optional = true }
 
 # Time
-chrono = { workspace = true }
+jiff = { workspace = true }
 uuid = { workspace = true }
 
 # Concurrency

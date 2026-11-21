@@ -389,7 +389,7 @@ impl TowerTransportAdapter {
             "result": {
                 "echo": json_value,
                 "session": session_info.id,
-                "processed_at": chrono::Utc::now().to_rfc3339()
+                "processed_at": turbomcp_protocol::timestamp::format_with_offset(&jiff::Timestamp::now())
             }
         });
 

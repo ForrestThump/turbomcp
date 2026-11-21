@@ -338,6 +338,13 @@ pub use types::{
 // Note: types module is already declared as `pub mod types;` above
 // Users access other types via turbomcp_protocol::types::Tool, etc.
 
+/// Chrono-compatible RFC 3339 (de)serialization helpers for `jiff::Timestamp`.
+///
+/// Re-exported from `turbomcp-core` so crates that only depend on the
+/// protocol layer can keep timestamps byte-compatible with the pre-migration
+/// `chrono` representation.
+pub use turbomcp_core::timestamp;
+
 pub use jsonrpc::{
     JsonRpcError, JsonRpcErrorCode, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse,
     JsonRpcVersion,

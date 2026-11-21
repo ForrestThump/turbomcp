@@ -427,7 +427,7 @@ impl Pkcs11HsmManager {
         // Generate unique key label
         let key_id = format!(
             "dpop_ec_{}_{}",
-            chrono::Utc::now().timestamp(),
+            jiff::Timestamp::now().as_second(),
             uuid::Uuid::new_v4()
         );
 

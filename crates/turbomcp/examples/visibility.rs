@@ -26,7 +26,7 @@ impl FeatureServer {
         read_only = true
     )]
     async fn get_time(&self) -> McpResult<String> {
-        Ok(chrono::Utc::now().to_rfc3339())
+        Ok(jiff::Timestamp::now().to_string())
     }
 
     /// Available to everyone

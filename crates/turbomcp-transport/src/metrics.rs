@@ -99,7 +99,8 @@ pub enum LatencyBucket {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetricsSnapshot {
     /// Timestamp of the snapshot
-    pub timestamp: chrono::DateTime<chrono::Utc>,
+    #[serde(with = "turbomcp_protocol::timestamp")]
+    pub timestamp: jiff::Timestamp,
 
     /// Global metrics
     pub global: GlobalMetrics,
@@ -254,7 +255,7 @@ impl MetricsCollector {
         let latency_percentiles = histogram.calculate_percentiles();
 
         MetricsSnapshot {
-            timestamp: chrono::Utc::now(),
+            timestamp: jiff::Timestamp::now(),
             global,
             transports,
             latency_distribution,

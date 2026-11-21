@@ -341,7 +341,7 @@ pub enum ServerTransportEvent {
         /// Transport type
         transport_type: TransportType,
         /// Connection timestamp
-        timestamp: chrono::DateTime<chrono::Utc>,
+        timestamp: jiff::Timestamp,
     },
     /// Client disconnected  
     ClientDisconnected {
@@ -350,7 +350,7 @@ pub enum ServerTransportEvent {
         /// Disconnect reason
         reason: String,
         /// Disconnection timestamp
-        timestamp: chrono::DateTime<chrono::Utc>,
+        timestamp: jiff::Timestamp,
     },
     /// Server request sent
     ServerRequestSent {
@@ -361,7 +361,7 @@ pub enum ServerTransportEvent {
         /// Request method
         method: String,
         /// Timestamp
-        timestamp: chrono::DateTime<chrono::Utc>,
+        timestamp: jiff::Timestamp,
     },
     /// Server request response received
     ServerRequestResponse {
@@ -372,7 +372,7 @@ pub enum ServerTransportEvent {
         /// Success status
         success: bool,
         /// Response timestamp
-        timestamp: chrono::DateTime<chrono::Utc>,
+        timestamp: jiff::Timestamp,
     },
 }
 

@@ -25,7 +25,7 @@ impl DemoServer {
     /// Get the current time
     #[tool]
     async fn current_time(&self) -> String {
-        chrono::Utc::now().to_rfc3339()
+        jiff::Timestamp::now().to_string()
     }
 }
 

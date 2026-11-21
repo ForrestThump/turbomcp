@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
+use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
 
 /// Client capabilities for server-initiated requests
@@ -101,9 +101,11 @@ pub struct ClientSession {
     /// Client name (optional, human-readable)
     pub client_name: Option<String>,
     /// When the client connected
-    pub connected_at: DateTime<Utc>,
+    #[serde(with = "turbomcp_core::timestamp")]
+    pub connected_at: Timestamp,
     /// Last activity timestamp
-    pub last_activity: DateTime<Utc>,
+    #[serde(with = "turbomcp_core::timestamp")]
+    pub last_activity: Timestamp,
     /// Number of requests made
     pub request_count: usize,
     /// Transport type (stdio, http, websocket, etc.)
@@ -120,7 +122,7 @@ impl ClientSession {
     /// Create a new client session
     #[must_use]
     pub fn new(client_id: String, transport_type: String) -> Self {
-        let now = Utc::now();
+        let now = Timestamp::now();
         Self {
             client_id,
             client_name: None,
@@ -136,7 +138,7 @@ impl ClientSession {
 
     /// Update activity timestamp and increment request count
     pub fn update_activity(&mut self) {
-        self.last_activity = Utc::now();
+        self.last_activity = Timestamp::now();
         self.request_count += 1;
     }
 
@@ -153,14 +155,14 @@ impl ClientSession {
 
     /// Get session duration
     #[must_use]
-    pub fn session_duration(&self) -> chrono::Duration {
-        self.last_activity - self.connected_at
+    pub fn session_duration(&self) -> SignedDuration {
+        self.last_activity.duration_since(self.connected_at)
     }
 
     /// Check if session is idle (no activity for specified duration)
     #[must_use]
-    pub fn is_idle(&self, idle_threshold: chrono::Duration) -> bool {
-        Utc::now() - self.last_activity > idle_threshold
+    pub fn is_idle(&self, idle_threshold: SignedDuration) -> bool {
+        Timestamp::now().duration_since(self.last_activity) > idle_threshold
     }
 }
 

@@ -3,7 +3,6 @@
 //! This module provides the main `RustCodeGenerator` that converts a `ServerSpec`
 //! into a complete Rust project with Cargo.toml and source files.
 
-use chrono::Utc;
 use convert_case::{Case, Casing};
 
 use crate::error::ProxyResult;
@@ -176,7 +175,7 @@ impl RustCodeGenerator {
         MainContext {
             server_name: self.spec.server_info.name.clone(),
             server_version: self.spec.server_info.version.clone(),
-            generation_date: Utc::now().to_rfc3339(),
+            generation_date: jiff::Timestamp::now().to_string(),
             frontend_type: config.frontend_type.to_string(),
             backend_type: config.backend_type.to_string(),
             has_http: config.frontend_type == FrontendType::Http,

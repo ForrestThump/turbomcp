@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp as JiffTimestamp;
 use serde::{Deserialize, Serialize};
 
 use crate::types::Timestamp;
@@ -60,7 +60,8 @@ pub enum ResponseStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestInfo {
     /// The timestamp when the request was received.
-    pub timestamp: DateTime<Utc>,
+    #[serde(with = "turbomcp_core::timestamp")]
+    pub timestamp: JiffTimestamp,
     /// The identifier of the client that made the request.
     pub client_id: String,
     /// The name of the tool or method that was called.
@@ -116,7 +117,7 @@ impl RequestInfo {
     #[must_use]
     pub fn new(client_id: String, method_name: String, parameters: serde_json::Value) -> Self {
         Self {
-            timestamp: Utc::now(),
+            timestamp: JiffTimestamp::now(),
             client_id,
             method_name,
             parameters,

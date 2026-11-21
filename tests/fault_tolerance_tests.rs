@@ -82,7 +82,7 @@ mod fault_injection {
                     let value = json!({
                         "thread_id": thread_id,
                         "iteration": i,
-                        "timestamp": chrono::Utc::now().to_rfc3339()
+                        "timestamp": jiff::Timestamp::now().to_string()
                     });
 
                     // Rapid fire operations that could cause corruption

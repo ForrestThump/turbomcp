@@ -25,7 +25,7 @@ impl TaggedServer {
     /// A readonly operation - safe to call
     #[tool(description = "Get current timestamp", tags = ["readonly", "public"])]
     async fn get_timestamp(&self) -> McpResult<String> {
-        Ok(chrono::Utc::now().to_rfc3339())
+        Ok(jiff::Timestamp::now().to_string())
     }
 
     /// An admin-only operation
