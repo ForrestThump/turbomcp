@@ -47,9 +47,12 @@ fn proof_with_issued_at(issued_at: i64) -> DpopProof {
 
 #[test]
 fn issued_at_claim_is_a_whole_number_of_seconds() {
-    let proof = proof_with_issued_at(now_seconds());
+    // The clock is read once, so the claim and the expectation cannot end up
+    // on different seconds.
+    let now = now_seconds();
+    let proof = proof_with_issued_at(now);
     let payload = serde_json::to_value(&proof.payload).unwrap();
-    assert_eq!(payload["iat"], serde_json::json!(now_seconds()));
+    assert_eq!(payload["iat"], serde_json::json!(now));
     assert!(payload["iat"].is_i64());
 }
 
