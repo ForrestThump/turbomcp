@@ -628,7 +628,7 @@ struct User {
     id: u64,
     name: String,
     email: String,
-    created_at: chrono::DateTime<chrono::Utc>,
+    created_at: jiff::Timestamp,
 }
 
 #[tool("Create a new user")]
@@ -638,7 +638,7 @@ async fn create_user(&self, request: CreateUserRequest) -> McpResult<User> {
         id: generate_id(),
         name: request.name,
         email: request.email,
-        created_at: chrono::Utc::now(),
+        created_at: jiff::Timestamp::now(),
     };
     
     // Save to database

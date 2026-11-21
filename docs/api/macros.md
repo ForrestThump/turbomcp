@@ -283,8 +283,7 @@ async fn binary_file(&self, uri: String, ctx: &RequestContext) -> McpResult<Reso
 /// Current server time
 #[resource("time://now")]
 async fn current_time(&self, uri: String, ctx: &RequestContext) -> McpResult<ResourceResult> {
-    use chrono::Utc;
-    let now = Utc::now().to_rfc3339();
+    let now = jiff::Timestamp::now().to_string();
     Ok(ResourceResult::text(&uri, now))
 }
 ```

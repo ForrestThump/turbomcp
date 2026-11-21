@@ -151,11 +151,11 @@ let manager = SessionManager::new(1000, some_duration);
 
 // v2.0
 use turbomcp_protocol::{SessionManager, SessionConfig};
-use chrono::Duration;
+use jiff::SignedDuration;
 
 let config = SessionConfig {
     max_sessions: 1000,
-    session_timeout: Duration::hours(24),  // field is session_timeout
+    session_timeout: SignedDuration::from_hours(24),  // field is session_timeout
     max_request_history: 10000,
     max_requests_per_session: Some(10000),
     cleanup_interval: std::time::Duration::from_secs(300),

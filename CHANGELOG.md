@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **chrono replaced by jiff** — every timestamp in the workspace now uses
+  `jiff` (pinned to `=0.2.35`) instead of `chrono`:
+  - `turbomcp_protocol::types::Timestamp` wraps a `jiff::Timestamp`,
+    `ClientSession::{connected_at,last_activity}`, `RequestInfo::timestamp`,
+    `ConnectionMetrics::last_success` and `SessionEvent::timestamp` are
+    `jiff::Timestamp`s, and `chrono::Duration` became
+    `jiff::SignedDuration` (`SessionConfig::session_timeout`,
+    `SessionAnalytics::avg_session_duration`, `ClientSession::session_duration`,
+    `ClientSession::is_idle`).
+  - `turbomcp_core::error::McpError::timestamp` and
+    `turbomcp_transport::metrics::MetricsSnapshot::timestamp` are
+    `jiff::Timestamp`s.
+  - Timestamps keep the exact RFC 3339 representation chrono produced
+    (`2026-11-20T22:15:03.123456Z`, including chrono's `AutoSi` fractional
+    second widths) through the new chrono-compatible serde helpers in
+    `turbomcp_core::timestamp` (re-exported as
+    `turbomcp_protocol::timestamp`).
+  - `schemars` now uses its `jiff02` feature; `jiff::Timestamp` schemas stay
+    `{"type": "string", "format": "date-time"}`.
+  - The `"date"` format validation keeps chrono's `%Y-%m-%d` leniency while
+    validating the calendar date with `jiff::civil::Date`.
+  - See `JIFF_MIGRATION.md` for the full list of public API changes.
+
 ## [3.1.5] - 2026-05-11
 
 Patch release: Streamable HTTP interoperability hardening for RMCP/Codex

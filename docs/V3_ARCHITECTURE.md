@@ -181,7 +181,7 @@ impl MyServer {
     /// Gets the current time
     #[tool]
     async fn get_time(&self) -> String {
-        chrono::Utc::now().to_rfc3339()
+        jiff::Timestamp::now().to_string()
     }
 
     /// Reads a file resource
