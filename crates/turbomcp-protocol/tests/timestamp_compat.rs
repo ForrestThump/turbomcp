@@ -301,6 +301,16 @@ fn civil_date_validation_keeps_chrono_leniency() {
     assert!(ProtocolValidator::validate_string_format("-0001-01-01", "date").is_ok());
     assert!(ProtocolValidator::validate_string_format("-1-01-01", "date").is_ok());
 
+    // The year is read as a whole digit run, like chrono's `%Y` did, and is
+    // then range checked against the calendar `jiff::civil::Date` supports
+    // (-9999 to 9999).
+    assert!(ProtocolValidator::validate_string_format("-9999-01-01", "date").is_ok());
+    assert!(ProtocolValidator::validate_string_format("+9999-01-01", "date").is_ok());
+    assert!(ProtocolValidator::validate_string_format("-12345-01-01", "date").is_err());
+    assert!(ProtocolValidator::validate_string_format("-123456-01-01", "date").is_err());
+    assert!(ProtocolValidator::validate_string_format("+99999-01-01", "date").is_err());
+    assert!(ProtocolValidator::validate_string_format("10000-01-01", "date").is_err());
+
     // Leap day is only valid in a leap year.
     assert!(ProtocolValidator::validate_string_format("2024-02-29", "date").is_ok());
     assert!(ProtocolValidator::validate_string_format("2025-02-29", "date").is_err());

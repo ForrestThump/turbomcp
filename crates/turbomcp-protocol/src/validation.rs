@@ -946,11 +946,11 @@ fn describe_schema_type(schema_type: &Value) -> String {
 /// Parse an ISO 8601 calendar date (`YYYY-MM-DD`).
 ///
 /// This keeps the leniency that `chrono::NaiveDate::parse_from_str(value,
-/// "%Y-%m-%d")` had: the year may be written with one to four digits and an
-/// optional sign, and the month and day with one or two digits, so `2025-1-7`
-/// and `-0001-01-01` are still accepted. `jiff::civil::Date` only parses the
-/// strict `YYYY-MM-DD` shape, so the components are split out here and the
-/// calendar date itself is built (and range-checked) with `jiff`.
+/// "%Y-%m-%d")` had: the month and day may be written with one or two digits
+/// (`2025-1-7`) and the year may carry a sign (`-0001-01-01`). The year is
+/// read as a whole digit run, like chrono's `%Y` did, and is then range
+/// checked against the calendar `jiff::civil::Date` supports (-9999 to 9999),
+/// so a year outside that range is rejected even though chrono accepted it.
 ///
 /// Only the year may carry a sign; a signed month or day (`2025-+1-07`) is
 /// rejected, just like chrono rejected it.
@@ -958,15 +958,15 @@ fn describe_schema_type(schema_type: &Value) -> String {
 /// Trailing input is rejected, matching chrono.
 fn parse_iso_date(value: &str) -> std::result::Result<jiff::civil::Date, String> {
     let trimmed = value.trim_start();
-    let (year, rest) = take_signed_number(trimmed, 4, "year")?;
+    let (year, rest) = take_signed_number(trimmed, None, "year")?;
     let rest = rest
         .strip_prefix('-')
         .ok_or_else(|| "expected '-' after year".to_string())?;
-    let (month, rest) = take_number(rest, 2, "month")?;
+    let (month, rest) = take_number(rest, Some(2), "month")?;
     let rest = rest
         .strip_prefix('-')
         .ok_or_else(|| "expected '-' after month".to_string())?;
-    let (day, rest) = take_number(rest, 2, "day")?;
+    let (day, rest) = take_number(rest, Some(2), "day")?;
     if !rest.is_empty() {
         return Err("unexpected trailing characters".to_string());
     }
@@ -977,17 +977,20 @@ fn parse_iso_date(value: &str) -> std::result::Result<jiff::civil::Date, String>
     jiff::civil::Date::new(year, month, day).map_err(|error| error.to_string())
 }
 
-/// Parse a leading run of at most `max_digits` ASCII digits.
+/// Parse a leading run of ASCII digits, optionally limited to `max_digits`.
 fn take_number<'a>(
     input: &'a str,
-    max_digits: usize,
+    max_digits: Option<usize>,
     name: &str,
 ) -> std::result::Result<(i64, &'a str), String> {
-    let digits = input
-        .bytes()
-        .take_while(u8::is_ascii_digit)
-        .take(max_digits)
-        .count();
+    let digits = match max_digits {
+        Some(max_digits) => input
+            .bytes()
+            .take_while(u8::is_ascii_digit)
+            .take(max_digits)
+            .count(),
+        None => input.bytes().take_while(u8::is_ascii_digit).count(),
+    };
     if digits == 0 {
         return Err(format!("expected {name} digits"));
     }
@@ -998,12 +1001,12 @@ fn take_number<'a>(
     Ok((value, rest))
 }
 
-/// Parse a leading, optionally signed run of at most `max_digits` ASCII digits.
+/// Parse a leading, optionally signed run of ASCII digits.
 ///
 /// Only the year of an ISO 8601 date may carry a sign.
 fn take_signed_number<'a>(
     input: &'a str,
-    max_digits: usize,
+    max_digits: Option<usize>,
     name: &str,
 ) -> std::result::Result<(i64, &'a str), String> {
     let (sign, digits_source) = match input.as_bytes().first() {

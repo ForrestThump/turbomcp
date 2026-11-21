@@ -151,8 +151,13 @@ Behaviour notes:
 * The `"date"` format validation no longer calls
   `chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")`. The replacement
   parses the components with `jiff::civil::Date` and keeps chrono's leniency
-  (a one digit month/day such as `2025-1-7` is still accepted, out of range
-  dates such as `2025-13-01` are still rejected).
+  (a one digit month/day such as `2025-1-7` is still accepted, a signed year
+  such as `-0001-01-01` is still accepted, out of range dates such as
+  `2025-13-01` are still rejected). The year is read as a whole digit run,
+  like chrono's `%Y` did, and is then range checked against the calendar
+  `jiff::civil::Date` supports (-9999 to 9999): a year outside that range
+  (`-12345-01-01`, `+99999-01-01`) is now rejected, even though chrono
+  accepted it.
 
 ### `turbomcp-core`
 
