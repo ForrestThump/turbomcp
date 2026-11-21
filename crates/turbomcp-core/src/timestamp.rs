@@ -496,6 +496,23 @@ mod tests {
     }
 
     #[test]
+    fn the_representable_range_is_accepted() {
+        // `jiff::Timestamp::MAX` is `9999-12-30T22:00:00.999999999Z`; the
+        // last two hours of that day are out of range and were accepted by
+        // chrono.
+        let max = "9999-12-30T22:00:00.999999999Z";
+        assert_eq!(parse(max).expect("the maximum is accepted"), Timestamp::MAX);
+
+        for value in [
+            "9999-12-31T00:00:00Z",
+            "9999-12-31T12:00:00Z",
+            "9999-12-31T23:59:59.999999999Z",
+        ] {
+            assert!(parse(value).is_err(), "{value} is out of range");
+        }
+    }
+
+    #[test]
     fn offsets_are_accepted() {
         let expected = Timestamp::new(1_763_674_503, 0).unwrap();
         assert_eq!(parse("2025-11-20T21:35:03Z").unwrap(), expected);

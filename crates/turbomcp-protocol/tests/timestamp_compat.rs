@@ -168,6 +168,25 @@ fn protocol_timestamp_parses_leap_seconds_like_chrono() {
 }
 
 #[test]
+fn protocol_timestamp_rejects_the_timestamps_out_of_the_representable_range() {
+    // `jiff::Timestamp::MAX` is `9999-12-30T22:00:00.999999999Z`, so the last
+    // two hours of that day are out of range (chrono accepted them).
+    let maximum = serde_json::to_value(ProtocolTimestamp(Timestamp::MAX)).unwrap();
+    assert_eq!(maximum, json!("9999-12-30T22:00:00.999999999Z"));
+
+    for out_of_range in [
+        "\"9999-12-31T00:00:00Z\"",
+        "\"9999-12-31T12:00:00Z\"",
+        "\"9999-12-31T23:59:59.999999999Z\"",
+    ] {
+        assert!(
+            serde_json::from_str::<ProtocolTimestamp>(out_of_range).is_err(),
+            "{out_of_range} is out of range"
+        );
+    }
+}
+
+#[test]
 fn protocol_timestamp_rejects_the_inputs_chrono_rejected() {
     for value in [
         // An offset without a colon or with hours only.

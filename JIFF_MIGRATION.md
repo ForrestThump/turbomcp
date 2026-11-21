@@ -56,7 +56,7 @@ It is used by:
 * `turbomcp_core::error::McpError::timestamp`,
 * `turbomcp_transport::metrics::MetricsSnapshot::timestamp`.
 
-Deserialization keeps accepting everything chrono accepted:
+Deserialization keeps accepting the inputs chrono accepted:
 
 * `Z`, `+00:00` and any other numeric offset (`-05:00`, `+05:30`, ...),
 * with or without a fractional second component,
@@ -74,6 +74,13 @@ Everything chrono rejected is rejected as well: an offset without a colon
 component (`+01:00:00`), a comma as the fractional second separator, the
 basic format (`20261120T221503Z`), trailing annotations (`Z[UTC]`), a time
 without seconds and negative years.
+
+There is one range that is narrower than chrono's: `jiff::Timestamp` covers
+`-009999-01-02T01:59:59Z` to `9999-12-30T22:00:00.999999999Z`, so the last
+two hours of the last representable day are out of range. Timestamps such as
+`9999-12-31T00:00:00Z`, `9999-12-31T12:00:00Z` and
+`9999-12-31T23:59:59.999999999Z` were accepted by chrono and are rejected
+now.
 
 The adapter is re-exported as `turbomcp_protocol::timestamp` so crates that
 only depend on the protocol layer can use it too.
