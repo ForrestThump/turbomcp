@@ -4,8 +4,7 @@
 //! making the proxy accessible to CLI tools and shell scripts.
 
 use serde_json::Value;
-use std::io::Write;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tracing::{debug, error, trace, warn};
 use turbomcp_protocol::jsonrpc::{
     JsonRpcRequest, JsonRpcResponse, JsonRpcResponsePayload, ResponseId,
@@ -254,20 +253,22 @@ impl StdioFrontend {
     }
 
     /// Write a JSON-RPC response to stdout
-    #[allow(clippy::unused_async)]
     async fn write_response(&self, response: &JsonRpcResponse) -> ProxyResult<()> {
         let json = serde_json::to_string(response)?;
 
         trace!("Writing response to stdout: {}", json);
 
-        // Write to stdout (blocking, but fast enough for line-based output)
-        let mut stdout = std::io::stdout();
-        writeln!(stdout, "{json}")
+        // Write to stdout (line based output)
+        let mut stdout = tokio::io::stdout();
+        stdout
+            .write_all(format!("{json}\n").as_bytes())
+            .await
             .map_err(|e| ProxyError::backend(format!("Failed to write to stdout: {e}")))?;
 
         if self.config.flush_after_message {
             stdout
                 .flush()
+                .await
                 .map_err(|e| ProxyError::backend(format!("Failed to flush stdout: {e}")))?;
         }
 
