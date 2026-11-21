@@ -140,6 +140,22 @@ fn protocol_timestamp_parses_non_utc_offset() {
 }
 
 #[test]
+fn protocol_timestamp_parses_leap_seconds_like_chrono() {
+    // chrono resolved `23:59:60` to the instant of the following second.
+    let parsed: ProtocolTimestamp = serde_json::from_str("\"2016-12-31T23:59:60Z\"").unwrap();
+    assert_eq!(
+        parsed.0,
+        "2017-01-01T00:00:00Z".parse::<Timestamp>().unwrap()
+    );
+
+    let parsed: ProtocolTimestamp = serde_json::from_str("\"2016-12-31T23:59:60.5Z\"").unwrap();
+    assert_eq!(
+        parsed.0,
+        "2017-01-01T00:00:00.5Z".parse::<Timestamp>().unwrap()
+    );
+}
+
+#[test]
 fn protocol_timestamp_rejects_a_missing_offset() {
     assert!(serde_json::from_str::<ProtocolTimestamp>("\"2026-11-20T22:15:03\"").is_err());
 }

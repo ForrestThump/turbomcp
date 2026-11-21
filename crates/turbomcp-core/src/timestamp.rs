@@ -38,9 +38,9 @@
 use alloc::borrow::Cow;
 use alloc::string::String;
 use core::fmt;
-use jiff::Timestamp;
 use jiff::fmt::temporal::DateTimePrinter;
 use jiff::tz::Offset;
+use jiff::{SignedDuration, Timestamp};
 use serde::{Deserializer, Serializer};
 
 /// RFC 3339 keeps at most nine fractional second digits.
@@ -220,8 +220,46 @@ impl<'de> serde::de::Visitor<'de> for TimestampVisitor {
 
 /// Parse an RFC 3339 timestamp, accepting the same inputs as chrono.
 fn parse(value: &str) -> Result<Timestamp, jiff::Error> {
-    let normalized = truncate_fractional_seconds(value);
-    normalized.parse::<Timestamp>()
+    let (rewritten, leap_second) = rewrite_leap_second(value);
+    let normalized = truncate_fractional_seconds(&rewritten);
+    let timestamp = normalized.parse::<Timestamp>()?;
+    if leap_second {
+        // chrono resolved a leap second (`23:59:60`) to the instant of the
+        // following second; jiff clamps it to `23:59:59`, so the second is
+        // added back here.
+        Ok(timestamp + SignedDuration::from_secs(1))
+    } else {
+        Ok(timestamp)
+    }
+}
+
+/// Rewrite a leap second (`23:59:60`) to `23:59:59`.
+///
+/// Returns the rewritten value and whether a leap second was present.
+fn rewrite_leap_second(value: &str) -> (Cow<'_, str>, bool) {
+    let Some(separator) = value.find(['T', 't', ' ']) else {
+        return (Cow::Borrowed(value), false);
+    };
+    let time_start = separator + 1;
+    let rest = &value[time_start..];
+    let Some(hours) = rest.find(':') else {
+        return (Cow::Borrowed(value), false);
+    };
+    let Some(minutes) = rest[hours + 1..].find(':') else {
+        return (Cow::Borrowed(value), false);
+    };
+    // `HH:MM:SS` - the seconds start right after the second colon.
+    let seconds_start = time_start + hours + 1 + minutes + 1;
+    let seconds_end = seconds_start + 2;
+    if value.get(seconds_start..seconds_end) != Some("60") {
+        return (Cow::Borrowed(value), false);
+    }
+
+    let mut rewritten = String::with_capacity(value.len());
+    rewritten.push_str(&value[..seconds_start]);
+    rewritten.push_str("59");
+    rewritten.push_str(&value[seconds_end..]);
+    (Cow::Owned(rewritten), true)
 }
 
 /// Truncate a fractional second component to the nine digits RFC 3339 allows.
@@ -300,6 +338,20 @@ mod tests {
         // so the adapter truncates them first.
         let parsed = parse("2025-11-20T21:35:03.1234567890Z").expect("parses");
         assert_eq!(parsed, Timestamp::new(1_763_674_503, 123_456_789).unwrap());
+    }
+
+    #[test]
+    fn leap_seconds_are_resolved_to_the_following_second() {
+        // chrono parsed `23:59:60` as the instant of the next second, jiff
+        // clamps it to `23:59:59`.
+        let parsed = parse("2016-12-31T23:59:60Z").expect("leap second parses");
+        assert_eq!(parsed, Timestamp::new(1_483_228_800, 0).unwrap());
+
+        let parsed = parse("2016-12-31T23:59:60.5Z").expect("leap second parses");
+        assert_eq!(parsed, Timestamp::new(1_483_228_800, 500_000_000).unwrap());
+
+        let parsed = parse("2016-12-31T18:59:60-05:00").expect("leap second parses");
+        assert_eq!(parsed, Timestamp::new(1_483_228_800, 0).unwrap());
     }
 
     #[test]
