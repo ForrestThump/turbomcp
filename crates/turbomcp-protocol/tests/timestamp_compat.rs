@@ -269,6 +269,14 @@ fn civil_date_validation_keeps_chrono_leniency() {
     // migration.
     assert!(ProtocolValidator::validate_string_format("2025-1-7", "date").is_ok());
 
+    // Only the year may carry a sign.
+    assert!(ProtocolValidator::validate_string_format("2025-+1-07", "date").is_err());
+    assert!(ProtocolValidator::validate_string_format("2025-01-+7", "date").is_err());
+
+    // A signed year is accepted, exactly like chrono accepted it.
+    assert!(ProtocolValidator::validate_string_format("-0001-01-01", "date").is_ok());
+    assert!(ProtocolValidator::validate_string_format("-1-01-01", "date").is_ok());
+
     // Leap day is only valid in a leap year.
     assert!(ProtocolValidator::validate_string_format("2024-02-29", "date").is_ok());
     assert!(ProtocolValidator::validate_string_format("2025-02-29", "date").is_err());
