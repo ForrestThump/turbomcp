@@ -43,7 +43,7 @@ http = "1.4"
 url = "2.5"
 
 # Time handling
-chrono = { workspace = true, features = ["serde"] }
+jiff = { workspace = true }
 
 # UUID for nonce generation
 uuid = { workspace = true, features = ["v4", "v7", "serde"] }

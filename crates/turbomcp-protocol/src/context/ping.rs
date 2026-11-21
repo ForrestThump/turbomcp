@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use super::capabilities::PingOrigin;
@@ -39,5 +39,6 @@ pub struct ConnectionMetrics {
     /// Bytes received
     pub bytes_received: Option<u64>,
     /// Last successful communication timestamp
-    pub last_success: Option<DateTime<Utc>>,
+    #[serde(with = "turbomcp_core::timestamp::option")]
+    pub last_success: Option<Timestamp>,
 }

@@ -127,6 +127,8 @@ benchmark_results.md
 !CHANGELOG.md
 !docs/**/*.md
 !**/MIGRATION.md
+# Migration notes for the chrono -> jiff migration
+!JIFF_MIGRATION.md
 
 site
 

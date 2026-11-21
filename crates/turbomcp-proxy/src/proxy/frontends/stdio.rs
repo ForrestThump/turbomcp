@@ -98,8 +98,7 @@ impl StdioFrontend {
                                 line.len(),
                                 MAX_LINE_SIZE
                             )),
-                        )
-                        .await?;
+                        )?;
                         continue;
                     }
 
@@ -122,8 +121,7 @@ impl StdioFrontend {
                         Err(e) => {
                             warn!("Failed to parse JSON-RPC request: {}", e);
                             // Send parse error response
-                            self.write_error_response(None, -32700, "Parse error", None)
-                                .await?;
+                            self.write_error_response(None, -32700, "Parse error", None)?;
                         }
                     }
                 }
@@ -189,34 +187,29 @@ impl StdioFrontend {
             }
             _ => {
                 // Unknown method
-                return self
-                    .write_error_response(
-                        Some(&request.id),
-                        -32601,
-                        "Method not found",
-                        Some(format!("Unknown method: {}", request.method)),
-                    )
-                    .await;
+                return self.write_error_response(
+                    Some(&request.id),
+                    -32601,
+                    "Method not found",
+                    Some(format!("Unknown method: {}", request.method)),
+                );
             }
         };
 
         // Write response
         match result {
-            Ok(result) => self.write_success_response(&request.id, result).await,
-            Err(e) => {
-                self.write_error_response(
-                    Some(&request.id),
-                    -32603,
-                    "Internal error",
-                    Some(e.to_string()),
-                )
-                .await
-            }
+            Ok(result) => self.write_success_response(&request.id, result),
+            Err(e) => self.write_error_response(
+                Some(&request.id),
+                -32603,
+                "Internal error",
+                Some(e.to_string()),
+            ),
         }
     }
 
     /// Write a success response to stdout
-    async fn write_success_response(
+    fn write_success_response(
         &self,
         id: &turbomcp_protocol::MessageId,
         result: Value,
@@ -227,11 +220,11 @@ impl StdioFrontend {
             payload: JsonRpcResponsePayload::Success { result },
         };
 
-        self.write_response(&response).await
+        self.write_response(&response)
     }
 
     /// Write an error response to stdout
-    async fn write_error_response(
+    fn write_error_response(
         &self,
         id: Option<&turbomcp_protocol::MessageId>,
         code: i32,
@@ -250,12 +243,11 @@ impl StdioFrontend {
             payload: JsonRpcResponsePayload::Error { error },
         };
 
-        self.write_response(&response).await
+        self.write_response(&response)
     }
 
     /// Write a JSON-RPC response to stdout
-    #[allow(clippy::unused_async)]
-    async fn write_response(&self, response: &JsonRpcResponse) -> ProxyResult<()> {
+    fn write_response(&self, response: &JsonRpcResponse) -> ProxyResult<()> {
         let json = serde_json::to_string(response)?;
 
         trace!("Writing response to stdout: {}", json);

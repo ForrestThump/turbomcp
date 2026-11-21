@@ -63,7 +63,7 @@ utoipa-swagger-ui = { version = "9.0", features = ["axum"], optional = true }
 # Code generation (optional)
 handlebars = { version = "6.4", optional = true }
 convert_case = { version = "0.11", optional = true }
-chrono = { version = "0.4", optional = true }
+jiff = { workspace = true, optional = true }
 syn = { version = "2", features = ["parsing", "full"], optional = true }
 proc-macro2 = { version = "1", optional = true }
 
@@ -104,7 +104,7 @@ default = ["cli", "runtime", "introspection"]
 introspection = []
 runtime = ["introspection", "dep:turbomcp-server", "axum", "dep:tower", "tower-service", "tower-http", "futures-util", "reqwest", "tokio-tungstenite", "auth"]
 tower = ["runtime"]  # Alias for runtime Tower integration (for consistency with other turbomcp crates)
-codegen = ["handlebars", "convert_case", "chrono", "syn", "proc-macro2"]
+codegen = ["handlebars", "convert_case", "jiff", "syn", "proc-macro2"]
 schema = ["schemars"]
 auth = ["dep:turbomcp-auth", "dep:jsonwebtoken", "turbomcp-auth/jwt"]
 

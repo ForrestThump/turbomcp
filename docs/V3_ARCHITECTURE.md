@@ -181,7 +181,7 @@ impl MyServer {
     /// Gets the current time
     #[tool]
     async fn get_time(&self) -> String {
-        chrono::Utc::now().to_rfc3339()
+        turbomcp::timestamp::format_with_offset(&jiff::Timestamp::now())
     }
 
     /// Reads a file resource

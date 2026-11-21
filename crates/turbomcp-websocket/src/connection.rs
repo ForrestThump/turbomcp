@@ -118,9 +118,10 @@ impl WebSocketBidirectionalTransport {
             conn_state
                 .metadata
                 .insert("session_id".to_string(), json!(self.session_id));
-            conn_state
-                .metadata
-                .insert("connected_at".to_string(), json!(chrono::Utc::now()));
+            conn_state.metadata.insert(
+                "connected_at".to_string(),
+                json!(turbomcp_protocol::timestamp::format(&jiff::Timestamp::now())),
+            );
             conn_state.metadata.insert(
                 "transport_type".to_string(),
                 json!("websocket_bidirectional"),
@@ -327,9 +328,10 @@ impl WebSocketBidirectionalTransport {
         {
             let mut conn_state = self.connection_state.write().await;
             conn_state.server_initiated_enabled = false;
-            conn_state
-                .metadata
-                .insert("disconnected_at".to_string(), json!(chrono::Utc::now()));
+            conn_state.metadata.insert(
+                "disconnected_at".to_string(),
+                json!(turbomcp_protocol::timestamp::format(&jiff::Timestamp::now())),
+            );
         }
 
         // Emit disconnected event
@@ -361,8 +363,7 @@ impl WebSocketBidirectionalTransport {
 
         // Extract connection time from metadata
         if let Some(connected_at) = conn_state.metadata.get("connected_at")
-            && let Ok(timestamp) =
-                serde_json::from_value::<chrono::DateTime<chrono::Utc>>(connected_at.clone())
+            && let Ok(timestamp) = serde_json::from_value::<jiff::Timestamp>(connected_at.clone())
         {
             stats.connected_at = Some(timestamp.into());
         }

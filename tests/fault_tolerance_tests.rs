@@ -82,7 +82,9 @@ mod fault_injection {
                     let value = json!({
                         "thread_id": thread_id,
                         "iteration": i,
-                        "timestamp": chrono::Utc::now().to_rfc3339()
+                        "timestamp": turbomcp_protocol::timestamp::format_with_offset(
+                            &jiff::Timestamp::now(),
+                        )
                     });
 
                     // Rapid fire operations that could cause corruption

@@ -257,7 +257,7 @@ async fn test_comprehensive_auth_flow() {
     state_manager.set(format!("oauth_state_{}", auth_state), json!({
         "client_id": "test_client",
         "redirect_uri": "https://example.com/callback",
-        "created_at": chrono::Utc::now().timestamp()
+        "created_at": jiff::Timestamp::now().as_second()
     }));
     
     // Verify state exists and is valid
@@ -356,7 +356,7 @@ async fn test_comprehensive_performance_simulation() {
             let value = json!({
                 "id": i,
                 "data": format!("test_data_{}", i),
-                "timestamp": chrono::Utc::now().timestamp()
+                "timestamp": jiff::Timestamp::now().as_second()
             });
             state_clone.set(key, value);
         });
@@ -471,7 +471,7 @@ async fn test_comprehensive_resource_cleanup() {
             "id": i,
             "type": "test_resource",
             "data": "x".repeat(1000), // 1KB per resource
-            "created_at": chrono::Utc::now().timestamp()
+            "created_at": jiff::Timestamp::now().as_second()
         });
         state.set(format!("resource_{}", i), resource);
     }
@@ -523,7 +523,7 @@ async fn test_comprehensive_message_lifecycle() {
         id: deserialized_request.id.clone(),
         result: Some(json!({
             "output": "test_output",
-            "processed_at": chrono::Utc::now().timestamp(),
+            "processed_at": jiff::Timestamp::now().as_second(),
             "status": "success"
         })),
         error: None,
@@ -548,7 +548,7 @@ async fn test_comprehensive_message_lifecycle() {
             message: "Internal error".to_string(),
             data: Some(json!({
                 "details": "Test error condition",
-                "timestamp": chrono::Utc::now().timestamp()
+                "timestamp": jiff::Timestamp::now().as_second()
             })),
         }),
     };

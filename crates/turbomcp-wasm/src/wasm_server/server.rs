@@ -438,7 +438,7 @@ impl McpServerBuilder {
     ///
     /// ```ignore
     /// async fn get_time() -> String {
-    ///     chrono::Utc::now().to_string()
+    ///     jiff::Timestamp::now().to_string()
     /// }
     ///
     /// server.tool_no_args("time", "Get current time", get_time)

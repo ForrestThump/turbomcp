@@ -123,6 +123,9 @@
 /// In-memory test client for ergonomic MCP server testing.
 pub mod testing;
 
+/// JSON schema helpers for the chrono compatible representations.
+pub mod schema;
+
 /// TurboMCP version from Cargo.toml
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -140,6 +143,23 @@ pub use turbomcp_macros::{description, prompt, resource, server, tool};
 pub use turbomcp_core::context::{REQUEST_META_KEY, RequestContext};
 pub use turbomcp_core::error::{McpError, McpResult};
 pub use turbomcp_core::handler::McpHandler;
+
+/// Chrono-compatible RFC 3339 helpers for `jiff::Timestamp`.
+///
+/// `turbomcp::timestamp::format_with_offset` renders a timestamp the way
+/// `chrono::DateTime<Utc>::to_rfc3339()` did (a numeric `+00:00` offset),
+/// which is handy for applications that print timestamps next to their old
+/// chrono based output.
+pub use turbomcp_protocol::timestamp;
+
+/// Re-export of the `jiff` crate.
+///
+/// The public API of TurboMCP exposes `jiff::Timestamp` (and
+/// `jiff::SignedDuration`), so applications that want to name those types do
+/// not have to depend on `jiff` themselves. The version is pinned exactly, so
+/// `turbomcp::jiff` and a direct `jiff` dependency resolve to the same
+/// crate.
+pub use jiff;
 
 // Re-export types
 pub use turbomcp_types::{

@@ -15,13 +15,13 @@
 //!
 //! ```rust
 //! use turbomcp_protocol::{SessionManager, SessionConfig};
-//! use chrono::Duration;
+//! use jiff::SignedDuration;
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // Configure session management with custom settings
 //! let config = SessionConfig {
 //!     max_sessions: 1000,                    // Maximum concurrent sessions
-//!     session_timeout: Duration::hours(24), // Session lifetime
+//!     session_timeout: SignedDuration::from_hours(24), // Session lifetime
 //!     max_request_history: 10000,           // Request analytics depth
 //!     max_requests_per_session: Some(10000), // Rate limiting per session
 //!     cleanup_interval: std::time::Duration::from_secs(300),
@@ -68,8 +68,8 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
-use chrono::{DateTime, Duration, Utc};
 use dashmap::DashMap;
+use jiff::{SignedDuration, Timestamp};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use tokio::time::{Interval, interval};
@@ -84,7 +84,8 @@ pub struct SessionConfig {
     /// Maximum number of sessions to track
     pub max_sessions: usize,
     /// Session timeout (inactive sessions will be removed)
-    pub session_timeout: Duration,
+    #[serde(with = "turbomcp_core::duration")]
+    pub session_timeout: SignedDuration,
     /// Maximum request history to keep per session
     pub max_request_history: usize,
     /// Optional hard cap on requests per individual session
@@ -99,7 +100,7 @@ impl Default for SessionConfig {
     fn default() -> Self {
         Self {
             max_sessions: 1000,
-            session_timeout: Duration::hours(24),
+            session_timeout: SignedDuration::from_hours(24),
             max_request_history: 1000,
             max_requests_per_session: None,
             cleanup_interval: StdDuration::from_secs(300), // 5 minutes
@@ -122,7 +123,8 @@ pub struct SessionAnalytics {
     /// Total failed requests
     pub failed_requests: usize,
     /// Average session duration
-    pub avg_session_duration: Duration,
+    #[serde(with = "turbomcp_core::duration")]
+    pub avg_session_duration: SignedDuration,
     /// Most active clients (top 10)
     pub top_clients: Vec<(String, usize)>,
     /// Most used tools/methods (top 10)
@@ -161,14 +163,15 @@ struct SessionStats {
     total_requests: usize,
     successful_requests: usize,
     failed_requests: usize,
-    total_session_duration: Duration,
+    total_session_duration: SignedDuration,
 }
 
 /// Session lifecycle events
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionEvent {
     /// Event timestamp
-    pub timestamp: DateTime<Utc>,
+    #[serde(with = "turbomcp_core::timestamp")]
+    pub timestamp: Timestamp,
     /// Client ID
     pub client_id: String,
     /// Event type
@@ -368,12 +371,12 @@ impl SessionManager {
             .iter()
             .map(|entry| entry.session_duration())
             .reduce(|acc, dur| acc + dur)
-            .unwrap_or_else(Duration::zero);
+            .unwrap_or(SignedDuration::ZERO);
 
         let avg_session_duration = if active_sessions > 0 {
             total_duration / active_sessions as i32
         } else {
-            Duration::zero()
+            SignedDuration::ZERO
         };
 
         // Calculate top clients by request count
@@ -400,7 +403,7 @@ impl SessionManager {
             top_methods.truncate(10);
 
             // Calculate request rate (requests per minute over last hour)
-            let one_hour_ago = Utc::now() - Duration::hours(1);
+            let one_hour_ago = Timestamp::now() - SignedDuration::from_hours(1);
             let recent_requests = history
                 .iter()
                 .filter(|req| req.timestamp > one_hour_ago)
@@ -607,7 +610,7 @@ impl SessionManager {
         pending_elicitations: &Arc<DashMap<String, Vec<ElicitationContext>>>,
         active_completions: &Arc<DashMap<String, Vec<CompletionContext>>>,
     ) {
-        let cutoff_time = Utc::now() - config.session_timeout;
+        let cutoff_time = Timestamp::now() - config.session_timeout;
         let mut expired_sessions = Vec::new();
 
         for entry in sessions.iter() {
@@ -629,7 +632,7 @@ impl SessionManager {
 
                 // Record event
                 let event = SessionEvent {
-                    timestamp: Utc::now(),
+                    timestamp: Timestamp::now(),
                     client_id,
                     event_type: SessionEventType::Expired,
                     metadata: HashMap::new(),
@@ -651,7 +654,7 @@ impl SessionManager {
         metadata: HashMap<String, serde_json::Value>,
     ) {
         let event = SessionEvent {
-            timestamp: Utc::now(),
+            timestamp: Timestamp::now(),
             client_id,
             event_type,
             metadata,
@@ -694,7 +697,7 @@ impl SessionManager {
 
                 // Record eviction as termination event
                 let event = SessionEvent {
-                    timestamp: Utc::now(),
+                    timestamp: Timestamp::now(),
                     client_id: client_id.clone(),
                     event_type: SessionEventType::Terminated,
                     metadata: {

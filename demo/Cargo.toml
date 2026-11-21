@@ -16,4 +16,4 @@ turbomcp = { path = "../crates/turbomcp" }
 tokio = { workspace = true }
 
 # Date/time for demo
-chrono = { version = "0.4", features = ["serde"] }
+jiff = { workspace = true }

@@ -3,7 +3,6 @@
 //! This module provides the main `RustCodeGenerator` that converts a `ServerSpec`
 //! into a complete Rust project with Cargo.toml and source files.
 
-use chrono::Utc;
 use convert_case::{Case, Casing};
 
 use crate::error::ProxyResult;
@@ -176,7 +175,9 @@ impl RustCodeGenerator {
         MainContext {
             server_name: self.spec.server_info.name.clone(),
             server_version: self.spec.server_info.version.clone(),
-            generation_date: Utc::now().to_rfc3339(),
+            generation_date: turbomcp_protocol::timestamp::format_with_offset(
+                &jiff::Timestamp::now(),
+            ),
             frontend_type: config.frontend_type.to_string(),
             backend_type: config.backend_type.to_string(),
             has_http: config.frontend_type == FrontendType::Http,
@@ -645,6 +646,33 @@ mod tests {
         assert!(
             project.cargo_toml.contains("test-server"),
             "Cargo.toml should contain server name"
+        );
+    }
+
+    #[test]
+    fn test_generated_project_uses_the_chrono_rfc3339_shape() {
+        let spec = create_test_spec();
+        let generator = RustCodeGenerator::new(spec).unwrap();
+
+        let config = GenConfig::default();
+        let project = generator.generate(&config).unwrap();
+
+        // The generation date keeps the shape `chrono::DateTime<Utc>::to_rfc3339()`
+        // produced, i.e. a numeric `+00:00` offset instead of the `Z`
+        // designator.
+        let generated_line = project
+            .main_rs
+            .lines()
+            .find(|line| line.starts_with("//! Generated: "))
+            .expect("generated main.rs carries a generation date");
+        let generation_date = generated_line.trim_start_matches("//! Generated: ");
+        assert!(
+            generation_date.ends_with("+00:00"),
+            "generation date should keep the +00:00 offset: {generation_date}"
+        );
+        assert!(
+            generation_date.parse::<jiff::Timestamp>().is_ok(),
+            "generation date should be a valid RFC 3339 timestamp: {generation_date}"
         );
     }
 

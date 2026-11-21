@@ -119,9 +119,14 @@ pub enum HandlerError {
     /// External system error (e.g., UI framework, database)
     #[error("External system error: {source}")]
     External {
-        #[from]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
+}
+
+impl From<Box<dyn std::error::Error + Send + Sync>> for HandlerError {
+    fn from(source: Box<dyn std::error::Error + Send + Sync>) -> Self {
+        Self::External { source }
+    }
 }
 
 impl HandlerError {

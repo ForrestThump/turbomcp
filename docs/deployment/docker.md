@@ -551,7 +551,7 @@ use serde_json::json;
 async fn health_check() -> Json<serde_json::Value> {
     Json(json!({
         "status": "healthy",
-        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "timestamp": turbomcp::timestamp::format_with_offset(&jiff::Timestamp::now()),
         "version": env!("CARGO_PKG_VERSION"),
     }))
 }

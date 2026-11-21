@@ -25,7 +25,9 @@ impl TaggedServer {
     /// A readonly operation - safe to call
     #[tool(description = "Get current timestamp", tags = ["readonly", "public"])]
     async fn get_timestamp(&self) -> McpResult<String> {
-        Ok(chrono::Utc::now().to_rfc3339())
+        Ok(turbomcp::timestamp::format_with_offset(
+            &jiff::Timestamp::now(),
+        ))
     }
 
     /// An admin-only operation

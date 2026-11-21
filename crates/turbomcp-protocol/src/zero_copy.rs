@@ -1206,12 +1206,16 @@ mod tests {
 
             assert!(result.is_err());
 
-            // Error should be descriptive, not generic blocking I/O error
-            let error_msg = format!("{}", result.unwrap_err());
-            assert!(
-                error_msg.contains("No such file") || error_msg.contains("not found"),
-                "Error should be descriptive: {}",
-                error_msg
+            // The error has to be the "file not found" error and not some
+            // other failure. Asserting on the error kind works on every
+            // platform, while the message wording differs between Unix
+            // ("No such file or directory") and Windows ("The system cannot
+            // find the file specified").
+            let error = result.unwrap_err();
+            assert_eq!(
+                error.kind(),
+                std::io::ErrorKind::NotFound,
+                "Error should report that the file was not found: {error}"
             );
         }
 

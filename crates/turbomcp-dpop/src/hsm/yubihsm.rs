@@ -332,7 +332,7 @@ impl YubiHsmManager {
         let key_id = self.get_next_key_id()?;
         let key_label = format!(
             "dpop_ec_{}_{}",
-            chrono::Utc::now().timestamp(),
+            jiff::Timestamp::now().as_second(),
             uuid::Uuid::new_v4()
         );
 

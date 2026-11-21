@@ -33,7 +33,7 @@ rkyv = { version = ">=0.8.13", default-features = false, optional = true, featur
 rancor = { version = "0.1", default-features = false, optional = true, features = ["alloc"] }
 
 # Optional std features (for rich-errors)
-chrono = { version = "0.4", default-features = false, features = ["serde", "clock", "std"], optional = true }
+jiff = { workspace = true, optional = true }
 # UUID v4 for RequestContext::new() request-id generation (std-only; WASM builds
 # skip the UUID path and keep the empty default). Small dep, worth the ergonomics.
 uuid = { version = "1.23", default-features = false, features = ["serde", "v4", "std"], optional = true }
@@ -60,7 +60,7 @@ required-features = ["zero-copy"]
 default = ["std"]
 std = ["serde/std", "serde_json/std", "rkyv?/std", "base64", "uuid", "tokio-util"]
 # Enable rich error context with UUID tracking and timestamps
-rich-errors = ["std", "uuid", "chrono"]
+rich-errors = ["std", "uuid", "jiff"]
 # WASM-specific optimizations
 wasm = []
 # Zero-copy serialization with rkyv

@@ -1,0 +1,500 @@
+//! Wire-compatibility tests for the chrono -> jiff migration.
+//!
+//! The MCP protocol types that carry a timestamp are serialized into
+//! JSON-RPC payloads, so their byte layout must not change when the
+//! implementation swaps `chrono::DateTime<Utc>` for `jiff::Timestamp`.
+//!
+//! The expected strings in this file were produced by `chrono 0.4.44`'s
+//! `serde` implementation (`DateTime<Utc>` -> RFC 3339 in UTC, `Z`
+//! designator, fractional second component sized by chrono's
+//! `SecondsFormat::AutoSi` rule).
+
+use jiff::Timestamp;
+use serde_json::json;
+use turbomcp_protocol::session::{SessionAnalytics, SessionConfig, SessionEvent, SessionEventType};
+use turbomcp_protocol::types::Timestamp as ProtocolTimestamp;
+use turbomcp_protocol::{ClientSession, ConnectionMetrics, RequestInfo};
+
+/// 2026-11-20T22:15:03Z
+const BASE_SECOND: i64 = 1_795_212_903;
+
+/// Build a timestamp with the given nanosecond component.
+fn timestamp(nanos: i32) -> Timestamp {
+    Timestamp::new(BASE_SECOND, nanos).expect("valid timestamp")
+}
+
+#[test]
+fn protocol_timestamp_matches_chrono_json_for_whole_seconds() {
+    let value = ProtocolTimestamp(timestamp(0));
+    assert_eq!(
+        serde_json::to_string(&value).unwrap(),
+        "\"2026-11-20T22:15:03Z\""
+    );
+}
+
+#[test]
+fn protocol_timestamp_matches_chrono_json_for_milliseconds() {
+    let value = ProtocolTimestamp(timestamp(100_000_000));
+    assert_eq!(
+        serde_json::to_string(&value).unwrap(),
+        "\"2026-11-20T22:15:03.100Z\""
+    );
+}
+
+#[test]
+fn protocol_timestamp_matches_chrono_json_for_microseconds() {
+    let value = ProtocolTimestamp(timestamp(123_400_000));
+    assert_eq!(
+        serde_json::to_string(&value).unwrap(),
+        "\"2026-11-20T22:15:03.123400Z\""
+    );
+}
+
+#[test]
+fn protocol_timestamp_matches_chrono_json_for_nanoseconds() {
+    let value = ProtocolTimestamp(timestamp(123_456_789));
+    assert_eq!(
+        serde_json::to_string(&value).unwrap(),
+        "\"2026-11-20T22:15:03.123456789Z\""
+    );
+}
+
+#[test]
+fn request_info_timestamp_matches_chrono_json() {
+    let mut info = RequestInfo::new("client-1".into(), "tools/list".into(), json!({}));
+    info.timestamp = timestamp(123_400_000);
+    let value = serde_json::to_value(&info).unwrap();
+    assert_eq!(value["timestamp"], json!("2026-11-20T22:15:03.123400Z"));
+}
+
+#[test]
+fn session_event_timestamp_matches_chrono_json() {
+    let event = SessionEvent {
+        timestamp: timestamp(100_000_000),
+        client_id: "client-1".into(),
+        event_type: SessionEventType::Created,
+        metadata: Default::default(),
+    };
+    let value = serde_json::to_value(&event).unwrap();
+    assert_eq!(value["timestamp"], json!("2026-11-20T22:15:03.100Z"));
+}
+
+#[test]
+fn client_session_timestamps_match_chrono_json() {
+    let mut session = ClientSession::new("client-1".into(), "websocket".into());
+    session.connected_at = timestamp(0);
+    session.last_activity = timestamp(123_456_789);
+
+    let value = serde_json::to_value(&session).unwrap();
+    assert_eq!(value["connected_at"], json!("2026-11-20T22:15:03Z"));
+    assert_eq!(
+        value["last_activity"],
+        json!("2026-11-20T22:15:03.123456789Z")
+    );
+}
+
+#[test]
+fn optional_connection_metric_timestamp_matches_chrono_json() {
+    let metrics = ConnectionMetrics {
+        rtt_ms: Some(1.0),
+        packet_loss: Some(0.0),
+        uptime_seconds: Some(2),
+        bytes_sent: Some(3),
+        bytes_received: Some(4),
+        last_success: Some(timestamp(123_400_000)),
+    };
+    let value = serde_json::to_value(&metrics).unwrap();
+    assert_eq!(value["last_success"], json!("2026-11-20T22:15:03.123400Z"));
+
+    let metrics = ConnectionMetrics {
+        last_success: None,
+        ..metrics
+    };
+    let value = serde_json::to_value(&metrics).unwrap();
+    assert!(value["last_success"].is_null());
+}
+
+#[test]
+fn protocol_timestamp_parses_zulu_designator() {
+    let parsed: ProtocolTimestamp =
+        serde_json::from_str("\"2026-11-20T22:15:03.123456Z\"").unwrap();
+    assert_eq!(parsed.0, timestamp(123_456_000));
+}
+
+#[test]
+fn protocol_timestamp_parses_explicit_utc_offset() {
+    let parsed: ProtocolTimestamp =
+        serde_json::from_str("\"2026-11-20T22:15:03.123456+00:00\"").unwrap();
+    assert_eq!(parsed.0, timestamp(123_456_000));
+}
+
+#[test]
+fn protocol_timestamp_parses_non_utc_offset() {
+    let parsed: ProtocolTimestamp =
+        serde_json::from_str("\"2026-11-20T17:15:03.123456-05:00\"").unwrap();
+    assert_eq!(parsed.0, timestamp(123_456_000));
+
+    let parsed: ProtocolTimestamp =
+        serde_json::from_str("\"2026-11-21T03:45:03.123456+05:30\"").unwrap();
+    assert_eq!(parsed.0, timestamp(123_456_000));
+}
+
+#[test]
+fn protocol_timestamp_parses_leap_seconds_like_chrono() {
+    // chrono resolved `23:59:60` to the instant of the following second.
+    let parsed: ProtocolTimestamp = serde_json::from_str("\"2016-12-31T23:59:60Z\"").unwrap();
+    assert_eq!(
+        parsed.0,
+        "2017-01-01T00:00:00Z".parse::<Timestamp>().unwrap()
+    );
+    // The instant is right, but the spelling is not: chrono rendered the leap
+    // second back as `2016-12-31T23:59:60Z`, while jiff cannot represent one
+    // and the adapter renders the following second.
+    assert_eq!(
+        serde_json::to_string(&parsed).unwrap(),
+        "\"2017-01-01T00:00:00Z\""
+    );
+
+    let parsed: ProtocolTimestamp = serde_json::from_str("\"2016-12-31T23:59:60.5Z\"").unwrap();
+    assert_eq!(
+        parsed.0,
+        "2017-01-01T00:00:00.5Z".parse::<Timestamp>().unwrap()
+    );
+    // chrono rendered this one back as `2016-12-31T23:59:60.500Z`.
+    assert_eq!(
+        serde_json::to_string(&parsed).unwrap(),
+        "\"2017-01-01T00:00:00.500Z\""
+    );
+}
+
+#[test]
+fn protocol_timestamp_rejects_the_timestamps_out_of_the_representable_range() {
+    // `jiff::Timestamp::MAX` is `9999-12-30T22:00:00.999999999Z`, so the last
+    // two hours of that day are out of range (chrono accepted them).
+    let maximum = serde_json::to_value(ProtocolTimestamp(Timestamp::MAX)).unwrap();
+    assert_eq!(maximum, json!("9999-12-30T22:00:00.999999999Z"));
+
+    for out_of_range in [
+        "\"9999-12-31T00:00:00Z\"",
+        "\"9999-12-31T12:00:00Z\"",
+        "\"9999-12-31T23:59:59.999999999Z\"",
+    ] {
+        assert!(
+            serde_json::from_str::<ProtocolTimestamp>(out_of_range).is_err(),
+            "{out_of_range} is out of range"
+        );
+    }
+}
+
+#[test]
+fn protocol_timestamp_rejects_the_inputs_chrono_rejected() {
+    for value in [
+        // An offset without a colon or with hours only.
+        "\"2026-11-20T22:15:03+0000\"",
+        "\"2026-11-20T22:15:03+00\"",
+        // An offset with a seconds component.
+        "\"2026-11-20T22:15:03+01:00:00\"",
+        // A comma as the fractional second separator.
+        "\"2026-11-20T22:15:03,5Z\"",
+        // The basic format.
+        "\"20261120T221503Z\"",
+        // A trailing annotation.
+        "\"2026-11-20T22:15:03Z[UTC]\"",
+        // A time without seconds.
+        "\"2026-11-20T22:15Z\"",
+    ] {
+        assert!(
+            serde_json::from_str::<ProtocolTimestamp>(value).is_err(),
+            "{value} should be rejected"
+        );
+    }
+}
+
+#[test]
+fn protocol_timestamp_rejects_a_missing_offset() {
+    assert!(serde_json::from_str::<ProtocolTimestamp>("\"2026-11-20T22:15:03\"").is_err());
+}
+
+#[test]
+fn protocol_timestamp_display_for_whole_seconds() {
+    // `chrono::DateTime<Utc>::to_rfc3339()` renders UTC with a numeric
+    // `+00:00` offset (while its serde output uses the `Z` designator).
+    // `Display` keeps the pre-migration shape byte for byte.
+    let value = ProtocolTimestamp(timestamp(0));
+    assert_eq!(value.to_string(), "2026-11-20T22:15:03+00:00");
+}
+
+#[test]
+fn protocol_timestamp_display_for_milliseconds() {
+    let value = ProtocolTimestamp(timestamp(100_000_000));
+    assert_eq!(value.to_string(), "2026-11-20T22:15:03.100+00:00");
+}
+
+#[test]
+fn protocol_timestamp_display_for_microseconds() {
+    let value = ProtocolTimestamp(timestamp(123_400_000));
+    assert_eq!(value.to_string(), "2026-11-20T22:15:03.123400+00:00");
+}
+
+#[test]
+fn protocol_timestamp_display_for_nanoseconds() {
+    let value = ProtocolTimestamp(timestamp(123_456_789));
+    assert_eq!(value.to_string(), "2026-11-20T22:15:03.123456789+00:00");
+}
+
+#[test]
+fn protocol_timestamp_round_trips_through_json() {
+    for nanos in [0, 100_000_000, 123_400_000, 123_456_789] {
+        let value = ProtocolTimestamp(timestamp(nanos));
+        let json = serde_json::to_string(&value).unwrap();
+        let parsed: ProtocolTimestamp = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, value);
+    }
+}
+
+#[test]
+fn elapsed_is_a_signed_duration() {
+    let value = ProtocolTimestamp(timestamp(0));
+    let elapsed = value.elapsed();
+    // The fixture is in the past, so the elapsed time is positive.
+    assert!(elapsed.as_secs() > 0);
+}
+
+#[test]
+fn session_duration_and_idle_use_signed_durations() {
+    let mut session = ClientSession::new("client-1".into(), "websocket".into());
+    let now = Timestamp::now();
+    session.connected_at = now - jiff::SignedDuration::from_secs(120);
+    session.last_activity = now - jiff::SignedDuration::from_secs(60);
+
+    assert_eq!(
+        session.session_duration(),
+        jiff::SignedDuration::from_secs(60)
+    );
+    assert!(!session.is_idle(jiff::SignedDuration::from_secs(120)));
+    assert!(session.is_idle(jiff::SignedDuration::from_secs(30)));
+}
+
+#[test]
+fn integer_second_semantics_match_chrono_timestamp() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    // `chrono::Utc::now().timestamp()` and `jiff::Timestamp::now().as_second()`
+    // both report the number of whole seconds since the Unix epoch.
+    let now = Timestamp::now();
+    let system = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock is after the epoch")
+        .as_secs() as i64;
+    assert!((now.as_second() - system).abs() <= 1);
+
+    // A positive timestamp truncates its sub-second component towards zero,
+    // exactly like chrono.
+    assert_eq!(
+        jiff::Timestamp::new(1_795_212_903, 500_000_000)
+            .unwrap()
+            .as_second(),
+        1_795_212_903
+    );
+
+    // Before the Unix epoch chrono floored while jiff truncates towards
+    // zero. Nothing in this workspace timestamps the past, but the
+    // difference is pinned here so it cannot surprise a future caller.
+    assert_eq!(
+        jiff::Timestamp::new(-1, 500_000_000).unwrap().as_second(),
+        0
+    );
+}
+
+#[test]
+fn civil_date_validation_keeps_chrono_leniency() {
+    use turbomcp_protocol::validation::ProtocolValidator;
+
+    // Strict ISO 8601 shape.
+    assert!(ProtocolValidator::validate_string_format("2025-10-07", "date").is_ok());
+    assert!(ProtocolValidator::validate_string_format("2025-01-01", "date").is_ok());
+
+    // Range checks (month/day/leap year).
+    assert!(ProtocolValidator::validate_string_format("2025-13-01", "date").is_err());
+    assert!(ProtocolValidator::validate_string_format("2025-02-30", "date").is_err());
+    assert!(ProtocolValidator::validate_string_format("10/07/2025", "date").is_err());
+    assert!(ProtocolValidator::validate_string_format("not-a-date", "date").is_err());
+
+    // `chrono`'s `%Y-%m-%d` accepted a one digit month/day, and so does the
+    // migration.
+    assert!(ProtocolValidator::validate_string_format("2025-1-7", "date").is_ok());
+
+    // Only the year may carry a sign.
+    assert!(ProtocolValidator::validate_string_format("2025-+1-07", "date").is_err());
+    assert!(ProtocolValidator::validate_string_format("2025-01-+7", "date").is_err());
+
+    // A signed year is accepted, exactly like chrono accepted it.
+    assert!(ProtocolValidator::validate_string_format("-0001-01-01", "date").is_ok());
+    assert!(ProtocolValidator::validate_string_format("-1-01-01", "date").is_ok());
+
+    // The year is read as a whole digit run, like chrono's `%Y` did, and is
+    // then range checked against the calendar `jiff::civil::Date` supports
+    // (-9999 to 9999).
+    assert!(ProtocolValidator::validate_string_format("-9999-01-01", "date").is_ok());
+    assert!(ProtocolValidator::validate_string_format("+9999-01-01", "date").is_ok());
+    assert!(ProtocolValidator::validate_string_format("-12345-01-01", "date").is_err());
+    assert!(ProtocolValidator::validate_string_format("-123456-01-01", "date").is_err());
+    assert!(ProtocolValidator::validate_string_format("+99999-01-01", "date").is_err());
+    assert!(ProtocolValidator::validate_string_format("10000-01-01", "date").is_err());
+
+    // Leap day is only valid in a leap year.
+    assert!(ProtocolValidator::validate_string_format("2024-02-29", "date").is_ok());
+    assert!(ProtocolValidator::validate_string_format("2025-02-29", "date").is_err());
+}
+
+#[test]
+fn month_end_and_leap_day_arithmetic_follow_the_calendar() {
+    use jiff::Span;
+    use jiff::civil::Date;
+    use turbomcp_protocol::validation::ProtocolValidator;
+
+    // The protocol's date validation is the crate's own calendar code path:
+    // it accepts the dates that month-end and leap-day arithmetic land on
+    // and rejects the ones that do not exist.
+    //
+    // January has 31 days, February 28 (29 in a leap year) and April 30.
+    assert!(ProtocolValidator::validate_string_format("2026-01-31", "date").is_ok());
+    assert!(ProtocolValidator::validate_string_format("2026-02-28", "date").is_ok());
+    assert!(ProtocolValidator::validate_string_format("2024-02-29", "date").is_ok());
+    assert!(ProtocolValidator::validate_string_format("2026-04-30", "date").is_ok());
+
+    // The dates month-end and leap-day arithmetic clamps to do not exist.
+    assert!(ProtocolValidator::validate_string_format("2026-02-31", "date").is_err());
+    assert!(ProtocolValidator::validate_string_format("2025-02-29", "date").is_err());
+    assert!(ProtocolValidator::validate_string_format("2026-04-31", "date").is_err());
+
+    // The arithmetic itself is jiff's; the crate's own code path is the date
+    // validation above, which enforces the same calendar rules.
+    //
+    // January 31 + 1 month lands on the last day of February.
+    let january_31 = Date::new(2026, 1, 31).unwrap();
+    let february = january_31.checked_add(Span::new().months(1)).unwrap();
+    assert_eq!(february, Date::new(2026, 2, 28).unwrap());
+
+    // February 29 (leap year) + 1 year lands on February 28.
+    let leap_day = Date::new(2024, 2, 29).unwrap();
+    let next_year = leap_day.checked_add(Span::new().years(1)).unwrap();
+    assert_eq!(next_year, Date::new(2025, 2, 28).unwrap());
+
+    // February 29 + 4 years is still a leap day.
+    let leap_day = Date::new(2024, 2, 29).unwrap();
+    let four_years = leap_day.checked_add(Span::new().years(4)).unwrap();
+    assert_eq!(four_years, Date::new(2028, 2, 29).unwrap());
+}
+
+#[test]
+fn daylight_saving_transitions_do_not_disturb_utc_timestamps() {
+    use jiff::civil::date;
+    use jiff::tz::TimeZone;
+
+    let chicago = TimeZone::get("America/Chicago").expect("tzdb is available");
+
+    // The protocol's timestamps are absolute instants, so a daylight saving
+    // transition cannot move them: they keep their instant (and therefore
+    // their serialized form) across the transition.
+    for value in [
+        ProtocolTimestamp("2026-03-08T06:30:00Z".parse::<Timestamp>().unwrap()),
+        ProtocolTimestamp("2026-03-08T08:30:00Z".parse::<Timestamp>().unwrap()),
+    ] {
+        let json = serde_json::to_string(&value).unwrap();
+        let parsed: ProtocolTimestamp = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, value);
+        assert_eq!(parsed.0.as_second() % 60, 0);
+    }
+
+    // The transition arithmetic is jiff's; the crate's own code path is the
+    // timestamp round trip above, which has to keep the instant.
+    //
+    // 2026-03-08 02:30 America/Chicago does not exist (spring forward).
+    // jiff resolves it to the first valid instant after the gap.
+    let gap = date(2026, 3, 8).at(2, 30, 0, 0);
+    let resolved = chicago.to_zoned(gap).expect("gap is resolved");
+    assert_eq!(resolved.datetime().hour(), 3);
+    assert_eq!(resolved.offset().seconds(), -5 * 3600);
+    assert_eq!(
+        resolved.timestamp(),
+        "2026-03-08T08:30:00Z".parse::<Timestamp>().unwrap()
+    );
+
+    // 2026-11-01 01:30 America/Chicago is ambiguous (fall back). jiff picks
+    // the earlier (daylight saving) occurrence by default and the later
+    // (standard time) occurrence is exactly one hour further along.
+    let ambiguous = date(2026, 11, 1).at(1, 30, 0, 0);
+    let ambiguous = chicago.to_ambiguous_zoned(ambiguous);
+    assert!(ambiguous.is_ambiguous());
+
+    let earlier = ambiguous.clone().earlier().expect("ambiguity resolved");
+    let later = ambiguous.later().expect("ambiguity resolved");
+    assert_eq!(earlier.offset().seconds(), -5 * 3600);
+    assert_eq!(later.offset().seconds(), -6 * 3600);
+    assert_eq!(
+        later.timestamp().as_second() - earlier.timestamp().as_second(),
+        3600
+    );
+
+    // The default (compatible) resolution is the earlier occurrence.
+    let default = chicago.to_zoned(date(2026, 11, 1).at(1, 30, 0, 0)).unwrap();
+    assert_eq!(default.timestamp(), earlier.timestamp());
+}
+
+#[test]
+fn session_timeout_keeps_the_chrono_duration_shape() {
+    // `chrono::Duration` serialized as `[secs, nanos]`, not as jiff's ISO 8601
+    // duration string.
+    let config = SessionConfig {
+        session_timeout: jiff::SignedDuration::from_hours(24),
+        ..SessionConfig::default()
+    };
+    let value = serde_json::to_value(&config).unwrap();
+    assert_eq!(value["session_timeout"], json!([86_400, 0]));
+}
+
+#[test]
+fn session_timeout_deserializes_the_chrono_duration_shape() {
+    let mut value = serde_json::to_value(SessionConfig::default()).unwrap();
+    value["session_timeout"] = json!([86_400, 0]);
+    let config: SessionConfig = serde_json::from_value(value).unwrap();
+    assert_eq!(config.session_timeout, jiff::SignedDuration::from_hours(24));
+}
+
+#[test]
+fn average_session_duration_keeps_the_chrono_duration_shape() {
+    let analytics = analytics_with(jiff::SignedDuration::from_millis(1500));
+    let value = serde_json::to_value(&analytics).unwrap();
+    assert_eq!(value["avg_session_duration"], json!([1, 500_000_000]));
+}
+
+#[test]
+fn negative_average_session_duration_keeps_the_chrono_duration_shape() {
+    // chrono keeps the fractional part unsigned and carries the sign in the
+    // seconds: -1.5 seconds is `[-2, 500000000]`.
+    let analytics = analytics_with(jiff::SignedDuration::from_millis(-1500));
+    let value = serde_json::to_value(&analytics).unwrap();
+    assert_eq!(value["avg_session_duration"], json!([-2, 500_000_000]));
+
+    let parsed: SessionAnalytics = serde_json::from_value(value).unwrap();
+    assert_eq!(
+        parsed.avg_session_duration,
+        jiff::SignedDuration::from_millis(-1500)
+    );
+}
+
+/// Build a `SessionAnalytics` with the given average session duration.
+fn analytics_with(avg_session_duration: jiff::SignedDuration) -> SessionAnalytics {
+    SessionAnalytics {
+        total_sessions: 0,
+        active_sessions: 0,
+        total_requests: 0,
+        successful_requests: 0,
+        failed_requests: 0,
+        avg_session_duration,
+        top_clients: Vec::new(),
+        top_methods: Vec::new(),
+        requests_per_minute: 0.0,
+    }
+}

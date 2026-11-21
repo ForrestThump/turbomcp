@@ -427,14 +427,14 @@ use turbomcp::types::Timestamp;
 
 // Create timestamp
 let now = Timestamp::now();
-let from_dt = Timestamp::from_datetime(chrono::Utc::now());
+let from_dt = Timestamp::from_datetime(jiff::Timestamp::now());
 
 // Access datetime
 let dt = now.datetime();
 
 // Calculate elapsed time
 let elapsed = now.elapsed();
-println!("Elapsed: {}ms", elapsed.num_milliseconds());
+println!("Elapsed: {}ms", elapsed.as_millis());
 
 // Formatting
 println!("Time: {}", now);  // RFC3339 format
