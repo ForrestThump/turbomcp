@@ -368,6 +368,9 @@ fn month_end_and_leap_day_arithmetic_follow_the_calendar() {
     assert!(ProtocolValidator::validate_string_format("2025-02-29", "date").is_err());
     assert!(ProtocolValidator::validate_string_format("2026-04-31", "date").is_err());
 
+    // The arithmetic itself is jiff's; the crate's own code path is the date
+    // validation above, which enforces the same calendar rules.
+    //
     // January 31 + 1 month lands on the last day of February.
     let january_31 = Date::new(2026, 1, 31).unwrap();
     let february = january_31.checked_add(Span::new().months(1)).unwrap();
@@ -404,6 +407,9 @@ fn daylight_saving_transitions_do_not_disturb_utc_timestamps() {
         assert_eq!(parsed.0.as_second() % 60, 0);
     }
 
+    // The transition arithmetic is jiff's; the crate's own code path is the
+    // timestamp round trip above, which has to keep the instant.
+    //
     // 2026-03-08 02:30 America/Chicago does not exist (spring forward).
     // jiff resolves it to the first valid instant after the gap.
     let gap = date(2026, 3, 8).at(2, 30, 0, 0);
