@@ -84,6 +84,7 @@ pub struct SessionConfig {
     /// Maximum number of sessions to track
     pub max_sessions: usize,
     /// Session timeout (inactive sessions will be removed)
+    #[serde(with = "turbomcp_core::duration")]
     pub session_timeout: SignedDuration,
     /// Maximum request history to keep per session
     pub max_request_history: usize,
@@ -122,6 +123,7 @@ pub struct SessionAnalytics {
     /// Total failed requests
     pub failed_requests: usize,
     /// Average session duration
+    #[serde(with = "turbomcp_core::duration")]
     pub avg_session_duration: SignedDuration,
     /// Most active clients (top 10)
     pub top_clients: Vec<(String, usize)>,

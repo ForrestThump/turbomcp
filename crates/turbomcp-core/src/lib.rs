@@ -104,6 +104,13 @@ pub mod session;
 #[cfg_attr(docsrs, doc(cfg(feature = "jiff")))]
 pub mod timestamp;
 
+/// Chrono-compatible serde helpers for `jiff::SignedDuration`.
+///
+/// This module is only available when the `jiff` feature is enabled.
+#[cfg(feature = "jiff")]
+#[cfg_attr(docsrs, doc(cfg(feature = "jiff")))]
+pub mod duration;
+
 /// Zero-copy message types using rkyv serialization.
 ///
 /// This module is only available when the `zero-copy` feature is enabled.

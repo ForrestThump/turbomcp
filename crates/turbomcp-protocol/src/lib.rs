@@ -345,6 +345,13 @@ pub use types::{
 /// `chrono` representation.
 pub use turbomcp_core::timestamp;
 
+/// Chrono-compatible serde helpers for `jiff::SignedDuration`.
+///
+/// Re-exported from `turbomcp-core` so crates that only depend on the
+/// protocol layer can keep durations byte-compatible with the pre-migration
+/// `chrono` representation.
+pub use turbomcp_core::duration;
+
 pub use jsonrpc::{
     JsonRpcError, JsonRpcErrorCode, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse,
     JsonRpcVersion,

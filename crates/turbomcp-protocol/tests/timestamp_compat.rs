@@ -11,7 +11,7 @@
 
 use jiff::Timestamp;
 use serde_json::json;
-use turbomcp_protocol::session::{SessionEvent, SessionEventType};
+use turbomcp_protocol::session::{SessionAnalytics, SessionConfig, SessionEvent, SessionEventType};
 use turbomcp_protocol::types::Timestamp as ProtocolTimestamp;
 use turbomcp_protocol::{ClientSession, ConnectionMetrics, RequestInfo};
 
@@ -316,4 +316,61 @@ fn daylight_saving_transitions_do_not_disturb_utc_timestamps() {
     // The default (compatible) resolution is the earlier occurrence.
     let default = chicago.to_zoned(date(2026, 11, 1).at(1, 30, 0, 0)).unwrap();
     assert_eq!(default.timestamp(), earlier.timestamp());
+}
+
+#[test]
+fn session_timeout_keeps_the_chrono_duration_shape() {
+    // `chrono::Duration` serialized as `[secs, nanos]`, not as jiff's ISO 8601
+    // duration string.
+    let config = SessionConfig {
+        session_timeout: jiff::SignedDuration::from_hours(24),
+        ..SessionConfig::default()
+    };
+    let value = serde_json::to_value(&config).unwrap();
+    assert_eq!(value["session_timeout"], json!([86_400, 0]));
+}
+
+#[test]
+fn session_timeout_deserializes_the_chrono_duration_shape() {
+    let mut value = serde_json::to_value(SessionConfig::default()).unwrap();
+    value["session_timeout"] = json!([86_400, 0]);
+    let config: SessionConfig = serde_json::from_value(value).unwrap();
+    assert_eq!(config.session_timeout, jiff::SignedDuration::from_hours(24));
+}
+
+#[test]
+fn average_session_duration_keeps_the_chrono_duration_shape() {
+    let analytics = analytics_with(jiff::SignedDuration::from_millis(1500));
+    let value = serde_json::to_value(&analytics).unwrap();
+    assert_eq!(value["avg_session_duration"], json!([1, 500_000_000]));
+}
+
+#[test]
+fn negative_average_session_duration_keeps_the_chrono_duration_shape() {
+    // chrono keeps the fractional part unsigned and carries the sign in the
+    // seconds: -1.5 seconds is `[-2, 500000000]`.
+    let analytics = analytics_with(jiff::SignedDuration::from_millis(-1500));
+    let value = serde_json::to_value(&analytics).unwrap();
+    assert_eq!(value["avg_session_duration"], json!([-2, 500_000_000]));
+
+    let parsed: SessionAnalytics = serde_json::from_value(value).unwrap();
+    assert_eq!(
+        parsed.avg_session_duration,
+        jiff::SignedDuration::from_millis(-1500)
+    );
+}
+
+/// Build a `SessionAnalytics` with the given average session duration.
+fn analytics_with(avg_session_duration: jiff::SignedDuration) -> SessionAnalytics {
+    SessionAnalytics {
+        total_sessions: 0,
+        active_sessions: 0,
+        total_requests: 0,
+        successful_requests: 0,
+        failed_requests: 0,
+        avg_session_duration,
+        top_clients: Vec::new(),
+        top_methods: Vec::new(),
+        requests_per_minute: 0.0,
+    }
 }

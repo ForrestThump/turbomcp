@@ -75,6 +75,28 @@ representations, exactly as it did with chrono:
 * the **`Display`** form uses chrono's `to_rfc3339()` shape, i.e. a numeric
   `+00:00` offset (`2026-11-20T22:15:03.123456+00:00`).
 
+### Durations
+
+`chrono::Duration` serialized as a two element array `[secs, nanos]` with the
+fractional part kept unsigned (and in `0..1_000_000_000`) and the sign carried
+by the seconds:
+
+| duration      | chrono output            |
+|---------------|--------------------------|
+| 24 hours      | `[86400,0]`              |
+| 1.5 seconds   | `[1,500000000]`          |
+| -1.5 seconds  | `[-2,500000000]`         |
+
+`jiff::SignedDuration` serializes as an ISO 8601 duration string (`"PT24H"`),
+which is a different wire format. Durations therefore use the helpers in the
+new `turbomcp_core::duration` module (re-exported as
+`turbomcp_protocol::duration`), which write and read exactly chrono's shape:
+
+```rust
+#[serde(with = "turbomcp_core::duration")]
+pub session_timeout: jiff::SignedDuration,
+```
+
 ### JSON Schema
 
 `schemars` 1.2 supports jiff natively, so the `chrono04` feature was replaced
