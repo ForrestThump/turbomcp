@@ -75,13 +75,20 @@ where
 /// `chrono` keeps the fractional part unsigned and carries the sign in the
 /// seconds; `jiff` keeps the fractional part signed. This converts between
 /// the two representations.
+///
+/// Every duration round trips through this representation, except for the
+/// extreme values of `SignedDuration`: a duration of `i64::MIN` seconds
+/// minus a nanosecond cannot be spelled in chrono's layout (its seconds
+/// would have to go below `i64::MIN`), so the seconds saturate there.
 #[must_use]
 pub fn to_parts(duration: &SignedDuration) -> (i64, i32) {
     let secs = duration.as_secs();
     let nanos = duration.subsec_nanos();
     if nanos < 0 {
         // Floor semantics: -1.5 seconds is -2 seconds plus 500_000_000
-        // nanoseconds.
+        // nanoseconds. `saturating_sub` keeps the extreme durations of
+        // `SignedDuration` representable instead of panicking.
+        debug_assert!(nanos > i32::MIN + NANOS_PER_SEC);
         (secs.saturating_sub(1), nanos + NANOS_PER_SEC)
     } else {
         (secs, nanos)
@@ -138,6 +145,17 @@ mod tests {
     fn rejects_out_of_range_nanoseconds() {
         assert!(serde_json::from_str::<Wrapper>("[0,-1]").is_err());
         assert!(serde_json::from_str::<Wrapper>("[0,1000000000]").is_err());
+    }
+
+    #[test]
+    fn extreme_durations_saturate_instead_of_panicking() {
+        // `i64::MIN` seconds minus a nanosecond has no chrono representation
+        // (its seconds would have to go below `i64::MIN`), so the seconds
+        // saturate.
+        let extreme = SignedDuration::new(i64::MIN, -1);
+        let (secs, nanos) = to_parts(&extreme);
+        assert_eq!(secs, i64::MIN);
+        assert_eq!(nanos, 999_999_999);
     }
 
     #[test]
